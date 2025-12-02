@@ -74,4 +74,5 @@ Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verb
 - Das Audit-Log protokolliert sicherheitsrelevante Aktionen wie Migrationen, Backups, Konsistenz-Reparaturen oder Web-Starts von Scan/Rescan/Filesync samt IP/Key-Markern.【F:SCRIPTS/migrate.php†L1-L94】【F:SCRIPTS/db_backup.php†L1-L118】【F:SCRIPTS/consistency_check.php†L1-L116】【F:WWW/index.php†L5-L94】【F:DB/schema.sql†L193-L202】
 - Dateipfade und Log-Verzeichnisse in `CONFIG/config.php` an die Zielumgebung anpassen; Standardwerte zeigen auf Windows-Laufwerke.【F:CONFIG/config.php†L17-L34】
 - ffmpeg/exiftool sind optional und müssen separat installiert oder in `TOOLS/` bereitgestellt werden.【F:dependencies.txt†L20-L22】【F:CONFIG/config.php†L30-L34】
+- Ergänzende Sicherheitsbewertung und Härtungs-Prioritäten siehe `SECURITY_REVIEW.md` (Angriffsflächen, Internal-Key/IP-Whitelist, Audit-Abdeckung, Schutzempfehlungen).
 
