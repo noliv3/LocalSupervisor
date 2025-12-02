@@ -9,3 +9,4 @@ Scope: gesamtes Repository.
 - Schema-Migrationen werden ausschließlich manuell per `php SCRIPTS/migrate.php` ausgeführt; neue Migrationen liegen in `SCRIPTS/migrations/` und tragen den Dateinamen auch als `version`-Eintrag in `schema_migrations`.
 - Vermeide Try/Catch-Blöcke um Imports (`require`, `include`); Fehler sollen früh sichtbar bleiben.
 - Sicherheitsrelevante Einstellungen (API-Keys, IP-Whitelist, Tokens) liegen in `CONFIG/config.php` und dürfen nicht mit Dummy-Werten in Commits geleakt werden.
+- Betrieb / Heavy Tasks: Vor Migrationen oder Reparaturen zuerst `php SCRIPTS/db_backup.php` ausführen, dann `php SCRIPTS/migrate.php`, anschließend `php SCRIPTS/consistency_check.php` (report-only) und erst danach große Scans/Rescans/Filesync-Läufe (ggf. mit `--limit`/`--offset`).

@@ -38,6 +38,7 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - Neue Migrationen werden als Dateien `NNN_name.php` im Ordner `SCRIPTS/migrations/` abgelegt; der Dateiname (ohne `.php`) muss exakt dem `version`-Eintrag entsprechen und ein Array mit `version`, `description` und einer ausführbaren `run`-Funktion zurückgeben.【F:SCRIPTS/migrations/001_initial_schema.php†L1-L29】
 - Ausführung erfolgt manuell über `php SCRIPTS/migrate.php`; das Skript legt bei Bedarf `schema_migrations` an, sortiert alle Dateien, führt nur fehlende Versionen aus und trägt sie nach Erfolg in die Tabelle ein.【F:SCRIPTS/migrate.php†L1-L113】【F:SCRIPTS/migrate.php†L141-L173】
 - Die Baseline `001_initial_schema` markiert das bestätigte REFERENZSCHEMA_V1 und fügt lediglich einen Eintrag in `schema_migrations` hinzu, falls er noch fehlt.【F:SCRIPTS/migrations/001_initial_schema.php†L8-L29】
+- `003_add_runtime_indexes` ergänzt einen Index auf `media.type`, der Scan- und Rescan-Filter beschleunigt.【F:SCRIPTS/migrations/003_add_runtime_indexes.php†L1-L37】【F:DB/schema.sql†L21-L35】
 - Automatische Migrationen in Web- oder CLI-Scan-Skripten sind nicht vorgesehen; Änderungen müssen immer bewusst über den Runner gestartet werden.【F:SCRIPTS/migrate.php†L1-L6】
 
 ## Konsistenzprüfungen (Schritt 3)
@@ -46,9 +47,14 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - Ergebnisse erscheinen auf STDOUT, werden in `LOGS/consistency_*.log` gespeichert und – nach eingespielter Migration – in `consistency_log` geschrieben.【F:SCRIPTS/consistency_check.php†L51-L100】【F:SCRIPTS/consistency_check.php†L112-L285】
 
 ## Arbeitsabläufe
-- **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten.【F:SCRIPTS/scan_path_cli.php†L12-L71】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
-- **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren.【F:SCRIPTS/rescan_cli.php†L4-L67】【F:SCRIPTS/scan_core.php†L338-L452】
-- **Filesystem-Sync**: `filesync_cli.php` führt `sv_run_filesync` aus, um die Existenz aller `media.path`-Einträge zu prüfen und den Status auf `active`/`missing` zu setzen.【F:SCRIPTS/filesync_cli.php†L4-L56】【F:SCRIPTS/scan_core.php†L454-L534】
+- **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten. Optional begrenzt `--limit=N` die Anzahl der verarbeiteten Dateien pro Lauf.【F:SCRIPTS/scan_path_cli.php†L12-L81】【F:SCRIPTS/scan_core.php†L409-L495】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
+- **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren. Mit `--limit` und `--offset` lassen sich Teilmengen stapelweise bearbeiten.【F:SCRIPTS/rescan_cli.php†L4-L87】【F:SCRIPTS/scan_core.php†L620-L708】
+- **Filesystem-Sync**: `filesync_cli.php` führt `sv_run_filesync` aus, um die Existenz aller `media.path`-Einträge zu prüfen und den Status auf `active`/`missing` zu setzen; `--limit` und `--offset` erlauben Batches.【F:SCRIPTS/filesync_cli.php†L4-L78】【F:SCRIPTS/scan_core.php†L710-L789】
+
+## Betrieb / Heavy Tasks
+- Vor Migrationen oder Reparaturläufen immer ein manuelles Backup ziehen: `php SCRIPTS/db_backup.php` legt Kopien unter `BACKUPS/` (oder `paths.backups`) sowie ein Log unter `LOGS/` ab.【F:SCRIPTS/db_backup.php†L1-L98】
+- Empfohlene Reihenfolge vor größeren Änderungen: `php SCRIPTS/db_backup.php` → `php SCRIPTS/migrate.php` → `php SCRIPTS/consistency_check.php` (report-only) → anschließend erst `scan_path_cli.php`, `rescan_cli.php` oder `filesync_cli.php` mit optionalen Limits starten.
+- Beispielaufrufe für Batches: `php SCRIPTS/scan_path_cli.php "D:\\Import" --limit=250`, `php SCRIPTS/rescan_cli.php --limit=100 --offset=200`, `php SCRIPTS/filesync_cli.php --limit=500`.
 
 ## Weboberfläche
 Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verbindung über `CONFIG/config.php`, Ausgabe der vorhandenen DB-Tabellen (SQLite) sowie Formulare, um Scan-, Rescan- und Filesync-CLI-Skripte im Hintergrund zu starten und Log-Dateien abzulegen.【F:WWW/index.php†L6-L164】
