@@ -35,6 +35,31 @@ try {
     exit(1);
 }
 
+$limit  = null;
+$offset = null;
+
+for ($i = 1; $i < $argc; $i++) {
+    $arg = $argv[$i];
+    if (strpos($arg, '--limit=') === 0) {
+        $limit = (int)substr($arg, strlen('--limit='));
+        continue;
+    }
+    if ($arg === '--limit' && isset($argv[$i + 1])) {
+        $limit = (int)$argv[$i + 1];
+        $i++;
+        continue;
+    }
+    if (strpos($arg, '--offset=') === 0) {
+        $offset = (int)substr($arg, strlen('--offset='));
+        continue;
+    }
+    if ($arg === '--offset' && isset($argv[$i + 1])) {
+        $offset = (int)$argv[$i + 1];
+        $i++;
+        continue;
+    }
+}
+
 require_once $baseDir . '/SCRIPTS/scan_core.php';
 
 $scannerCfg    = $config['scanner'] ?? [];
@@ -51,7 +76,9 @@ try {
         $pathsCfg,
         $scannerCfg,
         $nsfwThreshold,
-        $logger
+        $logger,
+        $limit,
+        $offset
     );
 
     fwrite(STDOUT, sprintf(

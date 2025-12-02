@@ -35,13 +35,31 @@ try {
     exit(1);
 }
 
-if ($argc < 2) {
-    fwrite(STDERR, "Pfad als Argument nötig.\n");
-    fwrite(STDERR, "Beispiel: php SCRIPTS/scan_path_cli.php \"D:\\ImportOrdner\"\n");
-    exit(1);
+$limit    = null;
+$scanPath = null;
+
+for ($i = 1; $i < $argc; $i++) {
+    $arg = $argv[$i];
+    if (strpos($arg, '--limit=') === 0) {
+        $limit = (int)substr($arg, strlen('--limit='));
+        continue;
+    }
+    if ($arg === '--limit' && isset($argv[$i + 1])) {
+        $limit = (int)$argv[$i + 1];
+        $i++;
+        continue;
+    }
+
+    if ($scanPath === null) {
+        $scanPath = $arg;
+    }
 }
 
-$scanPath = $argv[1];
+if ($scanPath === null) {
+    fwrite(STDERR, "Pfad als Argument nötig.\n");
+    fwrite(STDERR, "Beispiel: php SCRIPTS/scan_path_cli.php \"D:\\ImportOrdner\" [--limit=100]\n");
+    exit(1);
+}
 
 require_once $baseDir . '/SCRIPTS/scan_core.php';
 
@@ -60,7 +78,8 @@ try {
         $pathsCfg,
         $scannerCfg,
         $nsfwThreshold,
-        $logger
+        $logger,
+        $limit
     );
 
     fwrite(STDOUT, sprintf(

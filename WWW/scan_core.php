@@ -417,7 +417,8 @@ function sv_run_scan_path(
     array $pathsCfg,
     array $scannerCfg,
     float $nsfwThreshold,
-    ?callable $logger = null
+    ?callable $logger = null,
+    ?int $limit = null
 ): array {
     $inputReal = realpath($inputPath);
     if ($inputReal === false || !is_dir($inputReal)) {
@@ -430,9 +431,11 @@ function sv_run_scan_path(
         $logger("Starte Scan: {$inputReal}");
     }
 
-    $processed = 0;
-    $skipped   = 0;
-    $errors    = 0;
+    $processed    = 0;
+    $skipped      = 0;
+    $errors       = 0;
+    $handledTotal = 0;
+    $limitReached = false;
 
     $dirIt = new RecursiveDirectoryIterator($inputReal, FilesystemIterator::SKIP_DOTS);
     $it    = new RecursiveIteratorIterator($dirIt);
@@ -447,6 +450,11 @@ function sv_run_scan_path(
             $logger("Verarbeite: {$path}");
         }
 
+        if ($limit !== null && $handledTotal >= $limit) {
+            $limitReached = true;
+            break;
+        }
+
         try {
             $ok = sv_import_file($pdo, $path, $inputReal, $pathsCfg, $scannerCfg, $nsfwThreshold, $logger);
             if ($ok) {
@@ -454,8 +462,10 @@ function sv_run_scan_path(
             } else {
                 $skipped++;
             }
+            $handledTotal++;
         } catch (Throwable $e) {
             $errors++;
+            $handledTotal++;
             if ($logger) {
                 $logger("Fehler bei Datei {$path}: " . $e->getMessage());
             }
@@ -463,7 +473,8 @@ function sv_run_scan_path(
     }
 
     if ($logger) {
-        $logger("Scan abgeschlossen. processed={$processed}, skipped={$skipped}, errors={$errors}");
+        $suffix = $limitReached ? ' (Limit erreicht)' : '';
+        $logger("Scan abgeschlossen. processed={$processed}, skipped={$skipped}, errors={$errors}{$suffix}");
     }
 
     return [
@@ -628,7 +639,9 @@ function sv_run_rescan_unscanned(
     array $pathsCfg,
     array $scannerCfg,
     float $nsfwThreshold,
-    ?callable $logger = null
+    ?callable $logger = null,
+    ?int $limit = null,
+    ?int $offset = null
 ): array {
     $sql = "
         SELECT m.*
@@ -639,6 +652,14 @@ function sv_run_rescan_unscanned(
         ORDER BY m.id ASC
     ";
 
+    if ($limit !== null) {
+        $sql .= ' LIMIT ' . max(0, (int)$limit);
+    }
+
+    if ($offset !== null) {
+        $sql .= ' OFFSET ' . max(0, (int)$offset);
+    }
+
     $stmt = $pdo->query($sql);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -646,9 +667,11 @@ function sv_run_rescan_unscanned(
     $processed = 0;
     $skipped   = 0;
     $errors    = 0;
+    $limitHit  = $limit !== null && $total >= $limit;
 
     if ($logger) {
-        $logger("Rescan: {$total} Medien ohne Scan-Ergebnis gefunden.");
+        $limitInfo = $limit !== null ? " (limit={$limit}" . ($offset !== null ? ", offset={$offset}" : '') . ')' : '';
+        $logger("Rescan: {$total} Medien ohne Scan-Ergebnis gefunden{$limitInfo}.");
     }
 
     foreach ($rows as $row) {
@@ -673,7 +696,8 @@ function sv_run_rescan_unscanned(
     }
 
     if ($logger) {
-        $logger("Rescan abgeschlossen. total={$total}, processed={$processed}, skipped={$skipped}, errors={$errors}");
+        $suffix = $limitHit ? ' (Limit erreicht)' : '';
+        $logger("Rescan abgeschlossen. total={$total}, processed={$processed}, skipped={$skipped}, errors={$errors}{$suffix}");
     }
 
     return [
@@ -691,18 +715,32 @@ function sv_run_rescan_unscanned(
  */
 function sv_run_filesync(
     PDO $pdo,
-    ?callable $logger = null
+    ?callable $logger = null,
+    ?int $limit = null,
+    ?int $offset = null
 ): array {
-    $stmt = $pdo->query("SELECT id, path, status FROM media ORDER BY id ASC");
+    $sql = "SELECT id, path, status FROM media ORDER BY id ASC";
+
+    if ($limit !== null) {
+        $sql .= ' LIMIT ' . max(0, (int)$limit);
+    }
+
+    if ($offset !== null) {
+        $sql .= ' OFFSET ' . max(0, (int)$offset);
+    }
+
+    $stmt = $pdo->query($sql);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $total   = count($rows);
-    $active  = 0;
-    $missing = 0;
-    $touched = 0;
+    $total    = count($rows);
+    $active   = 0;
+    $missing  = 0;
+    $touched  = 0;
+    $limitHit = $limit !== null && $total >= $limit;
 
     if ($logger) {
-        $logger("Filesync: {$total} Medien prüfen.");
+        $limitInfo = $limit !== null ? " (limit={$limit}" . ($offset !== null ? ", offset={$offset}" : '') . ')' : '';
+        $logger("Filesync: {$total} Medien prüfen{$limitInfo}.");
     }
 
     $updateStatus = $pdo->prepare("UPDATE media SET status = ? WHERE id = ?");
@@ -737,7 +775,8 @@ function sv_run_filesync(
     }
 
     if ($logger) {
-        $logger("Filesync abgeschlossen. total={$total}, active={$active}, missing={$missing}, geändert={$touched}");
+        $suffix = $limitHit ? ' (Limit erreicht)' : '';
+        $logger("Filesync abgeschlossen. total={$total}, active={$active}, missing={$missing}, geändert={$touched}{$suffix}");
     }
 
     return [

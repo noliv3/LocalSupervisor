@@ -27,6 +27,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_media_hash
 CREATE INDEX IF NOT EXISTS idx_media_source
     ON media(source);
 
+CREATE INDEX IF NOT EXISTS idx_media_type
+    ON media(type);
+
 CREATE INDEX IF NOT EXISTS idx_media_rating
     ON media(rating);
 
