@@ -168,3 +168,11 @@ CREATE INDEX IF NOT EXISTS idx_import_log_status
 
 CREATE INDEX IF NOT EXISTS idx_import_log_created_at
     ON import_log(created_at);
+
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    version     TEXT NOT NULL UNIQUE,
+    applied_at  TEXT NOT NULL,
+    description TEXT
+);
