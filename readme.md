@@ -1,339 +1,48 @@
-# Festplatten Bild/Video Verwaltungs-Tool (PHP)
+# SuperVisOr – lokale Bild/Video-Verwaltung
+
+SuperVisOr ist ein PHP-basiertes Werkzeug, um große lokale Sammlungen von Bildern und Videos einheitlich zu erfassen, zu scannen (NSFW/Tags) und für spätere Reproduktionen via FORGE vorzubereiten. Die Anwendung kombiniert eine Weboberfläche mit CLI-Tools für Batch-Jobs.
+
+## Systemvoraussetzungen
+- PHP 8.1+ mit PDO (SQLite oder MySQL/MariaDB), JSON, mbstring, fileinfo sowie Bildbibliothek (gd oder imagick) und optional EXIF und cURL für API-Aufrufe.【F:dependencies.txt†L2-L14】
+- Datenbank: SQLite (supervisor.sqlite) oder alternativ MySQL/MariaDB.【F:dependencies.txt†L16-L18】
+- Externe Tools optional: ffmpeg (Videometadaten/Thumbnails) und exiftool (erweiterte Metadaten).【F:dependencies.txt†L20-L22】
+- Scanner- und FORGE-APIs mit Token-Authentifizierung; IP-Whitelist und interne API-Keys sind vorgesehen.【F:dependencies.txt†L24-L39】【F:CONFIG/config.php†L36-L51】
+
+## Konfiguration
+Die zentrale Konfiguration liegt in `CONFIG/config.php` und definiert:
+- Datenbank-DSN samt PDO-Optionen (standardmäßig SQLite im DB-Verzeichnis).【F:CONFIG/config.php†L6-L15】
+- Zielpfade für sichere/NSFW-Bilder und -Videos sowie Log- und Temp-Verzeichnisse.【F:CONFIG/config.php†L17-L28】
+- Pfade zu optional mitgelieferten ffmpeg-/exiftool-Binaries.【F:CONFIG/config.php†L30-L34】
+- Scanner-Einstellungen (Base-URL, Token, Timeout, NSFW-Schwelle).【F:CONFIG/config.php†L36-L45】
+- Sicherheitsparameter wie interner API-Key und IP-Whitelist.【F:CONFIG/config.php†L48-L51】
+
+## Verzeichnisstruktur
+- `CONFIG/` – globale Einstellungen inklusive DB-DSN und Scanner/Forge-Security-Parameter.【F:CONFIG/config.php†L2-L51】
+- `DB/schema.sql` – Referenzschema für sämtliche Tabellen und Indizes.【F:DB/schema.sql†L3-L170】
+- `SCRIPTS/` – CLI-Tools und gemeinsame Scan-Logik (`scan_core.php`).【F:SCRIPTS/scan_core.php†L4-L118】【F:SCRIPTS/scan_path_cli.php†L4-L75】
+- `WWW/` – Webkomponenten (Dashboard, Thumbnails).【F:WWW/index.php†L1-L164】
+- `TOOLS/` – optionaler Ablageort für ffmpeg/exiftool (nicht im Repo enthalten).【F:CONFIG/config.php†L30-L34】
+
+## Datenbankschema (bestätigtes REFERENZSCHEMA_V1)
+Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Live-Schema:
+- `media`: Pfad, Typ (image/video), Quelle, Maße, Videometadaten, Hash, Zeitstempel, Rating/NSFW-Flags, Parent-Verknüpfung und Status; Indizes auf Hash, Quelle, Rating, Status und Importzeit.【F:DB/schema.sql†L3-L37】
+- `tags` & `media_tags`: Schlagwortverwaltung mit Lock-Flag und Konfidenz; Join-Tabelle mit PK (media_id, tag_id) plus Indizes auf beide Seiten.【F:DB/schema.sql†L41-L61】
+- `scan_results`: Historie pro Scannerlauf inkl. NSFW-Score, Flags und Roh-JSON; Indizes auf media_id und scanner.【F:DB/schema.sql†L65-L81】
+- `prompts`: Prompt-/Parameter-Archiv pro Medium (positive/negative Prompts, Modell, Sampler, CFG, Seed, Auflösung, Scheduler, JSON-Felder).【F:DB/schema.sql†L85-L107】
+- `jobs`: FORGE-Aufträge inkl. Status, Zeitstempel, Request/Response-JSON und Fehlertext; Indizes auf Status und media_id.【F:DB/schema.sql†L111-L131】
+- `collections` & `collection_media`: Virtuelle Ordner mit Many-to-Many-Beziehung; PK (collection_id, media_id) plus Indizes auf beide Spalten.【F:DB/schema.sql†L135-L154】
+- `import_log`: Import-Historie mit Status und Zeitstempel, indiziert nach Status/created_at.【F:DB/schema.sql†L158-L170】
+
+## Arbeitsabläufe
+- **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten.【F:SCRIPTS/scan_path_cli.php†L12-L71】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
+- **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren.【F:SCRIPTS/rescan_cli.php†L4-L67】【F:SCRIPTS/scan_core.php†L338-L452】
+- **Filesystem-Sync**: `filesync_cli.php` führt `sv_run_filesync` aus, um die Existenz aller `media.path`-Einträge zu prüfen und den Status auf `active`/`missing` zu setzen.【F:SCRIPTS/filesync_cli.php†L4-L56】【F:SCRIPTS/scan_core.php†L454-L534】
+
+## Weboberfläche
+Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verbindung über `CONFIG/config.php`, Ausgabe der vorhandenen DB-Tabellen (SQLite) sowie Formulare, um Scan-, Rescan- und Filesync-CLI-Skripte im Hintergrund zu starten und Log-Dateien abzulegen.【F:WWW/index.php†L6-L164】
+
+## Sicherheit und Betrieb
+- API-Tokens/Whitelists konfigurieren, bevor Scanner-Aufrufe produktiv genutzt werden.【F:CONFIG/config.php†L36-L51】
+- Dateipfade und Log-Verzeichnisse in `CONFIG/config.php` an die Zielumgebung anpassen; Standardwerte zeigen auf Windows-Laufwerke.【F:CONFIG/config.php†L17-L34】
+- ffmpeg/exiftool sind optional und müssen separat installiert oder in `TOOLS/` bereitgestellt werden.【F:dependencies.txt†L20-L22】【F:CONFIG/config.php†L30-L34】
 
-Lokales PHP-Tool zur Verwaltung großer Mengen von Bildern und Videos aus ComfyUI, Stable Diffusion, Pinokio und ähnlichen Quellen.
-
-Ziel:
-- Dateien automatisiert erfassen
-- Inhalte scannen (NSFW / SFW, sensible Inhalte, Danbooru-Tags)
-- Tags und Prompts speichern und durchsuchbar machen
-- Ü18-Inhalte sauber trennen
-- Bilder per Klick mit originalen Settings über FORGE nachgenerieren
-
-
-## 1. Architekturüberblick
-
-Komponenten:
-
-- PHP-Weboberfläche (lokal)
-- Datenbank (SQLite oder MySQL/MariaDB)
-- Dateisystem-Sync (Import neuer Dateien)
-- Anbindung an:
-  - eigenen Tag-/NSFW-Scanner (REST-API)
-  - FORGE-Server zum Nachgenerieren
-- Optional: weitere Scanner / Tools (z. B. ffmpeg, exiftool)
-
-
-## 2. Datenmodell (Logik-Ebene)
-
-### 2.1 Kern-Tabellen
-
-- `media`
-  - `id`
-  - `path` (absoluter oder relativer Pfad)
-  - `type` (image, video)
-  - `source` (comfy, sd, pinokio, forge, other)
-  - `width`, `height`
-  - `duration` (für Videos, Sekunden)
-  - `fps` (optional, für Videos)
-  - `filesize`
-  - `hash` (MD5/SHA1 zur Duplikaterkennung)
-  - `created_at` (Dateisystem/Metadaten)
-  - `imported_at` (Zeitpunkt des Eintrags)
-  - `rating` (0=unrated, 1=safe, 2=questionable, 3=explicit)
-  - `has_nsfw` (bool)
-  - `parent_media_id` (Referenz auf Ursprung bei Varianten)
-  - `status` (active, archived, deleted_logical)
-
-- `tags`
-  - `id`
-  - `name`
-  - `type` (content, style, character, nsfw, technical, other)
-  - `locked` (bool, ob durch Auto-Scanner nicht überschrieben werden darf)
-
-- `media_tags`
-  - `media_id`
-  - `tag_id`
-  - `confidence` (0.0–1.0)
-  - zusammengesetzter Primärschlüssel (`media_id`, `tag_id`)
-
-- `scan_results`
-  - `id`
-  - `media_id`
-  - `scanner` (z. B. `pixai_sensible`)
-  - `run_at`
-  - `nsfw_score` (gesamt)
-  - `flags` (z. B. JSON: gore, nudity, violence)
-  - `raw_json` (vollständige Scanner-Rückgabe)
-
-- `prompts`
-  - `id`
-  - `media_id`
-  - `prompt`
-  - `negative_prompt`
-  - `model`
-  - `sampler`
-  - `cfg_scale`
-  - `steps`
-  - `seed`
-  - `width`, `height`
-  - `scheduler` / `sampler_settings` (JSON)
-  - `loras` (JSON)
-  - `controlnet` (JSON)
-  - `source_metadata` (Rohtext / Original-Parameterstring)
-
-- `jobs` (Nachgenerierungen über FORGE)
-  - `id`
-  - `media_id` (Ausgangsbild)
-  - `prompt_id` (verwendete Settings)
-  - `type` (regenerate, variation, upscale, other)
-  - `status` (queued, running, done, error)
-  - `created_at`
-  - `updated_at`
-  - `forge_request_json`
-  - `forge_response_json`
-  - `error_message` (bei Fehlern)
-
-- `collections`
-  - `id`
-  - `name`
-  - `description`
-  - `created_at`
-
-- `collection_media`
-  - `collection_id`
-  - `media_id`
-
-- `import_log`
-  - `id`
-  - `path`
-  - `status` (imported, skipped_duplicate, error)
-  - `message`
-  - `created_at`
-
-
-## 3. Import-Logik (Dateisystem → DB)
-
-- Konfigurierbare Verzeichnisse, die gescannt werden:
-  - Beispiel: `input/comfy`, `input/sd`, `input/pinokio`, `input/other`
-- Ablauf:
-  1. Verzeichnisse rekursiv durchsuchen
-  2. Nur Bild- und Videoformate akzeptieren (z. B. PNG, JPG, WEBP, MP4, MKV)
-  3. Dateihash berechnen zur Duplikaterkennung (`media.hash`)
-  4. Metadaten auslesen:
-     - Bild: Breite, Höhe, ggf. EXIF
-     - Video: Dauer, Auflösung, FPS (z. B. über ffmpeg/mediainfo)
-  5. Eintrag in `media` anlegen
-  6. Eintrag in `import_log`
-
-- Optional:
-  - Source-spezifische Metadaten:
-    - Comfy/Pinokio/Forge-Workflow-JSON
-    - SD-PNG-Text-Info („parameters“)
-  - Mapping auf `prompts` (Parsing und Speicherung der Settings)
-
-
-## 4. Sortieren / Schieben
-
-### 4.1 Logische Sortierung (empfohlen)
-
-- Primäre Organisation über DB:
-  - Filter nach Tags, Quelle, Rating, Datum, NSFW
-  - Collections als virtuelle „Ordner“:
-    - Ein Media-Eintrag kann in beliebig vielen Collections liegen.
-- Ordner im Dateisystem bleiben relativ einfach:
-  - z. B. nach Quelle oder nach Importdatum
-
-### 4.2 Physische Sortierung (optional)
-
-- Optionale Skripte, die Dateien verschieben:
-  - z. B. `safe/`, `nsfw/`, `archive/`
-  - oder `root/<source>/<year>/<month>/`
-- Operationen:
-  - Move / Copy / Hardlink
-- Alle Operationen aktualisieren `media.path`
-
-
-## 5. Ü18 / NSFW-Handling
-
-- NSFW/Sensible-Infos kommen aus dem eigenen Scanner (REST-API).
-- Speicherung als:
-  - `scan_results.nsfw_score` und `flags`
-  - Tags im `tags`/`media_tags`-System (z. B. `nsfw`, `nudity`, `gore`)
-  - `media.rating` und `media.has_nsfw`
-
-Standard-Ansicht:
-- Zeigt nur `rating` = 0 oder 1
-
-NSFW-Ansicht:
-- Nur nach expliziter Freischaltung (Session-Flag oder Benutzerrolle)
-- Optional physische Trennung in separate Verzeichnisse
-
-Ziel:
-- Klare Trennung von Ü18-Inhalten
-- Kontrollierbare Sichtbarkeit
-
-
-## 6. Tag-Erkennung / Scanner-Integration
-
-- Eigener Tag-/NSFW-Scanner wird per HTTP aufgerufen:
-  - Endpunkt z. B. `/check` oder `/batch`
-  - Authentifizierung über Token/API-Key
-
-Pipeline:
-1. Nach Import von `media` wird ein Scan-Job in einer Queue vorbereitet (z. B. Tabelle oder Dateiliste).
-2. Worker-Skript ruft Scanner-API auf und übergibt Datei.
-3. Scanner liefert:
-   - Danbooru-Tags mit Confidence
-   - NSFW-Score
-   - Sensible-Flags
-4. Ergebnis wird in:
-   - `scan_results` geschrieben
-   - `tags` und `media_tags` aktualisiert
-   - `media.rating` / `media.has_nsfw` gesetzt
-
-Manuelle Nachbearbeitung:
-- UI zum Hinzufügen/Entfernen von Tags
-- `tags.locked = 1` verhindert Überschreiben durch automatische Scans
-
-
-## 7. Prompts und Workflow-Auslesen
-
-- Quellen:
-  - PNG-Text-Felder (SD-Parameter)
-  - Begleitende JSON-Dateien (Comfy, Pinokio, Forge)
-- Parsing:
-  - Extraktion von:
-    - Prompt / negativer Prompt
-    - Model
-    - Sampler / Scheduler
-    - CFG, Steps, Seed, Auflösung
-    - LoRAs, ControlNet-Konfiguration
-- Speicherung:
-  - in `prompts` pro `media`
-  - Referenz auf Roh-Metadaten in `source_metadata`
-
-Ziel:
-- Vollständig dokumentierte Erzeugung jedes Bildes
-- Grundlage für exakte Reproduktion und Variationen
-
-
-## 8. Nachgenerieren per Klick (FORGE)
-
-UI-Funktion: Button pro Medium (z. B. „Regenerieren“ / „Variation erzeugen“).
-
-Ablauf:
-1. Klick erzeugt einen Eintrag in `jobs` mit:
-   - `media_id`
-   - `prompt_id`
-   - Job-Typ
-2. PHP erstellt HTTP-Request an FORGE-API:
-   - übergibt alle relevanten Einstellungen
-3. FORGE verarbeitet den Job:
-   - Polling oder Callback, bis Status `done` oder `error`
-4. Neue Bilder/Videos werden importiert wie normale Media-Einträge:
-   - `source = forge`
-   - `parent_media_id` zeigt auf das Ursprungsbild
-
-Ergebnis:
-- Variantenbaum pro Bild
-- Nachvollziehbare Historie von Nachgenerierungen
-
-
-## 9. UI-Funktionen
-
-### 9.1 Übersicht / Grid
-
-- Gitteransicht mit Thumbnails
-- Basisinformationen:
-  - Quelle, Rating, Tags, Erstellungsdatum
-
-Filter:
-- Tags (inkl. Mehrfachauswahl)
-- Quelle (comfy, sd, pinokio, forge)
-- Rating / NSFW
-- Datum (Erstellungszeitraum)
-- Auflösung / Seitenverhältnis
-- Video-spezifisch: Dauer, FPS
-
-### 9.2 Detailansicht
-
-- Großes Preview (Bild/Video)
-- Sichtbare Informationen:
-  - Liste der Tags mit Confidence
-  - Prompt + negative Prompt
-  - verwendetes Model, Sampler, CFG, etc.
-  - Scan-Historie (Scanner, Zeitpunkt, Score)
-- Aktionen:
-  - Tags bearbeiten
-  - Collection-Zuordnung verwalten
-  - Job an FORGE schicken
-
-### 9.3 Batch-Operationen
-
-- Mehrere Media-Einträge markieren
-- Aktionen:
-  - Tags hinzufügen/entfernen
-  - in Collection aufnehmen
-  - rating / has_nsfw ändern
-  - physisch verschieben/archivieren
-  - logical delete / Archiv-Status
-
-
-## 10. Video-spezifische Funktionen
-
-- Metadaten:
-  - Dauer, Auflösung, FPS, Codec
-- Thumbnail-Erzeugung:
-  - z. B. aus Frame 0 oder Mitte des Videos
-- NSFW-Erkennung:
-  - Scanner erhält einzelne Frames oder Frame-Sampling
-  - Aggregierter Score als Video-Niveau
-  - Optional: Frame-level-Tags (nicht zwingend)
-
-
-## 11. Sicherheit / API-Schutz
-
-Alle internen API-Endpunkte:
-- mindestens API-Key erforderlich
-- optional:
-  - IP-Whitelist (localhost, internes Netz)
-  - einfache Auth mit Benutzer/Passwort für Web-UI
-
-Empfohlen:
-- zentrale Konfigurationsdatei (z. B. `config.php`) mit:
-  - Datenbankzugang
-  - API-Keys für Scanner und FORGE
-  - Sicherheitseinstellungen (IP-Filter, Debug-Mode)
-
-Ziel:
-- Keine ungeschützten Endpunkte
-- Keine versehentliche externe Freigabe
-
-
-## 12. Logging / Fehleranalyse
-
-- `import_log` für Dateiscans
-- Logs für:
-  - Scannerfehler
-  - FORGE-Fehler
-  - API-Fehler
-- Ausgabe optional zusätzlich in Logfiles im Dateisystem
-
-Nutzen:
-- defekte Dateien erkennen
-- Pfadprobleme finden
-- abgestürzte Jobs nachverfolgen
-
-
-## 13. Projektstatus
-
-Dieses Dokument beschreibt:
-- Zielbild des Systems
-- Grundarchitektur
-- Datenmodell
-- benötigte Kernfunktionen
-
-Nächste Schritte:
-- Verzeichnisstruktur und Datenbanktyp festlegen
-- Basis-PHP-Skeleton mit DB-Verbindung und einfachem Import-Skript
-- API-Anbindung an Scanner und FORGE schrittweise integrieren
