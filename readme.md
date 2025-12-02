@@ -25,11 +25,11 @@ Die zentrale Konfiguration liegt in `CONFIG/config.php` und definiert:
 
 ## Datenbankschema (bestätigtes REFERENZSCHEMA_V1)
 Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Live-Schema:
-- `media`: Pfad, Typ (image/video), Quelle, Maße, Videometadaten (duration/fps) sowie Basis-Metadaten wie Hash, Zeitstempel, Rating/NSFW-Flags, Parent-Verknüpfung und Status; Indizes auf Hash, Quelle, Rating, Status und Importzeit.【F:DB/schema.sql†L3-L37】
+- `media`: Pfad, Typ (image/video), Quelle, Maße, Videometadaten (duration/fps/filesize) sowie Basis-Metadaten wie Hash, Zeitstempel, Rating/NSFW-Flags, Parent-Verknüpfung und Status; Indizes auf Hash, Quelle, Rating, Status und Importzeit.【F:DB/schema.sql†L3-L37】
 - `tags` & `media_tags`: Schlagwortverwaltung mit Lock-Flag und Konfidenz; Join-Tabelle mit PK (media_id, tag_id) plus Indizes auf beide Seiten.【F:DB/schema.sql†L41-L61】
 - `scan_results`: Historie pro Scannerlauf inkl. NSFW-Score, Flags und Roh-JSON; Indizes auf media_id und scanner.【F:DB/schema.sql†L65-L81】
 - `prompts`: Prompt-/Parameter-Archiv pro Medium (positive/negative Prompts, Modell, Sampler, CFG, Seed, Auflösung, Scheduler, JSON-Felder).【F:DB/schema.sql†L85-L107】
-- `media_meta`: Freie Metadatenquelle für EXIF/XMP/PNG-Text, Prompt-Blöcke und ffmpeg-Ausgaben; jede Zeile enthält Quelle, Schlüssel, Wert und Timestamp pro media_id.【F:DB/schema.sql†L200-L211】
+- `media_meta`: Freie Metadatenquelle für EXIF/XMP/PNG-Text, ffmpeg-Ausgaben oder Parser-Extrakte (z. B. forge/comfy/import); jede Zeile enthält `source` als Namespace, `meta_key`, `meta_value` und Timestamp pro `media_id`.【F:DB/schema.sql†L200-L211】
 - `jobs`: FORGE-Aufträge inkl. Status, Zeitstempel, Request/Response-JSON und Fehlertext; Indizes auf Status und media_id.【F:DB/schema.sql†L111-L131】
 - `collections` & `collection_media`: Virtuelle Ordner mit Many-to-Many-Beziehung; PK (collection_id, media_id) plus Indizes auf beide Spalten.【F:DB/schema.sql†L135-L154】
 - `import_log`: Import-Historie mit Status und Zeitstempel, indiziert nach Status/created_at.【F:DB/schema.sql†L158-L170】
@@ -50,10 +50,10 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - Ergebnisse erscheinen auf STDOUT, werden in `LOGS/consistency_*.log` gespeichert und – nach eingespielter Migration – in `consistency_log` geschrieben.【F:SCRIPTS/consistency_check.php†L51-L100】【F:SCRIPTS/consistency_check.php†L112-L285】
 
 ## Arbeitsabläufe
-- **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten. Optional begrenzt `--limit=N` die Anzahl der verarbeiteten Dateien pro Lauf.【F:SCRIPTS/scan_path_cli.php†L12-L81】【F:SCRIPTS/scan_core.php†L409-L495】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
+- **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten. Optional begrenzt `--limit=N` die Anzahl der verarbeiteten Dateien pro Lauf.【F:SCRIPTS/scan_path_cli.php†L12-L81】【F:SCRIPTS/scan_core.php†L409-L495】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`. Dabei werden Prompts und Zusatzmetadaten nach `media_meta` übernommen (EXIF/PNG-Text, ffmpeg, Parser).【F:SCRIPTS/scan_core.php†L486-L620】
 - **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren. Mit `--limit` und `--offset` lassen sich Teilmengen stapelweise bearbeiten. Fehlende Metadaten/Prompts werden via `sv_extract_metadata` nachgezogen und in `media_meta` abgelegt.【F:SCRIPTS/rescan_cli.php†L4-L87】【F:SCRIPTS/scan_core.php†L620-L748】
 - **Filesystem-Sync**: `filesync_cli.php` führt `sv_run_filesync` aus, um die Existenz aller `media.path`-Einträge zu prüfen und den Status auf `active`/`missing` zu setzen; `--limit` und `--offset` erlauben Batches.【F:SCRIPTS/filesync_cli.php†L4-L78】【F:SCRIPTS/scan_core.php†L710-L789】
-- **Metadaten-Inspektor**: `meta_inspect.php` liefert eine reine Textübersicht der gespeicherten Prompts und `media_meta`-Einträge pro Medium; `--limit=N` steuert die Anzahl der Datensätze.【F:SCRIPTS/meta_inspect.php†L1-L101】
+- **Metadaten-Inspektor**: `meta_inspect.php` liefert eine reine Textübersicht der gespeicherten Prompts und `media_meta`-Einträge pro Medium; `--limit=N` steuert die Anzahl der Datensätze.【F:SCRIPTS/meta_inspect.php†L1-L101】 Webseitig sind dieselben Informationen über `mediadb.php` → `media_view.php?id=…` read-only einsehbar.【F:WWW/mediadb.php†L286-L343】【F:WWW/media_view.php†L60-L208】
 
 ## Betrieb / Heavy Tasks
 - Vor Migrationen oder Reparaturläufen immer ein manuelles Backup ziehen: `php SCRIPTS/db_backup.php` legt Kopien unter `BACKUPS/` (oder `paths.backups`) sowie ein Log unter `LOGS/` ab.【F:SCRIPTS/db_backup.php†L1-L98】
@@ -62,6 +62,9 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 
 ## Weboberfläche
 Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verbindung über `CONFIG/config.php`, Ausgabe der vorhandenen DB-Tabellen (SQLite) sowie Formulare, um Scan-, Rescan- und Filesync-CLI-Skripte im Hintergrund zu starten und Log-Dateien abzulegen.【F:WWW/index.php†L6-L164】
+
+- `mediadb.php`: Listenansicht mit Filtern nach Typ (Bild/Video), Prompt-Flag, Metadaten-Flag, Status, Mindest-Rating und Pfad-Substring; NSFW lässt sich über `adult=1` einblenden. Zeigt Typ-Badges, Prompt-/Metadaten-Indikatoren und Links zur Detailseite/Originalpfad.【F:WWW/mediadb.php†L1-L377】
+- `media_view.php`: Detailansicht für ein Medium mit Thumbnail bzw. Video-Platzhalter, Prompt/Negative Prompt, Kern-Metadaten aus `media` (inkl. Dauer/FPS/Dateigröße) sowie gruppierter Anzeige der `media_meta`-Einträge nach `source`. Navigation zu Vorher/Nachher berücksichtigt das FSK18-Flag.【F:WWW/media_view.php†L1-L208】【F:WWW/media_view.php†L214-L311】
 
 ## Sicherheit und Betrieb
 - Web-Schreibzugriffe auf Scanner/Filesync/Rescan oder spätere Mutationen müssen den `internal_api_key` über den Header `X-Internal-Key` oder den Parameter `internal_key` mitschicken; ohne Schlüssel antworten geschützte Endpunkte mit HTTP 403.【F:SCRIPTS/security.php†L32-L83】
