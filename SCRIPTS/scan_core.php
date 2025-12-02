@@ -245,6 +245,504 @@ function sv_store_scan_result(PDO $pdo, int $mediaId, string $scannerName, ?floa
     ]);
 }
 
+
+function sv_empty_normalized_prompt(): array
+{
+    return [
+        'prompt'           => null,
+        'negative_prompt'  => null,
+        'model'            => null,
+        'sampler'          => null,
+        'steps'            => null,
+        'cfg_scale'        => null,
+        'seed'             => null,
+        'width'            => null,
+        'height'           => null,
+        'scheduler'        => null,
+    ];
+}
+
+function sv_stringify_meta_value($value): ?string
+{
+    if ($value === null) {
+        return null;
+    }
+    if (is_bool($value)) {
+        return $value ? '1' : '0';
+    }
+    if (is_scalar($value)) {
+        return (string)$value;
+    }
+
+    $json = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        return null;
+    }
+
+    return $json;
+}
+
+function sv_merge_normalized_prompt(array $base, array $additional): array
+{
+    foreach ($base as $k => $v) {
+        if ($v === null && array_key_exists($k, $additional) && $additional[$k] !== null) {
+            $base[$k] = $additional[$k];
+        }
+    }
+
+    return $base;
+}
+
+function sv_normalized_prompt_has_data(array $normalized): bool
+{
+    foreach ($normalized as $v) {
+        if ($v !== null) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function sv_read_png_text_chunks(string $file): array
+{
+    $data = @file_get_contents($file);
+    if ($data === false || strlen($data) < 8) {
+        return [];
+    }
+
+    $offset = 8; // PNG Signatur überspringen
+    $len    = strlen($data);
+    $result = [];
+
+    while ($offset + 8 <= $len) {
+        $lengthData = substr($data, $offset, 4);
+        $chunkLen   = unpack('N', $lengthData)[1] ?? 0;
+        $chunkType  = substr($data, $offset + 4, 4);
+        $chunkData  = substr($data, $offset + 8, $chunkLen);
+        $offset    += 12 + $chunkLen; // Länge + Typ + Daten + CRC
+
+        if ($offset > $len) {
+            break;
+        }
+
+        if ($chunkType === 'tEXt') {
+            $parts = explode("\0", $chunkData, 2);
+            if (count($parts) === 2) {
+                $result[$parts[0]] = $parts[1];
+            }
+        } elseif ($chunkType === 'iTXt') {
+            $parts = explode("\0", $chunkData, 5);
+            if (count($parts) >= 5) {
+                $keyword       = $parts[0];
+                $compressed    = (int)($parts[1] ?? 0) === 1;
+                $compression   = $parts[2] ?? '';
+                $translated    = $parts[4] ?? '';
+                $remainingText = count($parts) === 5 ? $parts[4] : implode("\0", array_slice($parts, 4));
+
+                if ($compressed && function_exists('gzuncompress')) {
+                    $uncompressed = @gzuncompress($remainingText);
+                    $text         = $uncompressed !== false ? $uncompressed : $remainingText;
+                } else {
+                    $text = $remainingText;
+                }
+
+                $result[$keyword !== '' ? $keyword : 'iTXt'] = $text;
+                if ($translationLabel = trim((string)$translated)) {
+                    $result[$keyword . '.lang'] = $translationLabel;
+                }
+                if ($compression !== '') {
+                    $result[$keyword . '.compression'] = $compression;
+                }
+            }
+        } elseif ($chunkType === 'zTXt') {
+            $parts = explode("\0", $chunkData, 2);
+            if (count($parts) === 2) {
+                $keyword = $parts[0];
+                $text    = $parts[1];
+                $plain   = $text;
+                if (function_exists('gzuncompress')) {
+                    $uncompressed = @gzuncompress($text);
+                    if ($uncompressed !== false) {
+                        $plain = $uncompressed;
+                    }
+                }
+                $result[$keyword] = $plain;
+            }
+        }
+    }
+
+    return $result;
+}
+
+function sv_select_raw_block(array $candidates): ?string
+{
+    $longest = null;
+    foreach ($candidates as $candidate) {
+        if (!is_string($candidate) || trim($candidate) === '') {
+            continue;
+        }
+        if ($longest === null || strlen($candidate) > strlen($longest)) {
+            $longest = $candidate;
+        }
+    }
+
+    return $longest;
+}
+
+function sv_parse_prompt_block(string $text): array
+{
+    $normalized = sv_empty_normalized_prompt();
+
+    $json = json_decode($text, true);
+    if (is_array($json)) {
+        $normalized = sv_merge_normalized_prompt($normalized, [
+            'prompt'          => isset($json['prompt']) && is_string($json['prompt']) ? $json['prompt'] : null,
+            'negative_prompt' => isset($json['negative_prompt']) && is_string($json['negative_prompt']) ? $json['negative_prompt'] : null,
+            'model'           => isset($json['model']) && is_string($json['model']) ? $json['model'] : null,
+            'sampler'         => isset($json['sampler']) && is_string($json['sampler']) ? $json['sampler'] : null,
+            'steps'           => isset($json['steps']) && is_numeric($json['steps']) ? (int)$json['steps'] : null,
+            'cfg_scale'       => isset($json['cfg_scale']) && is_numeric($json['cfg_scale']) ? (float)$json['cfg_scale'] : null,
+            'seed'            => isset($json['seed']) ? (string)$json['seed'] : null,
+            'width'           => isset($json['width']) && is_numeric($json['width']) ? (int)$json['width'] : null,
+            'height'          => isset($json['height']) && is_numeric($json['height']) ? (int)$json['height'] : null,
+            'scheduler'       => isset($json['scheduler']) && is_string($json['scheduler']) ? $json['scheduler'] : null,
+        ]);
+    }
+
+    if (stripos($text, 'Negative prompt:') !== false) {
+        if (preg_match('/^(.+?)\s*Negative prompt:/s', $text, $m)) {
+            $normalized['prompt'] = $normalized['prompt'] ?? trim($m[1]);
+        }
+        if (preg_match('/Negative prompt:\s*(.+?)(?:\n\s*Steps:|$)/si', $text, $m)) {
+            $normalized['negative_prompt'] = $normalized['negative_prompt'] ?? trim($m[1]);
+        }
+    }
+
+    if (preg_match('/Steps:\s*(\d+)/i', $text, $m)) {
+        $normalized['steps'] = $normalized['steps'] ?? (int)$m[1];
+    }
+    if (preg_match('/Sampler:\s*([^,\n]+)/i', $text, $m)) {
+        $normalized['sampler'] = $normalized['sampler'] ?? trim($m[1]);
+    }
+    if (preg_match('/CFG scale:\s*([0-9.]+)/i', $text, $m)) {
+        $normalized['cfg_scale'] = $normalized['cfg_scale'] ?? (float)$m[1];
+    }
+    if (preg_match('/Seed:\s*([^,\n]+)/i', $text, $m)) {
+        $normalized['seed'] = $normalized['seed'] ?? trim($m[1]);
+    }
+    if (preg_match('/Size:\s*(\d+)x(\d+)/i', $text, $m)) {
+        $normalized['width']  = $normalized['width'] ?? (int)$m[1];
+        $normalized['height'] = $normalized['height'] ?? (int)$m[2];
+    }
+    if (preg_match('/Model:\s*([^,\n]+)/i', $text, $m)) {
+        $normalized['model'] = $normalized['model'] ?? trim($m[1]);
+    }
+    if (preg_match('/Scheduler:\s*([^,\n]+)/i', $text, $m)) {
+        $normalized['scheduler'] = $normalized['scheduler'] ?? trim($m[1]);
+    }
+
+    return $normalized;
+}
+
+function sv_collect_media_meta_dimensions(array $metaPairs): array
+{
+    $dimensions = [
+        'width'    => null,
+        'height'   => null,
+        'duration' => null,
+        'fps'      => null,
+        'filesize' => null,
+    ];
+
+    foreach ($metaPairs as $pair) {
+        if (!is_array($pair)) {
+            continue;
+        }
+        $key   = (string)($pair['key'] ?? '');
+        $value = $pair['value'] ?? null;
+        if ($key === '') {
+            continue;
+        }
+        if ($key === 'video.width' || $key === 'width') {
+            $dimensions['width'] = is_numeric($value) ? (int)$value : $dimensions['width'];
+        } elseif ($key === 'video.height' || $key === 'height') {
+            $dimensions['height'] = is_numeric($value) ? (int)$value : $dimensions['height'];
+        } elseif ($key === 'video.duration' || $key === 'format.duration' || $key === 'duration') {
+            $dimensions['duration'] = is_numeric($value) ? (float)$value : $dimensions['duration'];
+        } elseif ($key === 'video.fps' || $key === 'fps') {
+            $dimensions['fps'] = is_numeric($value) ? (float)$value : $dimensions['fps'];
+        } elseif ($key === 'filesize' || $key === 'format.size') {
+            $dimensions['filesize'] = is_numeric($value) ? (int)$value : $dimensions['filesize'];
+        }
+    }
+
+    return $dimensions;
+}
+
+/**
+ * Extrahiert Metadaten und Prompts aus einer Datei.
+ */
+function sv_extract_metadata(string $file, string $type, string $source, ?callable $logger = null): array
+{
+    $normalized  = sv_empty_normalized_prompt();
+    $rawBlock    = null;
+    $metaPairs   = [];
+    $rawBuffers  = [];
+
+    if ($type === 'image') {
+        if (function_exists('exif_read_data')) {
+            $exif = @exif_read_data($file, null, true);
+            if (is_array($exif)) {
+                foreach ($exif as $section => $values) {
+                    if (!is_array($values)) {
+                        continue;
+                    }
+                    foreach ($values as $k => $v) {
+                        $keyName = is_string($section) ? $section . '.' . $k : (string)$k;
+                        $val     = sv_stringify_meta_value($v);
+                        $metaPairs[] = [
+                            'source' => 'exif',
+                            'key'    => $keyName,
+                            'value'  => $val,
+                        ];
+
+                        $lowerKey = strtolower((string)$k);
+                        if (in_array($lowerKey, ['usercomment', 'imagedescription', 'xpcomment', 'comment'], true) && $val !== null) {
+                            $rawBuffers[] = $val;
+                        }
+                    }
+                }
+            }
+        }
+
+        $pngTexts = sv_read_png_text_chunks($file);
+        foreach ($pngTexts as $k => $v) {
+            $textVal    = sv_stringify_meta_value($v);
+            $metaPairs[] = [
+                'source' => 'pngtext',
+                'key'    => (string)$k,
+                'value'  => $textVal,
+            ];
+            if ($textVal !== null) {
+                $rawBuffers[] = $textVal;
+            }
+        }
+    } elseif ($type === 'video') {
+        $baseDir  = realpath(__DIR__ . '/..');
+        $cfgFile  = $baseDir ? $baseDir . '/CONFIG/config.php' : null;
+        $ffprobe  = null;
+        if ($cfgFile && is_file($cfgFile)) {
+            $cfg = require $cfgFile;
+            $tools = $cfg['tools'] ?? [];
+            if (!empty($tools['ffprobe'])) {
+                $ffprobe = (string)$tools['ffprobe'];
+            } elseif (!empty($tools['ffmpeg'])) {
+                $maybe = str_replace('ffmpeg', 'ffprobe', (string)$tools['ffmpeg']);
+                if (is_file($maybe)) {
+                    $ffprobe = $maybe;
+                }
+            }
+        }
+        if ($ffprobe === null) {
+            $ffprobe = 'ffprobe';
+        }
+
+        $cmd = escapeshellarg($ffprobe) . ' -v quiet -print_format json -show_format -show_streams ' . escapeshellarg($file);
+        $json = @shell_exec($cmd);
+
+        if (is_string($json) && trim($json) !== '') {
+            $data = json_decode($json, true);
+            if (is_array($data)) {
+                $format = $data['format'] ?? [];
+                if (isset($format['duration'])) {
+                    $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'format.duration', 'value' => sv_stringify_meta_value($format['duration'])];
+                }
+                if (isset($format['size'])) {
+                    $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'format.size', 'value' => sv_stringify_meta_value($format['size'])];
+                }
+                if (isset($format['bit_rate'])) {
+                    $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'format.bit_rate', 'value' => sv_stringify_meta_value($format['bit_rate'])];
+                }
+                $streams = is_array($data['streams'] ?? null) ? $data['streams'] : [];
+                $videoStream = null;
+                foreach ($streams as $idx => $stream) {
+                    if (!is_array($stream)) {
+                        continue;
+                    }
+                    $typeStream = (string)($stream['codec_type'] ?? '');
+                    if ($typeStream === 'video' && $videoStream === null) {
+                        $videoStream = $stream;
+                    }
+                    $prefix = $typeStream !== '' ? $typeStream : 'stream' . $idx;
+                    foreach ($stream as $k => $v) {
+                        if (in_array($k, ['tags', 'disposition', 'side_data_list'], true)) {
+                            continue;
+                        }
+                        $metaPairs[] = [
+                            'source' => 'ffmpeg',
+                            'key'    => $prefix . '.' . $k,
+                            'value'  => sv_stringify_meta_value($v),
+                        ];
+                    }
+                }
+
+                if ($videoStream !== null) {
+                    $width  = $videoStream['width'] ?? null;
+                    $height = $videoStream['height'] ?? null;
+                    $fpsRaw = $videoStream['avg_frame_rate'] ?? ($videoStream['r_frame_rate'] ?? null);
+                    if ($width !== null) {
+                        $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'video.width', 'value' => sv_stringify_meta_value($width)];
+                    }
+                    if ($height !== null) {
+                        $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'video.height', 'value' => sv_stringify_meta_value($height)];
+                    }
+                    if ($fpsRaw) {
+                        $fpsVal = null;
+                        if (is_string($fpsRaw) && strpos($fpsRaw, '/') !== false) {
+                            [$n, $d] = array_map('floatval', explode('/', $fpsRaw, 2));
+                            if ($d > 0) {
+                                $fpsVal = $n / $d;
+                            }
+                        } elseif (is_numeric($fpsRaw)) {
+                            $fpsVal = (float)$fpsRaw;
+                        }
+                        if ($fpsVal !== null) {
+                            $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'video.fps', 'value' => sv_stringify_meta_value($fpsVal)];
+                        }
+                    }
+                    if (!empty($videoStream['duration'])) {
+                        $metaPairs[] = ['source' => 'ffmpeg', 'key' => 'video.duration', 'value' => sv_stringify_meta_value($videoStream['duration'])];
+                    }
+                }
+            }
+        }
+
+        $metaPairs[] = [
+            'source' => 'ffmpeg',
+            'key'    => 'filesize',
+            'value'  => sv_stringify_meta_value(@filesize($file)),
+        ];
+    }
+
+    $rawBlock = sv_select_raw_block($rawBuffers);
+    if ($rawBlock !== null) {
+        $normalized = sv_merge_normalized_prompt($normalized, sv_parse_prompt_block($rawBlock));
+    }
+
+    return [
+        'normalized_prompt' => $normalized,
+        'raw_block'         => $rawBlock,
+        'meta_pairs'        => $metaPairs,
+    ];
+}
+
+function sv_store_extracted_metadata(
+    PDO $pdo,
+    int $mediaId,
+    string $type,
+    array $metadata,
+    string $sourceLabel,
+    ?callable $logger = null
+): void {
+    $normalized = is_array($metadata['normalized_prompt'] ?? null) ? $metadata['normalized_prompt'] : sv_empty_normalized_prompt();
+    $metaPairs  = is_array($metadata['meta_pairs'] ?? null) ? $metadata['meta_pairs'] : [];
+    $rawBlock   = is_string($metadata['raw_block'] ?? null) ? $metadata['raw_block'] : null;
+    $createdAt  = date('c');
+
+    $insertMeta = $pdo->prepare(
+        "INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)"
+    );
+
+    foreach ($metaPairs as $pair) {
+        if (!is_array($pair)) {
+            continue;
+        }
+        $metaSource = (string)($pair['source'] ?? $sourceLabel);
+        $metaKey    = (string)($pair['key'] ?? '');
+        $metaValue  = array_key_exists('value', $pair) ? $pair['value'] : null;
+        if ($metaSource === '' || $metaKey === '') {
+            continue;
+        }
+        $insertMeta->execute([
+            $mediaId,
+            $metaSource,
+            $metaKey,
+            $metaValue === null ? null : (string)$metaValue,
+            $createdAt,
+        ]);
+    }
+
+    $dimensions = sv_collect_media_meta_dimensions($metaPairs);
+    $dimStmt = $pdo->prepare("SELECT width, height, duration, fps, filesize FROM media WHERE id = ?");
+    $dimStmt->execute([$mediaId]);
+    $currentDims = $dimStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $updateParts = [];
+    $updateVals  = [];
+
+    if ($dimensions['width'] !== null && (empty($currentDims['width']) || (int)$currentDims['width'] === 0)) {
+        $updateParts[] = 'width = ?';
+        $updateVals[]  = (int)$dimensions['width'];
+    }
+    if ($dimensions['height'] !== null && (empty($currentDims['height']) || (int)$currentDims['height'] === 0)) {
+        $updateParts[] = 'height = ?';
+        $updateVals[]  = (int)$dimensions['height'];
+    }
+    if ($dimensions['duration'] !== null && (empty($currentDims['duration']) || (float)$currentDims['duration'] === 0.0)) {
+        $updateParts[] = 'duration = ?';
+        $updateVals[]  = (float)$dimensions['duration'];
+    }
+    if ($dimensions['fps'] !== null && (empty($currentDims['fps']) || (float)$currentDims['fps'] === 0.0)) {
+        $updateParts[] = 'fps = ?';
+        $updateVals[]  = (float)$dimensions['fps'];
+    }
+    if ($dimensions['filesize'] !== null && (empty($currentDims['filesize']) || (int)$currentDims['filesize'] === 0)) {
+        $updateParts[] = 'filesize = ?';
+        $updateVals[]  = (int)$dimensions['filesize'];
+    }
+
+    if ($updateParts) {
+        $updateSql = 'UPDATE media SET ' . implode(', ', $updateParts) . ' WHERE id = ?';
+        $updStmt   = $pdo->prepare($updateSql);
+        $updateVals[] = $mediaId;
+        $updStmt->execute($updateVals);
+    }
+
+    $promptStmt = $pdo->prepare('SELECT id FROM prompts WHERE media_id = ? LIMIT 1');
+    $promptStmt->execute([$mediaId]);
+    $existingPromptId = $promptStmt->fetchColumn();
+    $hasNormalized    = sv_normalized_prompt_has_data($normalized);
+
+    if ($existingPromptId === false && ($hasNormalized || $rawBlock !== null)) {
+        $insertPrompt = $pdo->prepare(
+            "INSERT INTO prompts (media_id, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, source_metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        $insertPrompt->execute([
+            $mediaId,
+            $normalized['prompt'],
+            $normalized['negative_prompt'],
+            $normalized['model'],
+            $normalized['sampler'],
+            $normalized['cfg_scale'],
+            $normalized['steps'],
+            $normalized['seed'],
+            $normalized['width'],
+            $normalized['height'],
+            $normalized['scheduler'],
+            $rawBlock,
+        ]);
+    } elseif ($existingPromptId !== false && $rawBlock !== null) {
+        $insertMeta->execute([
+            $mediaId,
+            'raw_block',
+            'prompt_raw',
+            $rawBlock,
+            $createdAt,
+        ]);
+    }
+}
+
 /**
  * Einzeldatei importieren (neuer Eintrag):
  * - Scanner
@@ -396,6 +894,15 @@ function sv_import_file(
             null,
             date('c'),
         ]);
+
+        try {
+            $metadata = sv_extract_metadata($destPathDb, $type, 'import', $logger);
+            sv_store_extracted_metadata($pdo, $mediaId, $type, $metadata, 'import', $logger);
+        } catch (Throwable $e) {
+            if ($logger) {
+                $logger('Metadaten konnten nicht gespeichert werden: ' . $e->getMessage());
+            }
+        }
 
         $pdo->commit();
         return true;
@@ -626,6 +1133,29 @@ function sv_rescan_media(
 
     if ($logger) {
         $logger("Media ID {$id}: Rescan OK (has_nsfw={$hasNsfw}, rating={$rating})");
+    }
+
+    $needMeta   = false;
+    $metaCheck  = $pdo->prepare('SELECT 1 FROM media_meta WHERE media_id = ? LIMIT 1');
+    $metaCheck->execute([$id]);
+    if ($metaCheck->fetchColumn() === false) {
+        $needMeta = true;
+    }
+    $promptCheck = $pdo->prepare('SELECT 1 FROM prompts WHERE media_id = ? LIMIT 1');
+    $promptCheck->execute([$id]);
+    if ($promptCheck->fetchColumn() === false) {
+        $needMeta = true;
+    }
+
+    if ($needMeta) {
+        try {
+            $metadata = sv_extract_metadata($newPath, $type, 'rescan', $logger);
+            sv_store_extracted_metadata($pdo, $id, $type, $metadata, 'rescan', $logger);
+        } catch (Throwable $e) {
+            if ($logger) {
+                $logger("Media ID {$id}: Metadaten konnten nicht gespeichert werden: " . $e->getMessage());
+            }
+        }
     }
 
     return true;

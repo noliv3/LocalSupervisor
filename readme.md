@@ -18,22 +18,23 @@ Die zentrale Konfiguration liegt in `CONFIG/config.php` und definiert:
 
 ## Verzeichnisstruktur
 - `CONFIG/` – globale Einstellungen inklusive DB-DSN und Scanner/Forge-Security-Parameter.【F:CONFIG/config.php†L2-L51】
-- `DB/schema.sql` – Referenzschema für sämtliche Tabellen und Indizes.【F:DB/schema.sql†L3-L202】
+- `DB/schema.sql` – Referenzschema für sämtliche Tabellen und Indizes.【F:DB/schema.sql†L3-L215】
 - `SCRIPTS/` – CLI-Tools und gemeinsame Scan-Logik (`scan_core.php`).【F:SCRIPTS/scan_core.php†L4-L118】【F:SCRIPTS/scan_path_cli.php†L4-L75】
 - `WWW/` – Webkomponenten (Dashboard, Thumbnails).【F:WWW/index.php†L1-L164】
 - `TOOLS/` – optionaler Ablageort für ffmpeg/exiftool (nicht im Repo enthalten).【F:CONFIG/config.php†L30-L34】
 
 ## Datenbankschema (bestätigtes REFERENZSCHEMA_V1)
 Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Live-Schema:
-- `media`: Pfad, Typ (image/video), Quelle, Maße, Videometadaten, Hash, Zeitstempel, Rating/NSFW-Flags, Parent-Verknüpfung und Status; Indizes auf Hash, Quelle, Rating, Status und Importzeit.【F:DB/schema.sql†L3-L37】
+- `media`: Pfad, Typ (image/video), Quelle, Maße, Videometadaten (duration/fps) sowie Basis-Metadaten wie Hash, Zeitstempel, Rating/NSFW-Flags, Parent-Verknüpfung und Status; Indizes auf Hash, Quelle, Rating, Status und Importzeit.【F:DB/schema.sql†L3-L37】
 - `tags` & `media_tags`: Schlagwortverwaltung mit Lock-Flag und Konfidenz; Join-Tabelle mit PK (media_id, tag_id) plus Indizes auf beide Seiten.【F:DB/schema.sql†L41-L61】
 - `scan_results`: Historie pro Scannerlauf inkl. NSFW-Score, Flags und Roh-JSON; Indizes auf media_id und scanner.【F:DB/schema.sql†L65-L81】
 - `prompts`: Prompt-/Parameter-Archiv pro Medium (positive/negative Prompts, Modell, Sampler, CFG, Seed, Auflösung, Scheduler, JSON-Felder).【F:DB/schema.sql†L85-L107】
+- `media_meta`: Freie Metadatenquelle für EXIF/XMP/PNG-Text, Prompt-Blöcke und ffmpeg-Ausgaben; jede Zeile enthält Quelle, Schlüssel, Wert und Timestamp pro media_id.【F:DB/schema.sql†L200-L211】
 - `jobs`: FORGE-Aufträge inkl. Status, Zeitstempel, Request/Response-JSON und Fehlertext; Indizes auf Status und media_id.【F:DB/schema.sql†L111-L131】
 - `collections` & `collection_media`: Virtuelle Ordner mit Many-to-Many-Beziehung; PK (collection_id, media_id) plus Indizes auf beide Spalten.【F:DB/schema.sql†L135-L154】
 - `import_log`: Import-Historie mit Status und Zeitstempel, indiziert nach Status/created_at.【F:DB/schema.sql†L158-L170】
 - `schema_migrations`: Versionierungstabelle für manuelle Migrationen mit `version`, `applied_at` und optionaler Beschreibung.【F:DB/schema.sql†L172-L178】
-- `audit_log`: Audit-Trail für sicherheitsrelevante Aktionen inklusive IP/Key-Markern.【F:DB/schema.sql†L189-L198】
+- `audit_log`: Audit-Trail für sicherheitsrelevante Aktionen inklusive IP/Key-Markern.【F:DB/schema.sql†L193-L202】
 
 ## Schema-Migrationen
 - Neue Migrationen werden als Dateien `NNN_name.php` im Ordner `SCRIPTS/migrations/` abgelegt; der Dateiname (ohne `.php`) muss exakt dem `version`-Eintrag entsprechen und ein Array mit `version`, `description` und einer ausführbaren `run`-Funktion zurückgeben.【F:SCRIPTS/migrations/001_initial_schema.php†L1-L29】
@@ -44,14 +45,15 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - Automatische Migrationen in Web- oder CLI-Scan-Skripten sind nicht vorgesehen; Änderungen müssen immer bewusst über den Runner gestartet werden.【F:SCRIPTS/migrate.php†L1-L6】
 
 ## Konsistenzprüfungen (Schritt 3)
-- Die Tabelle `consistency_log` dokumentiert Funde der Prüfläufe (Migration `002_add_consistency_log`, siehe `DB/schema.sql`).【F:DB/schema.sql†L3-L187】【F:SCRIPTS/migrations/002_add_consistency_log.php†L1-L37】
+- Die Tabelle `consistency_log` dokumentiert Funde der Prüfläufe (Migration `002_add_consistency_log`, siehe `DB/schema.sql`).【F:DB/schema.sql†L184-L190】【F:SCRIPTS/migrations/002_add_consistency_log.php†L1-L37】
 - CLI-Tool: `php SCRIPTS/consistency_check.php` (nur Bericht) oder `php SCRIPTS/consistency_check.php --repair=simple` (inkl. einfacher Reparaturen in Join-Tabellen bzw. Status-Flag `missing`).【F:SCRIPTS/consistency_check.php†L4-L285】
 - Ergebnisse erscheinen auf STDOUT, werden in `LOGS/consistency_*.log` gespeichert und – nach eingespielter Migration – in `consistency_log` geschrieben.【F:SCRIPTS/consistency_check.php†L51-L100】【F:SCRIPTS/consistency_check.php†L112-L285】
 
 ## Arbeitsabläufe
 - **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten. Optional begrenzt `--limit=N` die Anzahl der verarbeiteten Dateien pro Lauf.【F:SCRIPTS/scan_path_cli.php†L12-L81】【F:SCRIPTS/scan_core.php†L409-L495】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
-- **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren. Mit `--limit` und `--offset` lassen sich Teilmengen stapelweise bearbeiten.【F:SCRIPTS/rescan_cli.php†L4-L87】【F:SCRIPTS/scan_core.php†L620-L708】
+- **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren. Mit `--limit` und `--offset` lassen sich Teilmengen stapelweise bearbeiten. Fehlende Metadaten/Prompts werden via `sv_extract_metadata` nachgezogen und in `media_meta` abgelegt.【F:SCRIPTS/rescan_cli.php†L4-L87】【F:SCRIPTS/scan_core.php†L620-L748】
 - **Filesystem-Sync**: `filesync_cli.php` führt `sv_run_filesync` aus, um die Existenz aller `media.path`-Einträge zu prüfen und den Status auf `active`/`missing` zu setzen; `--limit` und `--offset` erlauben Batches.【F:SCRIPTS/filesync_cli.php†L4-L78】【F:SCRIPTS/scan_core.php†L710-L789】
+- **Metadaten-Inspektor**: `meta_inspect.php` liefert eine reine Textübersicht der gespeicherten Prompts und `media_meta`-Einträge pro Medium; `--limit=N` steuert die Anzahl der Datensätze.【F:SCRIPTS/meta_inspect.php†L1-L101】
 
 ## Betrieb / Heavy Tasks
 - Vor Migrationen oder Reparaturläufen immer ein manuelles Backup ziehen: `php SCRIPTS/db_backup.php` legt Kopien unter `BACKUPS/` (oder `paths.backups`) sowie ein Log unter `LOGS/` ab.【F:SCRIPTS/db_backup.php†L1-L98】
@@ -65,7 +67,7 @@ Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verb
 - Web-Schreibzugriffe auf Scanner/Filesync/Rescan oder spätere Mutationen müssen den `internal_api_key` über den Header `X-Internal-Key` oder den Parameter `internal_key` mitschicken; ohne Schlüssel antworten geschützte Endpunkte mit HTTP 403.【F:SCRIPTS/security.php†L32-L83】
 - Optional kann eine `ip_whitelist` gesetzt werden, um Web-Requests zusätzlich nach Quelle einzuschränken; CLI-Tools laufen grundsätzlich ohne Schlüssel, da sie lokal ausgeführt werden.【F:SCRIPTS/security.php†L14-L83】【F:CONFIG/config.php†L41-L52】
 - `sv_require_internal_key` bündelt die Prüfungen und wird an kritischen Web-Einstiegspunkten wie dem Dashboard verwendet.【F:WWW/index.php†L5-L94】【F:SCRIPTS/security.php†L32-L64】
-- Das Audit-Log protokolliert sicherheitsrelevante Aktionen wie Migrationen, Backups, Konsistenz-Reparaturen oder Web-Starts von Scan/Rescan/Filesync samt IP/Key-Markern.【F:SCRIPTS/migrate.php†L1-L94】【F:SCRIPTS/db_backup.php†L1-L118】【F:SCRIPTS/consistency_check.php†L1-L116】【F:WWW/index.php†L5-L94】【F:DB/schema.sql†L189-L198】
+- Das Audit-Log protokolliert sicherheitsrelevante Aktionen wie Migrationen, Backups, Konsistenz-Reparaturen oder Web-Starts von Scan/Rescan/Filesync samt IP/Key-Markern.【F:SCRIPTS/migrate.php†L1-L94】【F:SCRIPTS/db_backup.php†L1-L118】【F:SCRIPTS/consistency_check.php†L1-L116】【F:WWW/index.php†L5-L94】【F:DB/schema.sql†L193-L202】
 - Dateipfade und Log-Verzeichnisse in `CONFIG/config.php` an die Zielumgebung anpassen; Standardwerte zeigen auf Windows-Laufwerke.【F:CONFIG/config.php†L17-L34】
 - ffmpeg/exiftool sind optional und müssen separat installiert oder in `TOOLS/` bereitgestellt werden.【F:dependencies.txt†L20-L22】【F:CONFIG/config.php†L30-L34】
 
