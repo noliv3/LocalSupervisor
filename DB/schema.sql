@@ -200,3 +200,16 @@ CREATE TABLE IF NOT EXISTS audit_log (
     actor_key   TEXT,
     created_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS media_meta (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id    INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    meta_key    TEXT NOT NULL,
+    meta_value  TEXT,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_meta_media
+    ON media_meta(media_id);
