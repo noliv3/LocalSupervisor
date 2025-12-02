@@ -176,3 +176,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at  TEXT NOT NULL,
     description TEXT
 );
+
+
+CREATE TABLE IF NOT EXISTS consistency_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    check_name  TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
