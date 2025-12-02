@@ -40,6 +40,11 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - Die Baseline `001_initial_schema` markiert das bestätigte REFERENZSCHEMA_V1 und fügt lediglich einen Eintrag in `schema_migrations` hinzu, falls er noch fehlt.【F:SCRIPTS/migrations/001_initial_schema.php†L8-L29】
 - Automatische Migrationen in Web- oder CLI-Scan-Skripten sind nicht vorgesehen; Änderungen müssen immer bewusst über den Runner gestartet werden.【F:SCRIPTS/migrate.php†L1-L6】
 
+## Konsistenzprüfungen (Schritt 3)
+- Die Tabelle `consistency_log` dokumentiert Funde der Prüfläufe (Migration `002_add_consistency_log`, siehe `DB/schema.sql`).【F:DB/schema.sql†L3-L187】【F:SCRIPTS/migrations/002_add_consistency_log.php†L1-L37】
+- CLI-Tool: `php SCRIPTS/consistency_check.php` (nur Bericht) oder `php SCRIPTS/consistency_check.php --repair=simple` (inkl. einfacher Reparaturen in Join-Tabellen bzw. Status-Flag `missing`).【F:SCRIPTS/consistency_check.php†L4-L285】
+- Ergebnisse erscheinen auf STDOUT, werden in `LOGS/consistency_*.log` gespeichert und – nach eingespielter Migration – in `consistency_log` geschrieben.【F:SCRIPTS/consistency_check.php†L51-L100】【F:SCRIPTS/consistency_check.php†L112-L285】
+
 ## Arbeitsabläufe
 - **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten.【F:SCRIPTS/scan_path_cli.php†L12-L71】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
 - **Rescan bestehender Medien**: `rescan_cli.php` nutzt `sv_run_rescan_unscanned`, um bereits importierte, aber ungescannte Medien erneut durch den Scanner zu schicken und Status/Ratings zu aktualisieren.【F:SCRIPTS/rescan_cli.php†L4-L67】【F:SCRIPTS/scan_core.php†L338-L452】
