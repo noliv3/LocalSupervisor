@@ -26,7 +26,13 @@ $logFile    = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     sv_require_internal_key($config);
 
-    $action = $_POST['action'] ?? '';
+    $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
+    $allowedActions = ['scan_path', 'rescan_db', 'filesync'];
+
+    if (!in_array($action, $allowedActions, true)) {
+        $jobMessage = 'Ungültige Aktion.';
+        $action     = '';
+    }
 
     $baseDir = realpath(__DIR__ . '/..');
     if ($baseDir === false) {
@@ -38,9 +44,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($action === 'scan_path') {
-            $lastPath = trim($_POST['scan_path'] ?? '');
+            $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
             if ($lastPath === '') {
                 $jobMessage = 'Kein Pfad angegeben.';
+            } elseif (mb_strlen($lastPath) > 500) {
+                $jobMessage = 'Pfad zu lang (max. 500 Zeichen).';
             } else {
                 $logFile = $logsDir . '/scan_' . date('Ymd_His') . '.log';
 

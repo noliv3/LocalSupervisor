@@ -17,11 +17,67 @@ try {
     exit;
 }
 
-$showAdult =
-    (isset($_GET['adult']) && $_GET['adult'] === '1')
-    || (isset($_GET['18']) && strcasecmp((string)$_GET['18'], 'true') === 0);
+function sv_clamp_int(int $value, int $min, int $max, int $default): int
+{
+    if ($value < $min || $value > $max) {
+        return $default;
+    }
 
-$id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+    return $value;
+}
+
+function sv_normalize_enum(?string $value, array $allowed, string $default): string
+{
+    if ($value === null) {
+        return $default;
+    }
+
+    return in_array($value, $allowed, true) ? $value : $default;
+}
+
+function sv_normalize_adult_flag(array $input): bool
+{
+    $adultParam = $input['adult'] ?? null;
+    $altParam   = $input['18']    ?? null;
+
+    if (is_string($adultParam)) {
+        $candidate = strtolower(trim($adultParam));
+        if ($candidate === '1') {
+            return true;
+        }
+        if ($candidate === '0') {
+            return false;
+        }
+    }
+
+    if (is_string($altParam)) {
+        $candidate = strtolower(trim($altParam));
+        if ($candidate === 'true' || $candidate === '1') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function sv_limit_string(string $value, int $maxLen): string
+{
+    if ($maxLen <= 0) {
+        return '';
+    }
+
+    $trimmed = trim($value);
+
+    if (mb_strlen($trimmed) <= $maxLen) {
+        return $trimmed;
+    }
+
+    return mb_substr($trimmed, 0, $maxLen);
+}
+
+$showAdult = sv_normalize_adult_flag($_GET);
+
+$id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
 if ($id <= 0) {
     http_response_code(400);
     echo 'Ungültige ID';
@@ -61,14 +117,27 @@ foreach ($metaRows as $meta) {
     ];
 }
 
+$allowedTypes  = ['all', 'image', 'video'];
+$allowedPrompt = ['all', 'with', 'without'];
+$allowedMeta   = ['all', 'with', 'without'];
+$allowedStatus = ['all', 'active', 'archived', 'deleted'];
+
+$typeFilter      = sv_normalize_enum($_GET['type'] ?? null, $allowedTypes, 'all');
+$hasPromptFilter = sv_normalize_enum($_GET['has_prompt'] ?? null, $allowedPrompt, 'all');
+$hasMetaFilter   = sv_normalize_enum($_GET['has_meta'] ?? null, $allowedMeta, 'all');
+$pathFilter      = sv_limit_string((string)($_GET['q'] ?? ''), 200);
+$statusFilter    = sv_normalize_enum($_GET['status'] ?? null, $allowedStatus, 'all');
+$minRating       = sv_clamp_int((int)($_GET['min_rating'] ?? 0), 0, 3, 0);
+$pageParam       = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
+
 $baseParams = [
-    'type'       => $_GET['type']       ?? null,
-    'has_prompt' => $_GET['has_prompt'] ?? null,
-    'has_meta'   => $_GET['has_meta']   ?? null,
-    'q'          => $_GET['q']          ?? null,
-    'status'     => $_GET['status']     ?? null,
-    'min_rating' => $_GET['min_rating'] ?? null,
-    'p'          => $_GET['p']          ?? null,
+    'type'       => $typeFilter,
+    'has_prompt' => $hasPromptFilter,
+    'has_meta'   => $hasMetaFilter,
+    'q'          => $pathFilter,
+    'status'     => $statusFilter,
+    'min_rating' => $minRating,
+    'p'          => $pageParam,
     'adult'      => $showAdult ? '1' : '0',
 ];
 
