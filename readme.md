@@ -32,6 +32,13 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - `jobs`: FORGE-Aufträge inkl. Status, Zeitstempel, Request/Response-JSON und Fehlertext; Indizes auf Status und media_id.【F:DB/schema.sql†L111-L131】
 - `collections` & `collection_media`: Virtuelle Ordner mit Many-to-Many-Beziehung; PK (collection_id, media_id) plus Indizes auf beide Spalten.【F:DB/schema.sql†L135-L154】
 - `import_log`: Import-Historie mit Status und Zeitstempel, indiziert nach Status/created_at.【F:DB/schema.sql†L158-L170】
+- `schema_migrations`: Versionierungstabelle für manuelle Migrationen mit `version`, `applied_at` und optionaler Beschreibung.【F:DB/schema.sql†L172-L178】
+
+## Schema-Migrationen
+- Neue Migrationen werden als Dateien `NNN_name.php` im Ordner `SCRIPTS/migrations/` abgelegt; der Dateiname (ohne `.php`) muss exakt dem `version`-Eintrag entsprechen und ein Array mit `version`, `description` und einer ausführbaren `run`-Funktion zurückgeben.【F:SCRIPTS/migrations/001_initial_schema.php†L1-L29】
+- Ausführung erfolgt manuell über `php SCRIPTS/migrate.php`; das Skript legt bei Bedarf `schema_migrations` an, sortiert alle Dateien, führt nur fehlende Versionen aus und trägt sie nach Erfolg in die Tabelle ein.【F:SCRIPTS/migrate.php†L1-L113】【F:SCRIPTS/migrate.php†L141-L173】
+- Die Baseline `001_initial_schema` markiert das bestätigte REFERENZSCHEMA_V1 und fügt lediglich einen Eintrag in `schema_migrations` hinzu, falls er noch fehlt.【F:SCRIPTS/migrations/001_initial_schema.php†L8-L29】
+- Automatische Migrationen in Web- oder CLI-Scan-Skripten sind nicht vorgesehen; Änderungen müssen immer bewusst über den Runner gestartet werden.【F:SCRIPTS/migrate.php†L1-L6】
 
 ## Arbeitsabläufe
 - **Erstimport & Scan**: `scan_path_cli.php` lädt Konfiguration, verbindet mit der DB und ruft `sv_run_scan_path` auf, um einen angegebenen Ordner rekursiv zu verarbeiten.【F:SCRIPTS/scan_path_cli.php†L12-L71】 Die zentrale Logik (`scan_core.php`) erkennt Dateityp, berechnet Hash/Metadaten, ruft den konfigurierten Scanner via HTTP auf, verschiebt Dateien in SFW/NSFW-Zielpfade und schreibt Datensätze in `media`, `scan_results`, `tags/media_tags` sowie `import_log`.【F:SCRIPTS/scan_core.php†L53-L228】【F:SCRIPTS/scan_core.php†L243-L336】
