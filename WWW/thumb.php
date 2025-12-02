@@ -17,11 +17,43 @@ try {
     exit;
 }
 
-$showAdult =
-    (isset($_GET['adult']) && $_GET['adult'] === '1')
-    || (isset($_GET['18']) && strcasecmp((string)$_GET['18'], 'true') === 0);
+function sv_clamp_int(int $value, int $min, int $max, int $default): int
+{
+    if ($value < $min || $value > $max) {
+        return $default;
+    }
 
-$id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+    return $value;
+}
+
+function sv_normalize_adult_flag(array $input): bool
+{
+    $adultParam = $input['adult'] ?? null;
+    $altParam   = $input['18']    ?? null;
+
+    if (is_string($adultParam)) {
+        $candidate = strtolower(trim($adultParam));
+        if ($candidate === '1') {
+            return true;
+        }
+        if ($candidate === '0') {
+            return false;
+        }
+    }
+
+    if (is_string($altParam)) {
+        $candidate = strtolower(trim($altParam));
+        if ($candidate === 'true' || $candidate === '1') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+$showAdult = sv_normalize_adult_flag($_GET);
+
+$id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
 if ($id <= 0) {
     http_response_code(400);
     exit;

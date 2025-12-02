@@ -65,6 +65,7 @@ Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verb
 
 - `mediadb.php`: Listenansicht mit Filtern nach Typ (Bild/Video), Prompt-Flag, Metadaten-Flag, Status, Mindest-Rating und Pfad-Substring; NSFW lässt sich über `adult=1` einblenden. Zeigt Typ-Badges, Prompt-/Metadaten-Indikatoren und Links zur Detailseite/Originalpfad.【F:WWW/mediadb.php†L1-L377】
 - `media_view.php`: Detailansicht für ein Medium mit Thumbnail bzw. Video-Platzhalter, Prompt/Negative Prompt, Kern-Metadaten aus `media` (inkl. Dauer/FPS/Dateigröße) sowie gruppierter Anzeige der `media_meta`-Einträge nach `source`. Navigation zu Vorher/Nachher berücksichtigt das FSK18-Flag.【F:WWW/media_view.php†L1-L208】【F:WWW/media_view.php†L214-L311】
+- Filter-/ID-Parameter der Webansichten werden serverseitig defensiv normalisiert (Enum-Whitelists, Integer-Bounds, begrenzte Suchstring-Längen), um Missbrauch durch extreme oder ungültige Werte abzufedern.【F:WWW/mediadb.php†L1-L120】【F:WWW/media_view.php†L1-L119】【F:WWW/thumb.php†L1-L80】
 
 ## Sicherheit und Betrieb
 - Web-Schreibzugriffe auf Scanner/Filesync/Rescan oder spätere Mutationen müssen den `internal_api_key` über den Header `X-Internal-Key` oder den Parameter `internal_key` mitschicken; ohne Schlüssel antworten geschützte Endpunkte mit HTTP 403.【F:SCRIPTS/security.php†L32-L83】
