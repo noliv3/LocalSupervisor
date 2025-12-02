@@ -188,3 +188,15 @@ CREATE TABLE IF NOT EXISTS consistency_log (
     message     TEXT NOT NULL,
     created_at  TEXT NOT NULL
 );
+
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id   INTEGER,
+    details_json TEXT,
+    actor_ip    TEXT,
+    actor_key   TEXT,
+    created_at  TEXT NOT NULL
+);

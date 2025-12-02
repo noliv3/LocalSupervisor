@@ -12,14 +12,29 @@ if ($baseDir === false) {
     exit(1);
 }
 
-$configFile = $baseDir . '/CONFIG/config.php';
+$configFile   = $baseDir . '/CONFIG/config.php';
+$securityFile = $baseDir . '/SCRIPTS/security.php';
 if (!is_file($configFile)) {
     fwrite(STDERR, "CONFIG/config.php fehlt.\n");
     exit(1);
 }
 
 $config = require $configFile;
+require_once $securityFile;
 $dsn    = (string)($config['db']['dsn'] ?? '');
+
+$pdo = null;
+try {
+    $pdo = new PDO(
+        $dsn,
+        $config['db']['user'] ?? null,
+        $config['db']['password'] ?? null,
+        $config['db']['options'] ?? []
+    );
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (Throwable $e) {
+    $pdo = null;
+}
 
 $logDir = (string)($config['paths']['logs'] ?? ($baseDir . '/LOGS'));
 if (!is_dir($logDir)) {
@@ -95,3 +110,12 @@ if ($copySuccess) {
 }
 
 $log('Backup abgeschlossen.');
+
+if ($pdo instanceof PDO) {
+    sv_audit_log($pdo, 'db_backup', 'db', null, [
+        'target'       => $backupFile,
+        'compressed'   => $gzipSuccess,
+        'backup_dir'   => $backupDir,
+        'database_dsn' => $dsn,
+    ]);
+}

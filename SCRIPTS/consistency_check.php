@@ -21,6 +21,7 @@ if (!is_file($configFile)) {
 }
 
 $config = require $configFile;
+require_once $baseDir . '/SCRIPTS/security.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -60,6 +61,8 @@ if (!$consistencyLogAvailable) {
     fwrite(STDERR, "Warnung: Tabelle consistency_log fehlt. Migration ausführen, um DB-Logging zu aktivieren.\n");
 }
 
+$auditFindings = [];
+
 $logLine = function (string $message) use ($logHandle): void {
     $line = $message . PHP_EOL;
     fwrite(STDOUT, $line);
@@ -75,8 +78,17 @@ if ($consistencyLogAvailable) {
     );
 }
 
-$logFinding = function (string $checkName, string $severity, string $message) use ($insertStmt, $consistencyLogAvailable, $logLine): void {
+$logFinding = function (
+    string $checkName,
+    string $severity,
+    string $message
+) use ($insertStmt, $consistencyLogAvailable, $logLine, &$auditFindings): void {
     $logLine("[{$severity}] {$checkName}: {$message}");
+    $auditFindings[] = [
+        'check'    => $checkName,
+        'severity' => $severity,
+        'message'  => $message,
+    ];
     if ($consistencyLogAvailable && $insertStmt !== null) {
         $insertStmt->execute([
             $checkName,
@@ -97,6 +109,13 @@ checkMissingFiles($pdo, $logFinding, $repairMode);
 $logLine('Konsistenzprüfung abgeschlossen.');
 if (is_resource($logHandle)) {
     fclose($logHandle);
+}
+
+if ($repairMode === 'simple') {
+    sv_audit_log($pdo, 'consistency_repair', 'db', null, [
+        'mode'     => $repairMode,
+        'findings' => $auditFindings,
+    ]);
 }
 
 function hasConsistencyLogTable(PDO $pdo): bool
