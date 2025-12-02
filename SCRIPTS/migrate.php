@@ -13,6 +13,7 @@ if ($baseDir === false) {
 
 $configFile    = $baseDir . '/CONFIG/config.php';
 $migrationDir  = $baseDir . '/SCRIPTS/migrations';
+$securityFile  = $baseDir . '/SCRIPTS/security.php';
 
 if (!is_file($configFile)) {
     fwrite(STDERR, "Fehler: CONFIG/config.php nicht gefunden.\n");
@@ -24,6 +25,7 @@ if (!is_dir($migrationDir)) {
 }
 
 $config = require $configFile;
+require_once $securityFile;
 
 if (!isset($config['db']['dsn'])) {
     fwrite(STDERR, "Fehler: DB-DSN in config.php fehlt.\n");
@@ -61,6 +63,7 @@ foreach ($migrations as $migration) {
     try {
         $migration['run']($pdo);
         ensureVersionRecorded($pdo, $version, $description);
+        sv_audit_log($pdo, 'migration_run', 'db', null, ['version' => $version]);
         fwrite(STDOUT, "OK\n");
     } catch (Throwable $e) {
         fwrite(STDOUT, "FEHLER\n");

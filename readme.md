@@ -18,7 +18,7 @@ Die zentrale Konfiguration liegt in `CONFIG/config.php` und definiert:
 
 ## Verzeichnisstruktur
 - `CONFIG/` – globale Einstellungen inklusive DB-DSN und Scanner/Forge-Security-Parameter.【F:CONFIG/config.php†L2-L51】
-- `DB/schema.sql` – Referenzschema für sämtliche Tabellen und Indizes.【F:DB/schema.sql†L3-L170】
+- `DB/schema.sql` – Referenzschema für sämtliche Tabellen und Indizes.【F:DB/schema.sql†L3-L202】
 - `SCRIPTS/` – CLI-Tools und gemeinsame Scan-Logik (`scan_core.php`).【F:SCRIPTS/scan_core.php†L4-L118】【F:SCRIPTS/scan_path_cli.php†L4-L75】
 - `WWW/` – Webkomponenten (Dashboard, Thumbnails).【F:WWW/index.php†L1-L164】
 - `TOOLS/` – optionaler Ablageort für ffmpeg/exiftool (nicht im Repo enthalten).【F:CONFIG/config.php†L30-L34】
@@ -33,12 +33,14 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - `collections` & `collection_media`: Virtuelle Ordner mit Many-to-Many-Beziehung; PK (collection_id, media_id) plus Indizes auf beide Spalten.【F:DB/schema.sql†L135-L154】
 - `import_log`: Import-Historie mit Status und Zeitstempel, indiziert nach Status/created_at.【F:DB/schema.sql†L158-L170】
 - `schema_migrations`: Versionierungstabelle für manuelle Migrationen mit `version`, `applied_at` und optionaler Beschreibung.【F:DB/schema.sql†L172-L178】
+- `audit_log`: Audit-Trail für sicherheitsrelevante Aktionen inklusive IP/Key-Markern.【F:DB/schema.sql†L189-L198】
 
 ## Schema-Migrationen
 - Neue Migrationen werden als Dateien `NNN_name.php` im Ordner `SCRIPTS/migrations/` abgelegt; der Dateiname (ohne `.php`) muss exakt dem `version`-Eintrag entsprechen und ein Array mit `version`, `description` und einer ausführbaren `run`-Funktion zurückgeben.【F:SCRIPTS/migrations/001_initial_schema.php†L1-L29】
 - Ausführung erfolgt manuell über `php SCRIPTS/migrate.php`; das Skript legt bei Bedarf `schema_migrations` an, sortiert alle Dateien, führt nur fehlende Versionen aus und trägt sie nach Erfolg in die Tabelle ein.【F:SCRIPTS/migrate.php†L1-L113】【F:SCRIPTS/migrate.php†L141-L173】
 - Die Baseline `001_initial_schema` markiert das bestätigte REFERENZSCHEMA_V1 und fügt lediglich einen Eintrag in `schema_migrations` hinzu, falls er noch fehlt.【F:SCRIPTS/migrations/001_initial_schema.php†L8-L29】
 - `003_add_runtime_indexes` ergänzt einen Index auf `media.type`, der Scan- und Rescan-Filter beschleunigt.【F:SCRIPTS/migrations/003_add_runtime_indexes.php†L1-L37】【F:DB/schema.sql†L21-L35】
+- `004_add_audit_log` legt ein Audit-Log für sicherheitsrelevante Aktionen an.【F:SCRIPTS/migrations/004_add_audit_log.php†L1-L37】【F:DB/schema.sql†L193-L202】
 - Automatische Migrationen in Web- oder CLI-Scan-Skripten sind nicht vorgesehen; Änderungen müssen immer bewusst über den Runner gestartet werden.【F:SCRIPTS/migrate.php†L1-L6】
 
 ## Konsistenzprüfungen (Schritt 3)
@@ -60,7 +62,10 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verbindung über `CONFIG/config.php`, Ausgabe der vorhandenen DB-Tabellen (SQLite) sowie Formulare, um Scan-, Rescan- und Filesync-CLI-Skripte im Hintergrund zu starten und Log-Dateien abzulegen.【F:WWW/index.php†L6-L164】
 
 ## Sicherheit und Betrieb
-- API-Tokens/Whitelists konfigurieren, bevor Scanner-Aufrufe produktiv genutzt werden.【F:CONFIG/config.php†L36-L51】
+- Web-Schreibzugriffe auf Scanner/Filesync/Rescan oder spätere Mutationen müssen den `internal_api_key` über den Header `X-Internal-Key` oder den Parameter `internal_key` mitschicken; ohne Schlüssel antworten geschützte Endpunkte mit HTTP 403.【F:SCRIPTS/security.php†L32-L83】
+- Optional kann eine `ip_whitelist` gesetzt werden, um Web-Requests zusätzlich nach Quelle einzuschränken; CLI-Tools laufen grundsätzlich ohne Schlüssel, da sie lokal ausgeführt werden.【F:SCRIPTS/security.php†L14-L83】【F:CONFIG/config.php†L41-L52】
+- `sv_require_internal_key` bündelt die Prüfungen und wird an kritischen Web-Einstiegspunkten wie dem Dashboard verwendet.【F:WWW/index.php†L5-L94】【F:SCRIPTS/security.php†L32-L64】
+- Das Audit-Log protokolliert sicherheitsrelevante Aktionen wie Migrationen, Backups, Konsistenz-Reparaturen oder Web-Starts von Scan/Rescan/Filesync samt IP/Key-Markern.【F:SCRIPTS/migrate.php†L1-L94】【F:SCRIPTS/db_backup.php†L1-L118】【F:SCRIPTS/consistency_check.php†L1-L116】【F:WWW/index.php†L5-L94】【F:DB/schema.sql†L189-L198】
 - Dateipfade und Log-Verzeichnisse in `CONFIG/config.php` an die Zielumgebung anpassen; Standardwerte zeigen auf Windows-Laufwerke.【F:CONFIG/config.php†L17-L34】
 - ffmpeg/exiftool sind optional und müssen separat installiert oder in `TOOLS/` bereitgestellt werden.【F:dependencies.txt†L20-L22】【F:CONFIG/config.php†L30-L34】
 

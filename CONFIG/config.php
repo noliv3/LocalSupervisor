@@ -46,7 +46,7 @@ return [
     ],
 
     'security' => [
-        'api_key_internal' => 'CHANGE_ME_INTERNAL_API_KEY',
-        'allowed_ips'      => ['127.0.0.1'],
+        'internal_api_key' => 'CHANGE_ME_INTERNAL_API_KEY',
+        'ip_whitelist'     => ['127.0.0.1'],
     ],
 ];

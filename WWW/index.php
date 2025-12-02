@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/security.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -23,6 +24,8 @@ $jobMessage = null;
 $logFile    = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    sv_require_internal_key($config);
+
     $action = $_POST['action'] ?? '';
 
     $baseDir = realpath(__DIR__ . '/..');
@@ -54,6 +57,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 @pclose(@popen($cmd, 'r'));
 
                 $jobMessage = 'Scan-Prozess im Hintergrund gestartet.';
+                sv_audit_log($pdo, 'scan_start', 'fs', null, [
+                    'path'       => $lastPath,
+                    'log_file'   => $logFile,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                ]);
             }
         } elseif ($action === 'rescan_db') {
             $logFile = $logsDir . '/rescan_' . date('Ymd_His') . '.log';
@@ -69,6 +77,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             @pclose(@popen($cmd, 'r'));
 
             $jobMessage = 'Rescan-Prozess im Hintergrund gestartet.';
+            sv_audit_log($pdo, 'rescan_start', 'fs', null, [
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
         } elseif ($action === 'filesync') {
             $logFile = $logsDir . '/filesync_' . date('Ymd_His') . '.log';
 
@@ -83,6 +95,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             @pclose(@popen($cmd, 'r'));
 
             $jobMessage = 'Filesync-Prozess im Hintergrund gestartet.';
+            sv_audit_log($pdo, 'filesync_start', 'fs', null, [
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
         }
     }
 }
