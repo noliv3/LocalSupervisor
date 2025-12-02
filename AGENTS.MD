@@ -15,3 +15,4 @@ Scope: gesamtes Repository.
 - Betrieb / Heavy Tasks: Vor Migrationen oder Reparaturen zuerst `php SCRIPTS/db_backup.php` ausführen, dann `php SCRIPTS/migrate.php`, anschließend `php SCRIPTS/consistency_check.php` (report-only) und erst danach große Scans/Rescans/Filesync-Läufe (ggf. mit `--limit`/`--offset`).
 - Kritische Writes aus dem Web (Scan/Rescan/Filesync, spätere Mutationen) müssen über geschützte Endpunkte mit `sv_require_internal_key` abgesichert werden; UI-Aktionen wie Ratings/Kommentare gelten als „low impact“ und dürfen ohne Key laufen, sollten aber entsprechend kommentiert sein.
 - Neue Web-Parameter immer über Whitelists/Bereiche absichern; siehe `WWW/mediadb.php`, `WWW/media_view.php` und `WWW/thumb.php` für Beispiele.
+- Ergänzende Härtungsnotizen stehen in `SECURITY_REVIEW.md`; halte README und diese Datei synchron, wenn Sicherheits- oder Betriebsabläufe angepasst werden.
