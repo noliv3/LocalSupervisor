@@ -6,6 +6,8 @@ declare(strict_types=1);
  * Kann von CLI und Web eingebunden werden.
  */
 
+require_once __DIR__ . '/prompt_parser.php';
+
 function sv_move_file(string $src, string $dest): bool
 {
     $destDir = dirname($dest);
@@ -246,22 +248,6 @@ function sv_store_scan_result(PDO $pdo, int $mediaId, string $scannerName, ?floa
 }
 
 
-function sv_empty_normalized_prompt(): array
-{
-    return [
-        'prompt'           => null,
-        'negative_prompt'  => null,
-        'model'            => null,
-        'sampler'          => null,
-        'steps'            => null,
-        'cfg_scale'        => null,
-        'seed'             => null,
-        'width'            => null,
-        'height'           => null,
-        'scheduler'        => null,
-    ];
-}
-
 function sv_stringify_meta_value($value): ?string
 {
     if ($value === null) {
@@ -280,28 +266,6 @@ function sv_stringify_meta_value($value): ?string
     }
 
     return $json;
-}
-
-function sv_merge_normalized_prompt(array $base, array $additional): array
-{
-    foreach ($base as $k => $v) {
-        if ($v === null && array_key_exists($k, $additional) && $additional[$k] !== null) {
-            $base[$k] = $additional[$k];
-        }
-    }
-
-    return $base;
-}
-
-function sv_normalized_prompt_has_data(array $normalized): bool
-{
-    foreach ($normalized as $v) {
-        if ($v !== null) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 function sv_read_png_text_chunks(string $file): array
@@ -375,76 +339,6 @@ function sv_read_png_text_chunks(string $file): array
     return $result;
 }
 
-function sv_select_raw_block(array $candidates): ?string
-{
-    $longest = null;
-    foreach ($candidates as $candidate) {
-        if (!is_string($candidate) || trim($candidate) === '') {
-            continue;
-        }
-        if ($longest === null || strlen($candidate) > strlen($longest)) {
-            $longest = $candidate;
-        }
-    }
-
-    return $longest;
-}
-
-function sv_parse_prompt_block(string $text): array
-{
-    $normalized = sv_empty_normalized_prompt();
-
-    $json = json_decode($text, true);
-    if (is_array($json)) {
-        $normalized = sv_merge_normalized_prompt($normalized, [
-            'prompt'          => isset($json['prompt']) && is_string($json['prompt']) ? $json['prompt'] : null,
-            'negative_prompt' => isset($json['negative_prompt']) && is_string($json['negative_prompt']) ? $json['negative_prompt'] : null,
-            'model'           => isset($json['model']) && is_string($json['model']) ? $json['model'] : null,
-            'sampler'         => isset($json['sampler']) && is_string($json['sampler']) ? $json['sampler'] : null,
-            'steps'           => isset($json['steps']) && is_numeric($json['steps']) ? (int)$json['steps'] : null,
-            'cfg_scale'       => isset($json['cfg_scale']) && is_numeric($json['cfg_scale']) ? (float)$json['cfg_scale'] : null,
-            'seed'            => isset($json['seed']) ? (string)$json['seed'] : null,
-            'width'           => isset($json['width']) && is_numeric($json['width']) ? (int)$json['width'] : null,
-            'height'          => isset($json['height']) && is_numeric($json['height']) ? (int)$json['height'] : null,
-            'scheduler'       => isset($json['scheduler']) && is_string($json['scheduler']) ? $json['scheduler'] : null,
-        ]);
-    }
-
-    if (stripos($text, 'Negative prompt:') !== false) {
-        if (preg_match('/^(.+?)\s*Negative prompt:/s', $text, $m)) {
-            $normalized['prompt'] = $normalized['prompt'] ?? trim($m[1]);
-        }
-        if (preg_match('/Negative prompt:\s*(.+?)(?:\n\s*Steps:|$)/si', $text, $m)) {
-            $normalized['negative_prompt'] = $normalized['negative_prompt'] ?? trim($m[1]);
-        }
-    }
-
-    if (preg_match('/Steps:\s*(\d+)/i', $text, $m)) {
-        $normalized['steps'] = $normalized['steps'] ?? (int)$m[1];
-    }
-    if (preg_match('/Sampler:\s*([^,\n]+)/i', $text, $m)) {
-        $normalized['sampler'] = $normalized['sampler'] ?? trim($m[1]);
-    }
-    if (preg_match('/CFG scale:\s*([0-9.]+)/i', $text, $m)) {
-        $normalized['cfg_scale'] = $normalized['cfg_scale'] ?? (float)$m[1];
-    }
-    if (preg_match('/Seed:\s*([^,\n]+)/i', $text, $m)) {
-        $normalized['seed'] = $normalized['seed'] ?? trim($m[1]);
-    }
-    if (preg_match('/Size:\s*(\d+)x(\d+)/i', $text, $m)) {
-        $normalized['width']  = $normalized['width'] ?? (int)$m[1];
-        $normalized['height'] = $normalized['height'] ?? (int)$m[2];
-    }
-    if (preg_match('/Model:\s*([^,\n]+)/i', $text, $m)) {
-        $normalized['model'] = $normalized['model'] ?? trim($m[1]);
-    }
-    if (preg_match('/Scheduler:\s*([^,\n]+)/i', $text, $m)) {
-        $normalized['scheduler'] = $normalized['scheduler'] ?? trim($m[1]);
-    }
-
-    return $normalized;
-}
-
 function sv_collect_media_meta_dimensions(array $metaPairs): array
 {
     $dimensions = [
@@ -485,10 +379,7 @@ function sv_collect_media_meta_dimensions(array $metaPairs): array
  */
 function sv_extract_metadata(string $file, string $type, string $source, ?callable $logger = null): array
 {
-    $normalized  = sv_empty_normalized_prompt();
-    $rawBlock    = null;
     $metaPairs   = [];
-    $rawBuffers  = [];
 
     if ($type === 'image') {
         if (function_exists('exif_read_data')) {
@@ -507,10 +398,6 @@ function sv_extract_metadata(string $file, string $type, string $source, ?callab
                             'value'  => $val,
                         ];
 
-                        $lowerKey = strtolower((string)$k);
-                        if (in_array($lowerKey, ['usercomment', 'imagedescription', 'xpcomment', 'comment'], true) && $val !== null) {
-                            $rawBuffers[] = $val;
-                        }
                     }
                 }
             }
@@ -524,9 +411,6 @@ function sv_extract_metadata(string $file, string $type, string $source, ?callab
                 'key'    => (string)$k,
                 'value'  => $textVal,
             ];
-            if ($textVal !== null) {
-                $rawBuffers[] = $textVal;
-            }
         }
     } elseif ($type === 'video') {
         $baseDir  = realpath(__DIR__ . '/..');
@@ -625,15 +509,11 @@ function sv_extract_metadata(string $file, string $type, string $source, ?callab
         ];
     }
 
-    $rawBlock = sv_select_raw_block($rawBuffers);
-    if ($rawBlock !== null) {
-        $normalized = sv_merge_normalized_prompt($normalized, sv_parse_prompt_block($rawBlock));
-    }
+    $promptCandidates = sv_collect_prompt_candidates($metaPairs);
 
     return [
-        'normalized_prompt' => $normalized,
-        'raw_block'         => $rawBlock,
         'meta_pairs'        => $metaPairs,
+        'prompt_candidates' => $promptCandidates,
     ];
 }
 
@@ -645,10 +525,28 @@ function sv_store_extracted_metadata(
     string $sourceLabel,
     ?callable $logger = null
 ): void {
-    $normalized = is_array($metadata['normalized_prompt'] ?? null) ? $metadata['normalized_prompt'] : sv_empty_normalized_prompt();
-    $metaPairs  = is_array($metadata['meta_pairs'] ?? null) ? $metadata['meta_pairs'] : [];
-    $rawBlock   = is_string($metadata['raw_block'] ?? null) ? $metadata['raw_block'] : null;
-    $createdAt  = date('c');
+    $metaPairs        = is_array($metadata['meta_pairs'] ?? null) ? $metadata['meta_pairs'] : [];
+    $promptCandidates = is_array($metadata['prompt_candidates'] ?? null) ? $metadata['prompt_candidates'] : [];
+    if (!$promptCandidates && isset($metadata['raw_block']) && is_string($metadata['raw_block'])) {
+        $promptCandidates[] = [
+            'source'    => $sourceLabel,
+            'key'       => 'raw_block',
+            'short_key' => 'raw_block',
+            'text'      => (string)$metadata['raw_block'],
+            'type'      => 'fallback',
+        ];
+    }
+
+    $selectedCandidate = sv_select_prompt_candidate($promptCandidates);
+    $rawBlock          = is_string($selectedCandidate['text'] ?? null) ? (string)$selectedCandidate['text'] : null;
+    $normalized        = sv_empty_normalized_prompt();
+
+    if ($rawBlock !== null) {
+        $context    = is_array($selectedCandidate) ? $selectedCandidate : [];
+        $normalized = sv_normalize_prompt_block($rawBlock, $context);
+    }
+
+    $createdAt = date('c');
 
     $insertMeta = $pdo->prepare(
         "INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -674,7 +572,7 @@ function sv_store_extracted_metadata(
     }
 
     $dimensions = sv_collect_media_meta_dimensions($metaPairs);
-    $dimStmt = $pdo->prepare("SELECT width, height, duration, fps, filesize FROM media WHERE id = ?");
+    $dimStmt    = $pdo->prepare("SELECT width, height, duration, fps, filesize FROM media WHERE id = ?");
     $dimStmt->execute([$mediaId]);
     $currentDims = $dimStmt->fetch(PDO::FETCH_ASSOC) ?: [];
     $updateParts = [];
@@ -713,10 +611,14 @@ function sv_store_extracted_metadata(
     $existingPromptId = $promptStmt->fetchColumn();
     $hasNormalized    = sv_normalized_prompt_has_data($normalized);
 
+    if ($rawBlock !== null && $normalized['source_metadata'] === null) {
+        $normalized['source_metadata'] = $rawBlock;
+    }
+
     if ($existingPromptId === false && ($hasNormalized || $rawBlock !== null)) {
         $insertPrompt = $pdo->prepare(
-            "INSERT INTO prompts (media_id, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, source_metadata)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO prompts (media_id, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata)"
+            . " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         );
         $insertPrompt->execute([
             $mediaId,
@@ -730,9 +632,50 @@ function sv_store_extracted_metadata(
             $normalized['width'],
             $normalized['height'],
             $normalized['scheduler'],
-            $rawBlock,
+            $normalized['sampler_settings'],
+            $normalized['loras'],
+            $normalized['controlnet'],
+            $normalized['source_metadata'],
         ]);
-    } elseif ($existingPromptId !== false && $rawBlock !== null) {
+    } elseif ($existingPromptId !== false && $hasNormalized) {
+        $updatePrompt = $pdo->prepare(
+            "UPDATE prompts SET"
+            . " prompt = COALESCE(prompt, ?),"
+            . " negative_prompt = COALESCE(negative_prompt, ?),"
+            . " model = COALESCE(model, ?),"
+            . " sampler = COALESCE(sampler, ?),"
+            . " cfg_scale = COALESCE(cfg_scale, ?),"
+            . " steps = COALESCE(steps, ?),"
+            . " seed = COALESCE(seed, ?),"
+            . " width = COALESCE(width, ?),"
+            . " height = COALESCE(height, ?),"
+            . " scheduler = COALESCE(scheduler, ?),"
+            . " sampler_settings = COALESCE(sampler_settings, ?),"
+            . " loras = COALESCE(loras, ?),"
+            . " controlnet = COALESCE(controlnet, ?),"
+            . " source_metadata = COALESCE(source_metadata, ?)"
+            . " WHERE id = ?"
+        );
+        $updatePrompt->execute([
+            $normalized['prompt'],
+            $normalized['negative_prompt'],
+            $normalized['model'],
+            $normalized['sampler'],
+            $normalized['cfg_scale'],
+            $normalized['steps'],
+            $normalized['seed'],
+            $normalized['width'],
+            $normalized['height'],
+            $normalized['scheduler'],
+            $normalized['sampler_settings'],
+            $normalized['loras'],
+            $normalized['controlnet'],
+            $normalized['source_metadata'],
+            $existingPromptId,
+        ]);
+    }
+
+    if ($rawBlock !== null) {
         $insertMeta->execute([
             $mediaId,
             'raw_block',

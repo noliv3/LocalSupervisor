@@ -6,6 +6,7 @@ Scope: gesamtes Repository.
 - Dashboard (`WWW/index.php`) dient als Einstieg für Scan-/Rescan-/Filesync-Starts, zeigt Kernstatistiken (Media/Prompts/Tags/Logs)
   und führt eine CLI-Referenz mit typischen Aufrufen; produktive neue CLIs dort mindestens dokumentieren.
 - Metadaten gehören in `media_meta`; erweitere Parser zentral in `sv_extract_metadata` statt Ad-hoc-Logik zu verteilen.
+- Prompt-Parsing ist in `SCRIPTS/prompt_parser.php` sowie `sv_extract_metadata`/`sv_store_extracted_metadata` gebündelt; neue Quellen bitte dort ergänzen statt eigene Parser-CLIs anzulegen.
 - Metadaten/Prompts werden im Web read-only über `WWW/mediadb.php` (Liste) und `WWW/media_view.php` (Detail) angezeigt;
   neue UI-Felder bitte dort integrieren statt separate Viewer zu bauen.
 - Konsistenzprüfungen laufen manuell über `php SCRIPTS/consistency_check.php` (optional `--repair=simple`); Ergebnisse landen in `LOGS/consistency_*.log` und in `consistency_log`, sobald Migration 002 eingespielt ist.
