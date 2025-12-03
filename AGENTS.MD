@@ -3,6 +3,8 @@
 Scope: gesamtes Repository.
 
 - Halte README und diese Datei aktuell, wenn Abläufe, Anforderungen oder Bedienhinweise geändert werden.
+- Dashboard (`WWW/index.php`) dient als Einstieg für Scan-/Rescan-/Filesync-Starts, zeigt Kernstatistiken (Media/Prompts/Tags/Logs)
+  und führt eine CLI-Referenz mit typischen Aufrufen; produktive neue CLIs dort mindestens dokumentieren.
 - Metadaten gehören in `media_meta`; erweitere Parser zentral in `sv_extract_metadata` statt Ad-hoc-Logik zu verteilen.
 - Metadaten/Prompts werden im Web read-only über `WWW/mediadb.php` (Liste) und `WWW/media_view.php` (Detail) angezeigt;
   neue UI-Felder bitte dort integrieren statt separate Viewer zu bauen.
