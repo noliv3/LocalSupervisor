@@ -1,0 +1,19 @@
+# lokale DB
+DB/*.sqlite
+
+# Logs
+LOGS/*.log
+LOGS/**/*.log
+
+# lokale Tools (nicht versionieren)
+TOOLS/
+!TOOLS/readme*.md
+
+# lokale Web-Symlinks/Ordner
+WWW/bilder
+WWW/fsk18
+WWW/videos
+WWW/videos18
+
+# lokale Config
+CONFIG/config.php

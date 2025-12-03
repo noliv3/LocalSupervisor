@@ -41,9 +41,38 @@ function sv_get_client_ip(): string
 
 function sv_require_internal_key(array $config): void
 {
-    $security = $config['security'] ?? [];
-    sv_check_internal_key($security);
+    $sec          = $config['security'] ?? [];
+    $ipWhitelist  = $sec['ip_whitelist'] ?? [];
+    $remoteIp     = $_SERVER['REMOTE_ADDR'] ?? '';
+
+    // Lokale/whitelist-IP: kein Key nötig
+    if ($remoteIp !== '' && in_array($remoteIp, $ipWhitelist, true)) {
+        return;
+    }
+
+    $expectedKey = (string)($sec['internal_api_key'] ?? '');
+    if ($expectedKey === '') {
+        http_response_code(403);
+        echo 'Internal key not configured.';
+        exit;
+    }
+
+    $got = null;
+    if (isset($_SERVER['HTTP_X_INTERNAL_KEY'])) {
+        $got = (string)$_SERVER['HTTP_X_INTERNAL_KEY'];
+    } elseif (isset($_GET['internal_key'])) {
+        $got = (string)$_GET['internal_key'];
+    } elseif (isset($_POST['internal_key'])) {
+        $got = (string)$_POST['internal_key'];
+    }
+
+    if (!hash_equals($expectedKey, (string)$got)) {
+        http_response_code(403);
+        echo 'Forbidden (internal key required).';
+        exit;
+    }
 }
+
 
 function sv_check_internal_key(array $configSecurity): void
 {
