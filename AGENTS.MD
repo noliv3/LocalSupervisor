@@ -16,3 +16,4 @@ Scope: gesamtes Repository.
 - Kritische Writes aus dem Web (Scan/Rescan/Filesync, spätere Mutationen) müssen über geschützte Endpunkte mit `sv_require_internal_key` abgesichert werden; UI-Aktionen wie Ratings/Kommentare gelten als „low impact“ und dürfen ohne Key laufen, sollten aber entsprechend kommentiert sein.
 - Neue Web-Parameter immer über Whitelists/Bereiche absichern; siehe `WWW/mediadb.php`, `WWW/media_view.php` und `WWW/thumb.php` für Beispiele.
 - Ergänzende Härtungsnotizen stehen in `SECURITY_REVIEW.md`; halte README und diese Datei synchron, wenn Sicherheits- oder Betriebsabläufe angepasst werden.
+- `SCRIPTS/paths_bootstrap.php` legt fehlende Symlinks im Webroot an (`bilder`, `fsk18`, `videos`, `videos18`), damit die aus der DB stammenden Pfade (`paths.*`) auch unter dem PHP-Built-in-Server erreichbar sind; `WWW/mediadb.php` ruft das Bootstrap bei jedem Request idempotent auf.

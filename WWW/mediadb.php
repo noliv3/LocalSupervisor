@@ -2,6 +2,10 @@
 declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/paths_bootstrap.php';
+
+$pathsCfg = $config['paths'] ?? [];
+sv_bootstrap_web_symlinks($pathsCfg, realpath(__DIR__));
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -116,8 +120,6 @@ function sv_limit_string(string $value, int $maxLen): string
 
     return mb_substr($trimmed, 0, $maxLen);
 }
-
-$pathsCfg = $config['paths'] ?? [];
 
 $showAdult = sv_normalize_adult_flag($_GET);
 
