@@ -2,9 +2,8 @@
 declare(strict_types=1);
 
 /**
- * Legacy-CLI für EXIF/Prompt-Extraktion.
- * Hinweis: Die regulären Scan-/Rescan-Pfade ziehen Prompts automatisch;
- * dieses Skript dient nur noch als Kompatibilitäts- und Altbestand-Runner.
+ * Wendet den zentralen Prompt-Parser auf bestehende Medien an,
+ * sofern noch kein vollständiger Prompt-Datensatz vorliegt.
  */
 
 $root = dirname(__DIR__);
@@ -16,7 +15,7 @@ $user     = $config['db']['user'] ?? null;
 $password = $config['db']['password'] ?? null;
 $options  = $config['db']['options'] ?? [];
 
-$limit  = null;
+$limit  = 250;
 $offset = null;
 
 foreach ($argv as $arg) {
@@ -32,8 +31,8 @@ if (!is_string($dsn) || $dsn === '') {
     exit(1);
 }
 
-echo "SuperVisOr EXIF/Prompt-Scan (Legacy)\n";
-echo "=================================\n\n";
+echo "SuperVisOr Prompt-Rebuild\n";
+echo "========================\n\n";
 
 try {
     $pdo = new PDO($dsn, $user, $password, $options);
@@ -43,7 +42,13 @@ try {
     exit(1);
 }
 
-$sql = "SELECT id, path, type FROM media WHERE status = 'active' AND type = 'image' ORDER BY id ASC";
+$sql = "SELECT m.id, m.path, m.type, p.id AS prompt_id FROM media m "
+     . "LEFT JOIN prompts p ON p.media_id = m.id "
+     . "WHERE m.status = 'active' AND m.type = 'image' AND (";
+$sql .= "p.id IS NULL OR p.prompt IS NULL OR p.negative_prompt IS NULL OR p.source_metadata IS NULL";
+$sql .= " OR p.model IS NULL OR p.sampler IS NULL OR p.cfg_scale IS NULL OR p.steps IS NULL OR p.seed IS NULL OR p.width IS NULL OR p.height IS NULL OR p.scheduler IS NULL";
+$sql .= ") ORDER BY m.id ASC";
+
 if ($limit !== null) {
     $sql .= ' LIMIT ' . max(0, $limit);
 }
@@ -72,8 +77,8 @@ foreach ($rows as $row) {
     }
 
     try {
-        $metadata = sv_extract_metadata($path, $type, 'exif_cli');
-        sv_store_extracted_metadata($pdo, $mediaId, $type, $metadata, 'exif_cli', function (string $msg) use ($mediaId): void {
+        $metadata = sv_extract_metadata($path, $type, 'prompts_rebuild');
+        sv_store_extracted_metadata($pdo, $mediaId, $type, $metadata, 'prompts_rebuild', function (string $msg) use ($mediaId): void {
             echo "  -> {$msg}\n";
         });
         $processed++;
