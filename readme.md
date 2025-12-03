@@ -61,7 +61,8 @@ Alle Tabellen sind in `DB/schema.sql` definiert und entsprechen dem aktuellen Li
 - Beispielaufrufe für Batches: `php SCRIPTS/scan_path_cli.php "D:\\Import" --limit=250`, `php SCRIPTS/rescan_cli.php --limit=100 --offset=200`, `php SCRIPTS/filesync_cli.php --limit=500`.
 
 ## Weboberfläche
-Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verbindung über `CONFIG/config.php`, Ausgabe der vorhandenen DB-Tabellen (SQLite) sowie Formulare, um Scan-, Rescan- und Filesync-CLI-Skripte im Hintergrund zu starten und Log-Dateien abzulegen.【F:WWW/index.php†L6-L164】
+Das Dashboard (`WWW/index.php`) stellt eine einfache Übersicht bereit: PDO-Verbindung über `CONFIG/config.php`, Ausgabe der vorhandenen DB-Tabellen (SQLite) sowie Formulare, um Scan-, Rescan- und Filesync-CLI-Skripte im Hintergrund zu starten und Log-Dateien abzulegen.【F:WWW/index.php†L6-L354】
+Unterhalb der Formulare zeigt das Dashboard eine komprimierte Statistik über Medien (Typ/Status/Rating/NSFW), Prompts, Tags, Scan-Resultate, media_meta sowie Import-/Job-Logs und listet eine CLI-Referenz mit Kategorien und Beispielaufrufen für die wichtigsten Skripte.【F:WWW/index.php†L356-L502】
 
 - `mediadb.php`: Listenansicht mit Filtern nach Typ (Bild/Video), Prompt-Flag, Metadaten-Flag, Status, Mindest-Rating und Pfad-Substring; NSFW lässt sich über `adult=1` einblenden. Zeigt Typ-Badges, Prompt-/Metadaten-Indikatoren und Links zur Detailseite/Originalpfad.【F:WWW/mediadb.php†L1-L377】
   Beim Start werden Symlinks im Webroot (`WWW/bilder`, `WWW/fsk18`, `WWW/videos`, `WWW/videos18`) gegenüber den in `paths.*` konfigurierten Quellverzeichnissen angelegt, sodass auch Windows-Pfade über den eingebauten Webserver erreichbar sind.【F:WWW/mediadb.php†L1-L52】【F:SCRIPTS/paths_bootstrap.php†L1-L38】
