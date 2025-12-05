@@ -2,6 +2,8 @@
 
 SuperVisOr ist ein PHP-basiertes Werkzeug, um große lokale Sammlungen von Bildern und Videos einheitlich zu erfassen, zu scannen (NSFW/Tags) und für spätere Reproduktionen via FORGE vorzubereiten. Die Anwendung kombiniert eine Weboberfläche mit CLI-Tools für Batch-Jobs.
 
+Aktueller Codex-Audit-Stand ist in `CODEX_AUDIT.md` dokumentiert und bildet den vollständigen Datei-Inventar samt MD5-Hashes sowie Risikoeinschätzungen ab.
+
 ## Systemvoraussetzungen
 - PHP 8.1+ mit PDO (SQLite oder MySQL/MariaDB), JSON, mbstring, fileinfo sowie Bildbibliothek (gd oder imagick) und optional EXIF und cURL für API-Aufrufe.【F:dependencies.txt†L2-L14】
 - Datenbank: SQLite (supervisor.sqlite) oder alternativ MySQL/MariaDB.【F:dependencies.txt†L16-L18】
