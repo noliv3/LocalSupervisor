@@ -1,37 +1,20 @@
 <?php
 declare(strict_types=1);
 
-// CLI-Wrapper für großen Scanlauf.
-// Aufruf: php SCRIPTS/scan_path_cli.php "D:\ImportPfad"
+// Minimaler CLI-Wrapper, der die zentrale Operation verwendet.
 
 if (PHP_SAPI !== 'cli') {
     fwrite(STDERR, "Nur CLI.\n");
     exit(1);
 }
 
-$baseDir = realpath(__DIR__ . '/..');
-if ($baseDir === false) {
-    fwrite(STDERR, "Basisverzeichnis nicht gefunden.\n");
-    exit(1);
-}
-
-$configFile = $baseDir . '/CONFIG/config.php';
-if (!is_file($configFile)) {
-    fwrite(STDERR, "CONFIG/config.php fehlt.\n");
-    exit(1);
-}
-
-$config = require $configFile;
-
-$dsn      = $config['db']['dsn'];
-$user     = $config['db']['user']     ?? null;
-$password = $config['db']['password'] ?? null;
-$options  = $config['db']['options']  ?? [];
+require_once __DIR__ . '/operations.php';
 
 try {
-    $pdo = new PDO($dsn, $user, $password, $options);
+    $config = sv_load_config();
+    $pdo    = sv_open_pdo($config);
 } catch (Throwable $e) {
-    fwrite(STDERR, "DB-Fehler: " . $e->getMessage() . "\n");
+    fwrite(STDERR, "Init-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 }
 
@@ -55,39 +38,18 @@ for ($i = 1; $i < $argc; $i++) {
     }
 }
 
-if ($scanPath === null) {
+if ($scanPath === null || $scanPath === '') {
     fwrite(STDERR, "Pfad als Argument nötig.\n");
     fwrite(STDERR, "Beispiel: php SCRIPTS/scan_path_cli.php \"D:\\ImportOrdner\" [--limit=100]\n");
     exit(1);
 }
-
-require_once $baseDir . '/SCRIPTS/scan_core.php';
-
-$scannerCfg    = $config['scanner'] ?? [];
-$pathsCfg      = $config['paths'] ?? [];
-$nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
 $logger = function (string $msg): void {
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
 try {
-    $result = sv_run_scan_path(
-        $scanPath,
-        $pdo,
-        $pathsCfg,
-        $scannerCfg,
-        $nsfwThreshold,
-        $logger,
-        $limit
-    );
-
-    fwrite(STDOUT, sprintf(
-        "Fertig: processed=%d, skipped=%d, errors=%d\n",
-        (int)$result['processed'],
-        (int)$result['skipped'],
-        (int)$result['errors']
-    ));
+    sv_run_scan_operation($pdo, $config, $scanPath, $limit, $logger);
 } catch (Throwable $e) {
     fwrite(STDERR, "Scan-Fehler: " . $e->getMessage() . "\n");
     exit(1);

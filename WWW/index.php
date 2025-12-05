@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
+require_once __DIR__ . '/../SCRIPTS/operations.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -19,34 +20,36 @@ try {
     exit;
 }
 
-$lastPath   = '';
-$jobMessage = null;
-$logFile    = null;
-$statErrors = [];
-$mediaStats = [];
+$lastPath    = '';
+$jobMessage  = null;
+$logFile     = null;
+$logLines    = [];
+$statErrors  = [];
+$mediaStats  = [];
 $promptStats = [];
-$tagStats = [];
-$scanStats = [];
-$metaStats = [];
+$tagStats    = [];
+$scanStats   = [];
+$metaStats   = [];
 $importStats = [];
-$jobStats = [];
-$lastRuns = [];
+$jobStats    = [];
+$lastRuns    = [];
 $knownActions = [
-    'scan_start'          => 'Scan (Dashboard)',
-    'rescan_start'        => 'Rescan (Dashboard)',
-    'filesync_start'      => 'Filesync (Dashboard)',
-    'db_backup'           => 'DB-Backup',
-    'migrate'             => 'Migration',
-    'consistency_report'  => 'Consistency-Report',
-    'consistency_repair'  => 'Consistency-Repair',
-    'cleanup_missing'     => 'Cleanup Missing',
+    'scan_start'           => 'Scan (Dashboard)',
+    'rescan_start'         => 'Rescan (Dashboard)',
+    'filesync_start'       => 'Filesync (Dashboard)',
+    'prompts_rebuild'      => 'Prompt-Rebuild (Dashboard)',
+    'consistency_report'   => 'Consistency-Report',
+    'consistency_repair'   => 'Consistency-Repair',
+    'db_backup'            => 'DB-Backup',
+    'migrate'              => 'Migration',
+    'cleanup_missing'      => 'Cleanup Missing',
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     sv_require_internal_key($config);
 
     $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    $allowedActions = ['scan_path', 'rescan_db', 'filesync'];
+    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'consistency_check'];
 
     if (!in_array($action, $allowedActions, true)) {
         $jobMessage = 'Ungültige Aktion.';
@@ -62,70 +65,132 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             @mkdir($logsDir, 0777, true);
         }
 
+        $logLines = [];
+
         if ($action === 'scan_path') {
             $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
+            $limit    = isset($_POST['scan_limit']) ? (int)$_POST['scan_limit'] : null;
+
+            if ($limit !== null && $limit <= 0) {
+                $limit = null;
+            }
+
             if ($lastPath === '') {
                 $jobMessage = 'Kein Pfad angegeben.';
             } elseif (mb_strlen($lastPath) > 500) {
                 $jobMessage = 'Pfad zu lang (max. 500 Zeichen).';
             } else {
                 $logFile = $logsDir . '/scan_' . date('Ymd_His') . '.log';
+                $logger  = sv_operation_logger($logFile, $logLines);
 
-                $phpExe  = 'php';
-                $script  = $baseDir . DIRECTORY_SEPARATOR . 'SCRIPTS' . DIRECTORY_SEPARATOR . 'scan_path_cli.php';
-                $argPath = $lastPath;
-
-                $cmd = 'cmd /C start "" /B ' .
-                    escapeshellarg($phpExe) . ' ' .
-                    escapeshellarg($script) . ' ' .
-                    escapeshellarg($argPath) .
-                    ' > ' . escapeshellarg($logFile) . ' 2>&1';
-
-                @pclose(@popen($cmd, 'r'));
-
-                $jobMessage = 'Scan-Prozess im Hintergrund gestartet.';
-                sv_audit_log($pdo, 'scan_start', 'fs', null, [
-                    'path'       => $lastPath,
-                    'log_file'   => $logFile,
-                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-                ]);
+                try {
+                    sv_run_scan_operation($pdo, $config, $lastPath, $limit, $logger);
+                    $jobMessage = 'Scan abgeschlossen.';
+                    sv_audit_log($pdo, 'scan_start', 'fs', null, [
+                        'path'       => $lastPath,
+                        'limit'      => $limit,
+                        'log_file'   => $logFile,
+                        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                    ]);
+                } catch (Throwable $e) {
+                    $jobMessage = 'Scan-Fehler: ' . $e->getMessage();
+                }
             }
         } elseif ($action === 'rescan_db') {
             $logFile = $logsDir . '/rescan_' . date('Ymd_His') . '.log';
+            $limit   = isset($_POST['rescan_limit']) ? (int)$_POST['rescan_limit'] : null;
+            $offset  = isset($_POST['rescan_offset']) ? (int)$_POST['rescan_offset'] : null;
 
-            $phpExe = 'php';
-            $script = $baseDir . DIRECTORY_SEPARATOR . 'SCRIPTS' . DIRECTORY_SEPARATOR . 'rescan_cli.php';
+            if ($limit !== null && $limit <= 0) {
+                $limit = null;
+            }
+            if ($offset !== null && $offset < 0) {
+                $offset = null;
+            }
 
-            $cmd = 'cmd /C start "" /B ' .
-                escapeshellarg($phpExe) . ' ' .
-                escapeshellarg($script) .
-                ' > ' . escapeshellarg($logFile) . ' 2>&1';
+            $logger = sv_operation_logger($logFile, $logLines);
 
-            @pclose(@popen($cmd, 'r'));
-
-            $jobMessage = 'Rescan-Prozess im Hintergrund gestartet.';
-            sv_audit_log($pdo, 'rescan_start', 'fs', null, [
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
+            try {
+                sv_run_rescan_operation($pdo, $config, $limit, $offset, $logger);
+                $jobMessage = 'Rescan abgeschlossen.';
+                sv_audit_log($pdo, 'rescan_start', 'fs', null, [
+                    'limit'      => $limit,
+                    'offset'     => $offset,
+                    'log_file'   => $logFile,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                ]);
+            } catch (Throwable $e) {
+                $jobMessage = 'Rescan-Fehler: ' . $e->getMessage();
+            }
         } elseif ($action === 'filesync') {
             $logFile = $logsDir . '/filesync_' . date('Ymd_His') . '.log';
+            $limit   = isset($_POST['filesync_limit']) ? (int)$_POST['filesync_limit'] : null;
+            $offset  = isset($_POST['filesync_offset']) ? (int)$_POST['filesync_offset'] : null;
 
-            $phpExe = 'php';
-            $script = $baseDir . DIRECTORY_SEPARATOR . 'SCRIPTS' . DIRECTORY_SEPARATOR . 'filesync_cli.php';
+            if ($limit !== null && $limit <= 0) {
+                $limit = null;
+            }
+            if ($offset !== null && $offset < 0) {
+                $offset = null;
+            }
 
-            $cmd = 'cmd /C start "" /B ' .
-                escapeshellarg($phpExe) . ' ' .
-                escapeshellarg($script) .
-                ' > ' . escapeshellarg($logFile) . ' 2>&1';
+            $logger = sv_operation_logger($logFile, $logLines);
 
-            @pclose(@popen($cmd, 'r'));
+            try {
+                sv_run_filesync_operation($pdo, $config, $limit, $offset, $logger);
+                $jobMessage = 'Filesync abgeschlossen.';
+                sv_audit_log($pdo, 'filesync_start', 'fs', null, [
+                    'limit'      => $limit,
+                    'offset'     => $offset,
+                    'log_file'   => $logFile,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                ]);
+            } catch (Throwable $e) {
+                $jobMessage = 'Filesync-Fehler: ' . $e->getMessage();
+            }
+        } elseif ($action === 'prompts_rebuild') {
+            $logFile = $logsDir . '/prompts_rebuild_' . date('Ymd_His') . '.log';
+            $limit   = isset($_POST['rebuild_limit']) ? (int)$_POST['rebuild_limit'] : null;
+            $offset  = isset($_POST['rebuild_offset']) ? (int)$_POST['rebuild_offset'] : null;
 
-            $jobMessage = 'Filesync-Prozess im Hintergrund gestartet.';
-            sv_audit_log($pdo, 'filesync_start', 'fs', null, [
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
+            if ($limit !== null && $limit <= 0) {
+                $limit = null;
+            }
+            if ($offset !== null && $offset < 0) {
+                $offset = null;
+            }
+
+            $logger = sv_operation_logger($logFile, $logLines);
+
+            try {
+                sv_run_prompts_rebuild_operation($pdo, $config, $limit, $offset, $logger);
+                $jobMessage = 'Prompt-Rebuild abgeschlossen.';
+                sv_audit_log($pdo, 'prompts_rebuild', 'fs', null, [
+                    'limit'      => $limit,
+                    'offset'     => $offset,
+                    'log_file'   => $logFile,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                ]);
+            } catch (Throwable $e) {
+                $jobMessage = 'Prompt-Rebuild-Fehler: ' . $e->getMessage();
+            }
+        } elseif ($action === 'consistency_check') {
+            $mode   = is_string($_POST['consistency_mode'] ?? null) ? $_POST['consistency_mode'] : 'report';
+            $logger = sv_operation_logger(null, $logLines);
+
+            try {
+                $result   = sv_run_consistency_operation($pdo, $config, $mode, $logger);
+                $logFile  = $result['log_file'] ?? null;
+                $jobMessage = 'Consistency-Check abgeschlossen.';
+                $auditAction = $mode === 'simple' ? 'consistency_repair' : 'consistency_report';
+                sv_audit_log($pdo, $auditAction, 'db', null, [
+                    'mode'       => $mode,
+                    'log_file'   => $logFile,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                ]);
+            } catch (Throwable $e) {
+                $jobMessage = 'Consistency-Check-Fehler: ' . $e->getMessage();
+            }
         }
     }
 }
@@ -330,19 +395,66 @@ $cliEntries = [
             <input type="text" name="scan_path" size="80"
                    value="<?= htmlspecialchars($lastPath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
         </label>
+        <label>
+            Limit (optional):
+            <input type="number" name="scan_limit" min="1" step="1">
+        </label>
         <button type="submit">Scan starten</button>
     </form>
 
     <h2>Bestehende Medien neu scannen (nur ohne Scan-Ergebnis)</h2>
     <form method="post">
         <input type="hidden" name="action" value="rescan_db">
+        <label>
+            Limit (optional):
+            <input type="number" name="rescan_limit" min="1" step="1">
+        </label>
+        <label>
+            Offset (optional):
+            <input type="number" name="rescan_offset" min="0" step="1">
+        </label>
         <button type="submit">Rescan starten</button>
     </form>
 
     <h2>DB / Dateisystem abgleichen (Status active/missing)</h2>
     <form method="post">
         <input type="hidden" name="action" value="filesync">
+        <label>
+            Limit (optional):
+            <input type="number" name="filesync_limit" min="1" step="1">
+        </label>
+        <label>
+            Offset (optional):
+            <input type="number" name="filesync_offset" min="0" step="1">
+        </label>
         <button type="submit">Filesync starten</button>
+    </form>
+
+    <h2>Prompts aus bestehenden Dateien neu aufbauen</h2>
+    <form method="post">
+        <input type="hidden" name="action" value="prompts_rebuild">
+        <label>
+            Limit (optional):
+            <input type="number" name="rebuild_limit" min="1" step="1">
+        </label>
+        <label>
+            Offset (optional):
+            <input type="number" name="rebuild_offset" min="0" step="1">
+        </label>
+        <button type="submit">Prompt-Rebuild starten</button>
+    </form>
+
+    <h2>Konsistenzprüfung</h2>
+    <form method="post">
+        <input type="hidden" name="action" value="consistency_check">
+        <label>
+            Modus:
+            <select name="consistency_mode">
+                <option value="report">Report</option>
+                <option value="simple">Report + einfache Reparaturen</option>
+            </select>
+        </label>
+        <button type="submit">Consistency-Check starten</button>
     </form>
 
     <?php if ($jobMessage !== null): ?>
@@ -350,6 +462,12 @@ $cliEntries = [
         <p><?= htmlspecialchars($jobMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
         <?php if ($logFile !== null): ?>
             <p>Log-Datei: <?= htmlspecialchars($logFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+        <?php endif; ?>
+        <?php if (!empty($logLines)): ?>
+            <details>
+                <summary>Letzte Log-Zeilen</summary>
+                <pre><?php foreach ($logLines as $line) { echo htmlspecialchars($line, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n"; } ?></pre>
+            </details>
         <?php endif; ?>
     <?php endif; ?>
 
