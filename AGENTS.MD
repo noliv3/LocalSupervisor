@@ -3,8 +3,7 @@
 Scope: gesamtes Repository.
 
 - Halte README und diese Datei aktuell, wenn Abläufe, Anforderungen oder Bedienhinweise geändert werden.
-- Dashboard (`WWW/index.php`) dient als Einstieg für Scan-/Rescan-/Filesync-Starts, zeigt Kernstatistiken (Media/Prompts/Tags/Logs)
-  und führt eine CLI-Referenz mit typischen Aufrufen; produktive neue CLIs (z. B. `prompts_rebuild_cli.php`) gehören in README und hier dokumentiert, auch wenn sie nicht vom Dashboard gestartet werden.
+- Dashboard (`WWW/index.php`) startet Scan/Rescan/Filesync sowie Prompt-Rebuild und Consistency-Checks direkt über `SCRIPTS/operations.php`, zeigt Kernstatistiken (Media/Prompts/Tags/Logs) und führt eine CLI-Referenz mit typischen Aufrufen; produktive neue CLIs bleiben dünne Wrapper auf die zentrale Operations-Schicht und gehören in README und hier dokumentiert.
 - Metadaten gehören in `media_meta`; erweitere Parser zentral in `sv_extract_metadata` statt Ad-hoc-Logik zu verteilen. Prompt-Kandidaten werden über `sv_collect_prompt_candidates`/`sv_select_prompt_candidate` priorisiert, bevor `sv_normalize_prompt_block` strukturiert nach `prompts` schreibt und Raw-Blöcke ablegt.
 - Prompt-Parsing ist in `SCRIPTS/prompt_parser.php` sowie `sv_extract_metadata`/`sv_store_extracted_metadata` gebündelt; neue Quellen bitte dort ergänzen statt eigene Parser-CLIs anzulegen. Legacy-Helfer wie `exif_prompts_cli.php` sollten denselben Pfad nutzen und als solche gekennzeichnet bleiben.
 - Metadaten/Prompts werden im Web read-only über `WWW/mediadb.php` (Liste) und `WWW/media_view.php` (Detail) angezeigt;
