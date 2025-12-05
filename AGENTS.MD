@@ -21,6 +21,9 @@ Scope: gesamtes Repository.
 - Ergänzende Härtungsnotizen stehen in `SECURITY_REVIEW.md`; halte README und diese Datei synchron, wenn Sicherheits- oder Betriebsabläufe angepasst werden.
 - `SCRIPTS/paths_bootstrap.php` legt fehlende Symlinks im Webroot an (`bilder`, `fsk18`, `videos`, `videos18`), damit die aus der DB stammenden Pfade (`paths.*`) auch unter dem PHP-Built-in-Server erreichbar sind; `WWW/mediadb.php` ruft das Bootstrap bei jedem Request idempotent auf.
 
+## Dokumentation
+- Vollständige Inventar- und Risikobewertungen aus dem aktuellen Codex-Audit liegen in `CODEX_AUDIT.md`.
+
 ## Review-Status (Prompt/CLIs)
 - Prompt-Kandidatenauswahl deckt EXIF-Kommentare, PNG-Text, parameterartige Strings und JSON-Blöcke (`sd-metadata`, `workflow`) ab; Priorisierung läuft über `sv_collect_prompt_candidates`/`sv_select_prompt_candidate`, Normalisierung über `sv_normalize_prompt_block` mit Ablage eines Raw-Blocks in `media_meta` und `prompts.source_metadata`.【F:SCRIPTS/prompt_parser.php†L185-L379】【F:SCRIPTS/scan_core.php†L510-L686】 Künftige Parser-Quellen bitte weiterhin dort integrieren.
 - `prompts_rebuild_cli.php` arbeitet nur auf aktiven Bildern mit fehlenden Prompt-Kernfeldern und liest die Quelldatei erneut aus; vorhandene `media_meta`-Snapshots oder Historien werden dabei nicht ausgewertet, was für die Planung eines „Rebuild aus DB-Rohdaten“ zu berücksichtigen ist.【F:SCRIPTS/prompts_rebuild_cli.php†L42-L94】【F:SCRIPTS/scan_core.php†L616-L683】
