@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/paths.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -17,56 +18,15 @@ try {
     exit;
 }
 
-/**
- * Pfad -> virtuelle URL (über Symlink/Junction unter WWW).
- *
- * Erwartet z. B.:
- *   WWW\bilder -> I:\Bilder
- *   WWW\fsk18  -> I:\FSK18\Bilder
- */
-function sv_path_to_url(string $path, array $pathsCfg): ?string
+function sv_media_stream_url(int $id, bool $adult): string
 {
-    $norm = str_replace('\\', '/', $path);
+    $params = [
+        'id'    => $id,
+        'adult' => $adult ? '1' : '0',
+    ];
 
-    $map = [];
-
-    if (!empty($pathsCfg['images'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['images']), '/')] = '/bilder';
-    }
-    if (!empty($pathsCfg['images_18'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['images_18']), '/')] = '/fsk18';
-    }
-    if (!empty($pathsCfg['videos'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['videos']), '/')] = '/videos';
-    }
-    if (!empty($pathsCfg['videos_18'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['videos_18']), '/')] = '/videos18';
-    }
-
-    foreach ($map as $fsBase => $urlBase) {
-        $len = strlen($fsBase);
-        if (strncasecmp($norm, $fsBase, $len) === 0) {
-            $rel = substr($norm, $len);
-            if ($rel === false) {
-                $rel = '';
-            }
-            $rel = ltrim($rel, '/');
-
-            if ($rel === '') {
-                return $urlBase . '/';
-            }
-
-            $parts = explode('/', $rel);
-            $parts = array_map('rawurlencode', $parts);
-
-            return $urlBase . '/' . implode('/', $parts);
-        }
-    }
-
-    return null;
+    return 'media_stream.php?' . http_build_query($params);
 }
-
-$pathsCfg = $config['paths'] ?? [];
 
 /* FSK18-Flag: nur sichtbar, wenn adult=1 oder 18=true in der URL */
 $showAdult =
@@ -261,15 +221,15 @@ $pages = max(1, (int)ceil($total / $perPage));
         $hasNsfw   = (int)($row['has_nsfw'] ?? 0) === 1;
         $rating    = (int)($row['rating'] ?? 0);
 
-        $url = sv_path_to_url($path, $pathsCfg);
         $thumbUrl = 'thumb.php?id=' . $id;
+        $streamUrl = sv_media_stream_url($id, $showAdult);
         ?>
         <div class="item<?= $isMissing ? ' missing' : '' ?>">
             <div class="thumb-wrap">
-                <?php if ($isMissing || $url === null): ?>
+                <?php if ($isMissing): ?>
                     <span>fehlend</span>
                 <?php else: ?>
-                    <a href="<?= htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">
+                    <a href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">
                         <img
                             src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
                             loading="lazy"

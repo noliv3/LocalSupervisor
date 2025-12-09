@@ -26,4 +26,4 @@
 
 ## Hinweise
 - Dashboard-Starts nutzen aktuell `cmd /C start` (Windows). Für Linux/macOS ggf. plattformneutrale Variante ergänzen.
-- Sicherheitskritische Web-Starts nur mit `sv_require_internal_key` und Audit-Log nutzen; CLI bleibt intern.
+- Sicherheitskritische Web-Starts nur mit `sv_require_internal_access` und Audit-Log nutzen; CLI bleibt intern.
