@@ -63,7 +63,10 @@
 | /workspace/LocalSupervisor/SCRIPTS/migrations/003_add_runtime_indexes.php | active | Manuelle DB-Migration | Backend/CLI | 05ac5288913d003e8ff0fd7dbb9e413d |
 | /workspace/LocalSupervisor/SCRIPTS/migrations/004_add_audit_log.php | active | Manuelle DB-Migration | Backend/CLI | c685ff772de7909b6c408c107b8601d5 |
 | /workspace/LocalSupervisor/SCRIPTS/migrations/005_media_meta_and_video_meta.php | active | Manuelle DB-Migration | Backend/CLI | 7c5c5d960bbb80505626b412842ee030 |
-| /workspace/LocalSupervisor/SCRIPTS/paths_bootstrap.php | active | Allgemeine Datei | Backend/CLI | 80a8efe86ec07403d534590b2e470c3f |
+| /workspace/LocalSupervisor/SCRIPTS/common.php | active | Allgemeine Datei | Backend/CLI | (new) |
+| /workspace/LocalSupervisor/SCRIPTS/logging.php | active | Logging-Helfer | Backend/CLI | (new) |
+| /workspace/LocalSupervisor/SCRIPTS/paths.php | active | Pfad-Validierung | Backend/CLI | (new) |
+| /workspace/LocalSupervisor/WWW/media_stream.php | active | Web-Original-Stream | Frontend | (new) |
 | /workspace/LocalSupervisor/SCRIPTS/prompt_parser.php | active | Allgemeine Datei | Backend/CLI | 36e46dd415eb6c08cf649a443521b485 |
 | /workspace/LocalSupervisor/SCRIPTS/prompts_rebuild_cli.php | active | CLI-Tool | Backend/CLI | 1e5903b774ed684d9694a79785f7bc19 |
 | /workspace/LocalSupervisor/SCRIPTS/rescan_cli.php | active | CLI-Tool | Backend/CLI | ef1b1ad0c673b24b6176e001670809a6 |

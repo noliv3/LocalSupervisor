@@ -1,13 +1,14 @@
 # SuperVisOr Security Review (Entwurf)
 
 ## Web-Angriffsfläche (aktuell)
-- **Dashboard (`WWW/index.php`)**: Startet Scan/Rescan/Filesync via `cmd /C start` und `php`. Eingaben: POST `action`, optional Pfad. Schutz: `sv_require_internal_key`, IP-Whitelist (wenn gesetzt), Audit-Log mit User-Agent und Log-Datei. Risiko: platformabhängiger Start, unlimitierte Jobs, nur interner Key als Gate.
+- **Dashboard (`WWW/index.php`)**: Startet Scan/Rescan/Filesync via `cmd /C start` und `php`. Eingaben: POST `action`, optional Pfad. Schutz: `sv_require_internal_access` (Header/Query/Cookie `internal_key` + IP-Whitelist), Audit-Log mit User-Agent und Log-Datei. Risiko: platformabhängiger Start, unlimitierte Jobs, nur interner Key als Gate.
 - **Mediadb (`WWW/mediadb.php`)**: Read-only Listenansicht. Eingaben: GET-Filter (`type`, `has_prompt`, `has_meta`, `q`, `status`, `min_rating`, `adult`). Schutz: Enum-/Length-Clamps, kein Write. Risiko: Pfadleck/Dateinamen sichtbar, NSFW nur via adult=1.
 - **Detail (`WWW/media_view.php`)**: Read-only Detailanzeige. Eingaben: GET `id`, `adult`. Schutz: ID-Clamp, NSFW-Flag-Check. Risiko: Metadaten/Prompts sichtbar, keine Auth außer Adult-Flag.
-- **Thumbnail (`WWW/thumb.php`)**: Liefert Bilder direkt aus `media.path` für Typ `image`. Eingaben: GET `id`, `adult`. Schutz: ID-Clamp, NSFW-Check, MIME/resize-Logik. Risiko: Direkter Filesystem-Zugriff auf Pfade in DB (nur Images), keine Rate-Limits.
+- **Thumbnail (`WWW/thumb.php`)**: Liefert Bilder direkt aus `media.path` für Typ `image`. Eingaben: GET `id`, `adult`. Schutz: ID-Clamp, NSFW-Check, Pfadvalidierung gegen `paths.*`, MIME/resize-Logik. Risiko: Direkter Filesystem-Zugriff auf DB-Pfade (nur Images), keine Rate-Limits.
+- **Media-Stream (`WWW/media_stream.php`)**: Liefert Originaldateien aus `media.path` (Bild/Video). Eingaben: GET `id`, `adult`, optional `dl=1`. Schutz: ID-Clamp, NSFW-Check, Pfadvalidierung gegen `paths.*`, Content-Disposition. Risiko: File-Download/Streaming ohne Rate-Limits, Keyless Read-Only-Zugriff.
 
 ## Sicherheitsmechanismen (IST)
-- **Internal Key + IP-Whitelist**: `sv_require_internal_key` erzwingt Key-Header/Parameter und optional IP-Whitelist; CLI ist immer trusted. Fehlender/invalid Key → HTTP 403/500. (`SCRIPTS/security.php`)
+- **Internal Key + IP-Whitelist**: `sv_require_internal_access` erzwingt Key-Header/Parameter/Cookie plus IP-Whitelist; CLI ist immer trusted. Fehlender/invalid Key → HTTP 403/500 + Security-Log. (`SCRIPTS/security.php`)
 - **Audit-Log**: Tabelle `audit_log` mit Aktion, Entity, Details, IP, Key, Timestamp. Log wird geschrieben von Dashboard-Starts (scan/rescan/filesync), Migration, Backup, Konsistenz, ggf. Reparaturen. Fehler beim Loggen werden ignoriert (error_log). (`DB/schema.sql`, `security.php`, aufrufende CLIs/WWW)
 - **Input-Härtung Web**: Filter/IDs werden per Whitelists, Integer-Clamps und Längenbegrenzungen normalisiert (mediadb, media_view, thumb). Scan-Pfad im Dashboard auf 500 Zeichen begrenzt.
 - **Betriebsreihenfolge**: Empfohlen: Backup → Migration → Konsistenz (report/repair) → Cleanup Missing → produktive Läufe (Scan/Rescan/Filesync). CLI-only, dokumentiert im README/CLI-Plan.
@@ -17,7 +18,7 @@
 - **Heavy Tasks via Dashboard**: Scan/Rescan/Filesync können ohne Limits gestartet werden; Background-Start via `cmd /C start` ist Windows-spezifisch und bietet keine Queue/Kontrolle. DoS oder unbeabsichtigte Mehrfachläufe möglich.
 - **Schlüssel- und IP-Handling**: Interner Key liegt in config und muss verteilt werden; keine Rolling/Rotation-Mechanik, keine Rate-Limits, keine Sperre nach Fehlversuchen.
 - **Audit-Abdeckung**: CLI-Wrapper und Maintenance-Skripte loggen, aber Read-Only-Views nicht. Fehler beim Audit-Insert werden still geloggt, nicht zurückgemeldet.
-- **Pfad-/Dateizugriff**: thumb.php liest reale Dateien basierend auf DB-Pfad; bei manipulierten DB-Inhalten wären beliebige Pfade lesbar. Keine Content-Disposition/Caching-Header; mögliche Enumeration über ID-Ranges.
+- **Pfad-/Dateizugriff**: thumb.php und media_stream.php lesen reale Dateien basierend auf DB-Pfad; Pfade werden gegen konfigurierte Basen validiert, Content-Disposition vorhanden. Keine Rate-Limits, mögliche Enumeration über ID-Ranges.
 - **CLI-Exklusivität**: Kritische Tools wie `consistency_check --repair` und `cleanup_missing_cli.php` sind CLI-only; wenn ins Dashboard gebracht, erhöht sich der Impact bei Key-Leak.
 
 ## Härtungs-Zielbild / Prioritäten

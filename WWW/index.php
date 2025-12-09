@@ -46,7 +46,7 @@ $knownActions = [
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    sv_require_internal_key($config);
+    sv_require_internal_access($config, 'dashboard_action');
 
     $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
     $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'consistency_check'];
@@ -56,141 +56,127 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action     = '';
     }
 
-    $baseDir = realpath(__DIR__ . '/..');
-    if ($baseDir === false) {
-        $jobMessage = 'Basisverzeichnis nicht gefunden.';
-    } else {
-        $logsDir = $baseDir . '/LOGS';
-        if (!is_dir($logsDir)) {
-            @mkdir($logsDir, 0777, true);
+    $logLines = [];
+
+    if ($action === 'scan_path') {
+        $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
+        $limit    = isset($_POST['scan_limit']) ? (int)$_POST['scan_limit'] : null;
+
+        if ($limit !== null && $limit <= 0) {
+            $limit = null;
         }
 
-        $logLines = [];
-
-        if ($action === 'scan_path') {
-            $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
-            $limit    = isset($_POST['scan_limit']) ? (int)$_POST['scan_limit'] : null;
-
-            if ($limit !== null && $limit <= 0) {
-                $limit = null;
-            }
-
-            if ($lastPath === '') {
-                $jobMessage = 'Kein Pfad angegeben.';
-            } elseif (mb_strlen($lastPath) > 500) {
-                $jobMessage = 'Pfad zu lang (max. 500 Zeichen).';
-            } else {
-                $logFile = $logsDir . '/scan_' . date('Ymd_His') . '.log';
-                $logger  = sv_operation_logger($logFile, $logLines);
-
-                try {
-                    sv_run_scan_operation($pdo, $config, $lastPath, $limit, $logger);
-                    $jobMessage = 'Scan abgeschlossen.';
-                    sv_audit_log($pdo, 'scan_start', 'fs', null, [
-                        'path'       => $lastPath,
-                        'limit'      => $limit,
-                        'log_file'   => $logFile,
-                        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-                    ]);
-                } catch (Throwable $e) {
-                    $jobMessage = 'Scan-Fehler: ' . $e->getMessage();
-                }
-            }
-        } elseif ($action === 'rescan_db') {
-            $logFile = $logsDir . '/rescan_' . date('Ymd_His') . '.log';
-            $limit   = isset($_POST['rescan_limit']) ? (int)$_POST['rescan_limit'] : null;
-            $offset  = isset($_POST['rescan_offset']) ? (int)$_POST['rescan_offset'] : null;
-
-            if ($limit !== null && $limit <= 0) {
-                $limit = null;
-            }
-            if ($offset !== null && $offset < 0) {
-                $offset = null;
-            }
-
-            $logger = sv_operation_logger($logFile, $logLines);
+        if ($lastPath === '') {
+            $jobMessage = 'Kein Pfad angegeben.';
+        } elseif (mb_strlen($lastPath) > 500) {
+            $jobMessage = 'Pfad zu lang (max. 500 Zeichen).';
+        } else {
+            [$logFile, $logger] = sv_create_operation_log($config, 'scan', $logLines, 50);
 
             try {
-                sv_run_rescan_operation($pdo, $config, $limit, $offset, $logger);
-                $jobMessage = 'Rescan abgeschlossen.';
-                sv_audit_log($pdo, 'rescan_start', 'fs', null, [
+                sv_run_scan_operation($pdo, $config, $lastPath, $limit, $logger);
+                $jobMessage = 'Scan abgeschlossen.';
+                sv_audit_log($pdo, 'scan_start', 'fs', null, [
+                    'path'       => $lastPath,
                     'limit'      => $limit,
-                    'offset'     => $offset,
                     'log_file'   => $logFile,
                     'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
                 ]);
             } catch (Throwable $e) {
-                $jobMessage = 'Rescan-Fehler: ' . $e->getMessage();
+                $jobMessage = 'Scan-Fehler: ' . $e->getMessage();
             }
-        } elseif ($action === 'filesync') {
-            $logFile = $logsDir . '/filesync_' . date('Ymd_His') . '.log';
-            $limit   = isset($_POST['filesync_limit']) ? (int)$_POST['filesync_limit'] : null;
-            $offset  = isset($_POST['filesync_offset']) ? (int)$_POST['filesync_offset'] : null;
+        }
+    } elseif ($action === 'rescan_db') {
+        $limit   = isset($_POST['rescan_limit']) ? (int)$_POST['rescan_limit'] : null;
+        $offset  = isset($_POST['rescan_offset']) ? (int)$_POST['rescan_offset'] : null;
 
-            if ($limit !== null && $limit <= 0) {
-                $limit = null;
-            }
-            if ($offset !== null && $offset < 0) {
-                $offset = null;
-            }
+        if ($limit !== null && $limit <= 0) {
+            $limit = null;
+        }
+        if ($offset !== null && $offset < 0) {
+            $offset = null;
+        }
 
-            $logger = sv_operation_logger($logFile, $logLines);
+        [$logFile, $logger] = sv_create_operation_log($config, 'rescan', $logLines, 50);
 
-            try {
-                sv_run_filesync_operation($pdo, $config, $limit, $offset, $logger);
-                $jobMessage = 'Filesync abgeschlossen.';
-                sv_audit_log($pdo, 'filesync_start', 'fs', null, [
-                    'limit'      => $limit,
-                    'offset'     => $offset,
-                    'log_file'   => $logFile,
-                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-                ]);
-            } catch (Throwable $e) {
-                $jobMessage = 'Filesync-Fehler: ' . $e->getMessage();
-            }
-        } elseif ($action === 'prompts_rebuild') {
-            $logFile = $logsDir . '/prompts_rebuild_' . date('Ymd_His') . '.log';
-            $limit   = isset($_POST['rebuild_limit']) ? (int)$_POST['rebuild_limit'] : null;
-            $offset  = isset($_POST['rebuild_offset']) ? (int)$_POST['rebuild_offset'] : null;
+        try {
+            sv_run_rescan_operation($pdo, $config, $limit, $offset, $logger);
+            $jobMessage = 'Rescan abgeschlossen.';
+            sv_audit_log($pdo, 'rescan_start', 'fs', null, [
+                'limit'      => $limit,
+                'offset'     => $offset,
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            $jobMessage = 'Rescan-Fehler: ' . $e->getMessage();
+        }
+    } elseif ($action === 'filesync') {
+        $limit   = isset($_POST['filesync_limit']) ? (int)$_POST['filesync_limit'] : null;
+        $offset  = isset($_POST['filesync_offset']) ? (int)$_POST['filesync_offset'] : null;
 
-            if ($limit !== null && $limit <= 0) {
-                $limit = null;
-            }
-            if ($offset !== null && $offset < 0) {
-                $offset = null;
-            }
+        if ($limit !== null && $limit <= 0) {
+            $limit = null;
+        }
+        if ($offset !== null && $offset < 0) {
+            $offset = null;
+        }
 
-            $logger = sv_operation_logger($logFile, $logLines);
+        [$logFile, $logger] = sv_create_operation_log($config, 'filesync', $logLines, 50);
 
-            try {
-                sv_run_prompts_rebuild_operation($pdo, $config, $limit, $offset, $logger);
-                $jobMessage = 'Prompt-Rebuild abgeschlossen.';
-                sv_audit_log($pdo, 'prompts_rebuild', 'fs', null, [
-                    'limit'      => $limit,
-                    'offset'     => $offset,
-                    'log_file'   => $logFile,
-                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-                ]);
-            } catch (Throwable $e) {
-                $jobMessage = 'Prompt-Rebuild-Fehler: ' . $e->getMessage();
-            }
-        } elseif ($action === 'consistency_check') {
-            $mode   = is_string($_POST['consistency_mode'] ?? null) ? $_POST['consistency_mode'] : 'report';
-            $logger = sv_operation_logger(null, $logLines);
+        try {
+            sv_run_filesync_operation($pdo, $config, $limit, $offset, $logger);
+            $jobMessage = 'Filesync abgeschlossen.';
+            sv_audit_log($pdo, 'filesync_start', 'fs', null, [
+                'limit'      => $limit,
+                'offset'     => $offset,
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            $jobMessage = 'Filesync-Fehler: ' . $e->getMessage();
+        }
+    } elseif ($action === 'prompts_rebuild') {
+        $limit   = isset($_POST['rebuild_limit']) ? (int)$_POST['rebuild_limit'] : null;
+        $offset  = isset($_POST['rebuild_offset']) ? (int)$_POST['rebuild_offset'] : null;
 
-            try {
-                $result   = sv_run_consistency_operation($pdo, $config, $mode, $logger);
-                $logFile  = $result['log_file'] ?? null;
-                $jobMessage = 'Consistency-Check abgeschlossen.';
-                $auditAction = $mode === 'simple' ? 'consistency_repair' : 'consistency_report';
-                sv_audit_log($pdo, $auditAction, 'db', null, [
-                    'mode'       => $mode,
-                    'log_file'   => $logFile,
-                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-                ]);
-            } catch (Throwable $e) {
-                $jobMessage = 'Consistency-Check-Fehler: ' . $e->getMessage();
-            }
+        if ($limit !== null && $limit <= 0) {
+            $limit = null;
+        }
+        if ($offset !== null && $offset < 0) {
+            $offset = null;
+        }
+
+        [$logFile, $logger] = sv_create_operation_log($config, 'prompts', $logLines, 50);
+
+        try {
+            sv_run_prompts_rebuild_operation($pdo, $config, $limit, $offset, $logger);
+            $jobMessage = 'Prompt-Rebuild abgeschlossen.';
+            sv_audit_log($pdo, 'prompts_rebuild', 'fs', null, [
+                'limit'      => $limit,
+                'offset'     => $offset,
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            $jobMessage = 'Prompt-Rebuild-Fehler: ' . $e->getMessage();
+        }
+    } elseif ($action === 'consistency_check') {
+        $mode   = is_string($_POST['consistency_mode'] ?? null) ? $_POST['consistency_mode'] : 'report';
+        $logger = sv_operation_logger(null, $logLines);
+
+        try {
+            $result   = sv_run_consistency_operation($pdo, $config, $mode, $logger);
+            $logFile  = $result['log_file'] ?? null;
+            $jobMessage = 'Consistency-Check abgeschlossen.';
+            $auditAction = $mode === 'simple' ? 'consistency_repair' : 'consistency_report';
+            sv_audit_log($pdo, $auditAction, 'db', null, [
+                'mode'       => $mode,
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            $jobMessage = 'Consistency-Check-Fehler: ' . $e->getMessage();
         }
     }
 }

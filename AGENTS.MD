@@ -11,14 +11,15 @@ Scope: gesamtes Repository.
 - Konsistenzprüfungen laufen manuell über `php SCRIPTS/consistency_check.php` (optional `--repair=simple`); Ergebnisse landen in `LOGS/consistency_*.log` und in `consistency_log`, sobald Migration 002 eingespielt ist.
 - Bevorzugte Referenzquelle für Schema/DB ist `DB/schema.sql`; bei Änderungen immer Daten- und Indextabellen dokumentieren.
 - CLI-Flows basieren auf `SCRIPTS/scan_core.php` plus Wrappern; wenn du Erweiterungen baust, beschreibe den Aufrufpfad (CLI/Web) und Logging-Orte.
+- Laufzeit-Logs liegen pro Kanal unter `LOGS/<channel>/` (Scan/Rescan/Filesync/Prompts/Consistency/Security) mit automatischer Rotation (operativ 50 Dateien, Consistency 30, Security 60 Tage).
 - Schema-Migrationen werden ausschließlich manuell per `php SCRIPTS/migrate.php` ausgeführt; neue Migrationen liegen in `SCRIPTS/migrations/` und tragen den Dateinamen auch als `version`-Eintrag in `schema_migrations`.
 - Vermeide Try/Catch-Blöcke um Imports (`require`, `include`); Fehler sollen früh sichtbar bleiben.
 - Sicherheitsrelevante Einstellungen (API-Keys, IP-Whitelist, Tokens) liegen in `CONFIG/config.php` und dürfen nicht mit Dummy-Werten in Commits geleakt werden.
 - Betrieb / Heavy Tasks: Vor Migrationen oder Reparaturen zuerst `php SCRIPTS/db_backup.php` ausführen, dann `php SCRIPTS/migrate.php`, anschließend `php SCRIPTS/consistency_check.php` (report-only) und erst danach große Scans/Rescans/Filesync-Läufe (ggf. mit `--limit`/`--offset`).
-- Kritische Writes aus dem Web (Scan/Rescan/Filesync, spätere Mutationen) müssen über geschützte Endpunkte mit `sv_require_internal_key` abgesichert werden; UI-Aktionen wie Ratings/Kommentare gelten als „low impact“ und dürfen ohne Key laufen, sollten aber entsprechend kommentiert sein.
+- Kritische Writes aus dem Web (Scan/Rescan/Filesync, spätere Mutationen) müssen über `sv_require_internal_access` abgesichert werden (Header/Query/Cookie `internal_key` plus IP-Whitelist); UI-Aktionen wie Ratings/Kommentare gelten als „low impact“ und dürfen ohne Key laufen, sollten aber entsprechend kommentiert sein.
 - Neue Web-Parameter immer über Whitelists/Bereiche absichern; siehe `WWW/mediadb.php`, `WWW/media_view.php` und `WWW/thumb.php` für Beispiele.
 - Ergänzende Härtungsnotizen stehen in `SECURITY_REVIEW.md`; halte README und diese Datei synchron, wenn Sicherheits- oder Betriebsabläufe angepasst werden.
-- `SCRIPTS/paths_bootstrap.php` legt fehlende Symlinks im Webroot an (`bilder`, `fsk18`, `videos`, `videos18`), damit die aus der DB stammenden Pfade (`paths.*`) auch unter dem PHP-Built-in-Server erreichbar sind; `WWW/mediadb.php` ruft das Bootstrap bei jedem Request idempotent auf.
+- Medienpfade werden direkt aus `paths.*` genutzt; der Web-Stream erfolgt über `WWW/media_stream.php`, das die konfigurierten Basispfade (SFW/NSFW, Bild/Video) validiert, statt Webroot-Symlinks anzulegen.
 
 ## Dokumentation
 - Vollständige Inventar- und Risikobewertungen aus dem aktuellen Codex-Audit liegen in `CODEX_AUDIT.md`.

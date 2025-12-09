@@ -52,11 +52,64 @@ function sv_normalize_adult_flag(array $input): bool
     return false;
 }
 
+function sv_stream_media(array $config, array $row): void
+{
+    $pathsCfg = $config['paths'] ?? [];
+    $path     = (string)$row['path'];
+
+    try {
+        sv_assert_media_path_allowed($path, $pathsCfg, 'media_stream');
+    } catch (Throwable $e) {
+        http_response_code(403);
+        echo 'Pfad blockiert';
+        return;
+    }
+
+    if (!is_file($path)) {
+        http_response_code(404);
+        echo 'Datei nicht gefunden';
+        return;
+    }
+
+    $mime  = null;
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    if ($finfo !== false) {
+        $mime = finfo_file($finfo, $path) ?: null;
+        finfo_close($finfo);
+    }
+
+    $download = isset($_GET['dl']) && $_GET['dl'] === '1';
+    $basename = basename($path);
+
+    if ($mime !== null) {
+        header('Content-Type: ' . $mime);
+    }
+    header('Content-Length: ' . (string)filesize($path));
+    header('X-Content-Type-Options: nosniff');
+    header('Content-Disposition: ' . ($download ? 'attachment' : 'inline') . '; filename="' . rawurlencode($basename) . '"');
+
+    $fh = fopen($path, 'rb');
+    if ($fh === false) {
+        http_response_code(500);
+        return;
+    }
+
+    while (!feof($fh)) {
+        $chunk = fread($fh, 8192);
+        if ($chunk === false) {
+            break;
+        }
+        echo $chunk;
+    }
+    fclose($fh);
+}
+
 $showAdult = sv_normalize_adult_flag($_GET);
 
 $id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
 if ($id <= 0) {
     http_response_code(400);
+    echo 'Ungültige ID';
     exit;
 }
 
@@ -66,78 +119,14 @@ $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if (!$row) {
     http_response_code(404);
+    echo 'Eintrag nicht gefunden';
     exit;
 }
 
 if (!$showAdult && (int)($row['has_nsfw'] ?? 0) === 1) {
     http_response_code(403);
+    echo 'FSK18 blockiert';
     exit;
 }
 
-$type = (string)$row['type'];
-$path = (string)$row['path'];
-
-try {
-    sv_assert_media_path_allowed($path, $config['paths'] ?? [], 'thumb');
-} catch (Throwable $e) {
-    http_response_code(403);
-    exit;
-}
-
-if ($type !== 'image') {
-    http_response_code(415);
-    exit;
-}
-
-if (!is_file($path)) {
-    http_response_code(404);
-    exit;
-}
-
-$maxSize = 640;
-$mime    = null;
-$finfo   = finfo_open(FILEINFO_MIME_TYPE);
-if ($finfo !== false) {
-    $mime = finfo_file($finfo, $path) ?: null;
-    finfo_close($finfo);
-}
-
-$raw = @file_get_contents($path);
-if ($raw === false) {
-    http_response_code(500);
-    exit;
-}
-
-if (function_exists('imagecreatefromstring')) {
-    $img = @imagecreatefromstring($raw);
-    if ($img !== false) {
-        $w = imagesx($img);
-        $h = imagesy($img);
-        $scale = max($w, $h) > 0 ? min(1, $maxSize / max($w, $h)) : 1;
-        if ($scale < 1) {
-            $newW = (int)round($w * $scale);
-            $newH = (int)round($h * $scale);
-            $thumb = imagecreatetruecolor($newW, $newH);
-            if ($thumb !== false) {
-                imagecopyresampled($thumb, $img, 0, 0, 0, 0, $newW, $newH, $w, $h);
-                header('Content-Type: image/jpeg');
-                imagejpeg($thumb, null, 85);
-                imagedestroy($thumb);
-                imagedestroy($img);
-                exit;
-            }
-        }
-        if ($mime !== null) {
-            header('Content-Type: ' . $mime);
-        }
-        imagejpeg($img, null, 85);
-        imagedestroy($img);
-        exit;
-    }
-}
-
-if ($mime !== null) {
-    header('Content-Type: ' . $mime);
-}
-
-echo $raw;
+sv_stream_media($config, $row);

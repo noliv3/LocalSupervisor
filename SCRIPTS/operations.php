@@ -3,18 +3,10 @@ declare(strict_types=1);
 
 // Zentrale Operationsbibliothek für Web- und CLI-Aufrufer.
 
+require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/logging.php';
 require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
-
-function sv_base_dir(): string
-{
-    $baseDir = realpath(__DIR__ . '/..');
-    if ($baseDir === false) {
-        throw new RuntimeException('Basisverzeichnis nicht gefunden.');
-    }
-
-    return $baseDir;
-}
 
 function sv_load_config(?string $baseDir = null): array
 {
@@ -47,26 +39,6 @@ function sv_open_pdo(array $config): PDO
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
     return $pdo;
-}
-
-function sv_operation_logger(?string $logFile, ?array &$buffer = null): callable
-{
-    if ($logFile !== null) {
-        $dir = dirname($logFile);
-        if (!is_dir($dir)) {
-            @mkdir($dir, 0777, true);
-        }
-    }
-
-    return function (string $message) use ($logFile, &$buffer): void {
-        $line = '[' . date('c') . '] ' . $message;
-        if ($buffer !== null) {
-            $buffer[] = $line;
-        }
-        if ($logFile !== null) {
-            file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
-        }
-    };
 }
 
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array
@@ -234,11 +206,7 @@ function sv_run_prompts_rebuild_operation(
 function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, callable $logLine): array
 {
     $repairMode = $mode === 'simple' ? 'simple' : 'report';
-    $logDir = $config['paths']['logs'] ?? (sv_base_dir() . '/LOGS');
-    if (!is_dir($logDir)) {
-        @mkdir($logDir, 0777, true);
-    }
-    $logFile = $logDir . '/consistency_' . date('Ymd_His') . '.log';
+    $logFile = sv_prepare_log_file($config, 'consistency', true, 30);
     $logHandle = @fopen($logFile, 'ab');
 
     $consistencyLogAvailable = sv_has_consistency_log_table($pdo);

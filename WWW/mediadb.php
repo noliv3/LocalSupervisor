@@ -2,10 +2,7 @@
 declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
-require_once __DIR__ . '/../SCRIPTS/paths_bootstrap.php';
-
-$pathsCfg = $config['paths'] ?? [];
-sv_bootstrap_web_symlinks($pathsCfg, realpath(__DIR__));
+require_once __DIR__ . '/../SCRIPTS/paths.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -21,46 +18,18 @@ try {
     exit;
 }
 
-function sv_path_to_url(string $path, array $pathsCfg): ?string
+function sv_media_stream_url(int $id, bool $adult, bool $download = false): string
 {
-    $norm = str_replace('\\', '/', $path);
+    $params = [
+        'id'    => $id,
+        'adult' => $adult ? '1' : '0',
+    ];
 
-    $map = [];
-
-    if (!empty($pathsCfg['images'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['images']), '/')] = '/bilder';
-    }
-    if (!empty($pathsCfg['images_18'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['images_18']), '/')] = '/fsk18';
-    }
-    if (!empty($pathsCfg['videos'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['videos']), '/')] = '/videos';
-    }
-    if (!empty($pathsCfg['videos_18'])) {
-        $map[rtrim(str_replace('\\', '/', $pathsCfg['videos_18']), '/')] = '/videos18';
+    if ($download) {
+        $params['dl'] = '1';
     }
 
-    foreach ($map as $fsBase => $urlBase) {
-        $len = strlen($fsBase);
-        if (strncasecmp($norm, $fsBase, $len) === 0) {
-            $rel = substr($norm, $len);
-            if ($rel === false) {
-                $rel = '';
-            }
-            $rel = ltrim($rel, '/');
-
-            if ($rel === '') {
-                return $urlBase . '/';
-            }
-
-            $parts = explode('/', $rel);
-            $parts = array_map('rawurlencode', $parts);
-
-            return $urlBase . '/' . implode('/', $parts);
-        }
-    }
-
-    return null;
+    return 'media_stream.php?' . http_build_query($params);
 }
 
 function sv_clamp_int(int $value, int $min, int $max, int $default): int
@@ -412,23 +381,19 @@ $queryParams = [
         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
 
-        $url = sv_path_to_url($path, $pathsCfg);
         $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
         $detailParams = array_merge($queryParams, ['id' => $id, 'p' => $page]);
+        $streamUrl = sv_media_stream_url($id, $showAdult, false);
         ?>
         <div class="item">
             <div class="thumb-wrap">
                 <?php if ($type === 'image'): ?>
-                    <?php if ($url !== null): ?>
-                        <a href="media_view.php?<?= http_build_query($detailParams) ?>">
-                            <img
-                                src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-                                loading="lazy"
-                                alt="ID <?= $id ?>">
-                        </a>
-                    <?php else: ?>
-                        <span>ohne Pfad</span>
-                    <?php endif; ?>
+                    <a href="media_view.php?<?= http_build_query($detailParams) ?>">
+                        <img
+                            src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+                            loading="lazy"
+                            alt="ID <?= $id ?>">
+                    </a>
                 <?php else: ?>
                     <a href="media_view.php?<?= http_build_query($detailParams) ?>">Video</a>
                 <?php endif; ?>
@@ -456,10 +421,10 @@ $queryParams = [
             </div>
             <div class="badges">
                 <a href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
-                <?php if ($url !== null && $type === 'image'): ?>
-                    | <a href="<?= htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">Original</a>
-                <?php elseif ($url !== null && $type === 'video'): ?>
-                    | <a href="<?= htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">Pfad</a>
+                <?php if ($type === 'image'): ?>
+                    | <a href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">Original</a>
+                <?php elseif ($type === 'video'): ?>
+                    | <a href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">Pfad</a>
                 <?php endif; ?>
             </div>
         </div>

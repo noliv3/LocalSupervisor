@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 // Gemeinsame Sicherheits- und Audit-Helfer.
 
+require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/logging.php';
+
 $GLOBALS['sv_last_internal_key_valid'] = false;
 
 function sv_is_cli(): bool
@@ -39,124 +42,62 @@ function sv_get_client_ip(): string
     return '';
 }
 
-function sv_require_internal_key(array $config): void
+function sv_get_internal_key_from_request(): string
 {
-    $sec          = $config['security'] ?? [];
-    $ipWhitelist  = $sec['ip_whitelist'] ?? [];
-    $remoteIp     = $_SERVER['REMOTE_ADDR'] ?? '';
-
-    // Lokale/whitelist-IP: kein Key nötig
-    if ($remoteIp !== '' && in_array($remoteIp, $ipWhitelist, true)) {
-        return;
-    }
-
-    $expectedKey = (string)($sec['internal_api_key'] ?? '');
-    if ($expectedKey === '') {
-        http_response_code(403);
-        echo 'Internal key not configured.';
-        exit;
-    }
-
-    $got = null;
-    if (isset($_SERVER['HTTP_X_INTERNAL_KEY'])) {
-        $got = (string)$_SERVER['HTTP_X_INTERNAL_KEY'];
-    } elseif (isset($_GET['internal_key'])) {
-        $got = (string)$_GET['internal_key'];
-    } elseif (isset($_POST['internal_key'])) {
-        $got = (string)$_POST['internal_key'];
-    }
-
-    if (!hash_equals($expectedKey, (string)$got)) {
-        http_response_code(403);
-        echo 'Forbidden (internal key required).';
-        exit;
-    }
-}
-
-
-function sv_check_internal_key(array $configSecurity): void
-{
-    $GLOBALS['sv_last_internal_key_valid'] = false;
-
-    if (sv_is_cli()) {
-        $GLOBALS['sv_last_internal_key_valid'] = true;
-        return;
-    }
-
-    $expectedKey = trim((string)($configSecurity['internal_api_key'] ?? ''));
-    if ($expectedKey === '') {
-        sv_security_error(500, 'Security misconfigured: internal_api_key missing.');
-    }
-
-    $clientIp = sv_get_client_ip();
-    $whitelist = $configSecurity['ip_whitelist'] ?? [];
-    if (is_array($whitelist) && $whitelist !== []) {
-        $allowed = in_array($clientIp, $whitelist, true);
-        if (!$allowed) {
-            sv_security_error(403, 'Forbidden: IP not whitelisted.');
-        }
-    }
-
-    $providedKey = '';
     if (!empty($_SERVER['HTTP_X_INTERNAL_KEY'])) {
-        $providedKey = (string)$_SERVER['HTTP_X_INTERNAL_KEY'];
-    } elseif (isset($_GET['internal_key'])) {
-        $providedKey = (string)$_GET['internal_key'];
-    } elseif (isset($_POST['internal_key'])) {
-        $providedKey = (string)$_POST['internal_key'];
+        return (string)$_SERVER['HTTP_X_INTERNAL_KEY'];
+    }
+    if (isset($_COOKIE['internal_key'])) {
+        return (string)$_COOKIE['internal_key'];
+    }
+    if (isset($_GET['internal_key'])) {
+        return (string)$_GET['internal_key'];
+    }
+    if (isset($_POST['internal_key'])) {
+        return (string)$_POST['internal_key'];
     }
 
-    if ($providedKey === '') {
-        sv_security_error(403, 'Forbidden: internal key required.');
-    }
-
-    if (!hash_equals($expectedKey, $providedKey)) {
-        sv_security_error(403, 'Forbidden: invalid internal key.');
-    }
-
-    $GLOBALS['sv_last_internal_key_valid'] = true;
+    return '';
 }
 
-function sv_is_internal_request(array $config): bool
+function sv_require_internal_access(array $config, string $action): void
 {
     $GLOBALS['sv_last_internal_key_valid'] = false;
 
     if (sv_is_cli()) {
         $GLOBALS['sv_last_internal_key_valid'] = true;
-        return true;
+        return;
     }
 
     $security = $config['security'] ?? [];
     $expectedKey = trim((string)($security['internal_api_key'] ?? ''));
+    $clientIp    = sv_get_client_ip();
+    $whitelist   = $security['ip_whitelist'] ?? [];
+
     if ($expectedKey === '') {
-        return false;
+        sv_security_log($config, 'Security misconfigured: internal key missing', ['action' => $action, 'ip' => $clientIp]);
+        sv_security_error(500, 'Security misconfigured: internal_api_key missing.');
     }
 
-    $clientIp = sv_get_client_ip();
-    $whitelist = $security['ip_whitelist'] ?? [];
     if (is_array($whitelist) && $whitelist !== []) {
         if (!in_array($clientIp, $whitelist, true)) {
-            return false;
+            sv_security_log($config, 'IP not whitelisted', ['action' => $action, 'ip' => $clientIp]);
+            sv_security_error(403, 'Forbidden: IP not whitelisted.');
         }
     }
 
-    $providedKey = '';
-    if (!empty($_SERVER['HTTP_X_INTERNAL_KEY'])) {
-        $providedKey = (string)$_SERVER['HTTP_X_INTERNAL_KEY'];
-    } elseif (isset($_GET['internal_key'])) {
-        $providedKey = (string)$_GET['internal_key'];
-    } elseif (isset($_POST['internal_key'])) {
-        $providedKey = (string)$_POST['internal_key'];
-    }
-
+    $providedKey = sv_get_internal_key_from_request();
     if ($providedKey === '') {
-        return false;
+        sv_security_log($config, 'Missing internal key', ['action' => $action, 'ip' => $clientIp]);
+        sv_security_error(403, 'Forbidden: internal key required.');
     }
 
-    $valid = hash_equals($expectedKey, $providedKey);
-    $GLOBALS['sv_last_internal_key_valid'] = $valid;
+    if (!hash_equals($expectedKey, $providedKey)) {
+        sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp]);
+        sv_security_error(403, 'Forbidden: invalid internal key.');
+    }
 
-    return $valid;
+    $GLOBALS['sv_last_internal_key_valid'] = true;
 }
 
 function sv_has_valid_internal_key(): bool
