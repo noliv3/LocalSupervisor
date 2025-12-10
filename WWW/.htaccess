@@ -1,0 +1,16 @@
+# Harden webroot against misplaced CLI/maintenance scripts
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Allow canonical web entrypoints
+    RewriteCond %{REQUEST_URI} ^/(index|mediadb|media_view|media|media_stream|thumb)\.php$ [NC]
+    RewriteRule ^ - [L]
+
+    # Allow static assets (styles, scripts, images, fonts)
+    RewriteCond %{REQUEST_URI} \.(css|js|mjs|json|svg|png|jpe?g|gif|webp|ico|ttf|woff2?)$ [NC]
+    RewriteRule ^ - [L]
+
+    # Block CLI/maintenance script names if they ever land in WWW
+    RewriteCond %{REQUEST_URI} (_cli\.php|scan_core\.php|scan_path\.php|db_.*\.php|init_db\.php) [NC]
+    RewriteRule ^ - [F]
+</IfModule>
