@@ -8,7 +8,10 @@ require_once __DIR__ . '/logging.php';
 require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
 
-const SV_FORGE_JOB_TYPE = 'forge_regen';
+const SV_FORGE_JOB_TYPE           = 'forge_regen';
+const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
+const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
+const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors';
 
 function sv_load_config(?string $baseDir = null): array
 {
@@ -203,6 +206,121 @@ function sv_forge_endpoint_config(array $config): ?array
     ];
 }
 
+function sv_forge_base_url(array $config): string
+{
+    if (isset($config['forge']) && is_array($config['forge'])) {
+        $candidate = trim((string)($config['forge']['base_url'] ?? ''));
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    return SV_FORGE_DEFAULT_BASE_URL;
+}
+
+function sv_forge_fetch_model_list(array $config, callable $logger): ?array
+{
+    $baseUrl = rtrim(sv_forge_base_url($config), '/');
+    $url     = $baseUrl . SV_FORGE_MODEL_LIST_PATH;
+
+    $timeout = 15;
+    if (isset($config['forge']) && is_array($config['forge'])) {
+        $timeoutCfg = (int)($config['forge']['timeout'] ?? 15);
+        $timeout    = $timeoutCfg > 0 ? $timeoutCfg : 15;
+    }
+
+    $headers = ['Accept: application/json'];
+    $token   = isset($config['forge']['token']) && is_string($config['forge']['token'])
+        ? trim($config['forge']['token'])
+        : '';
+    if ($token !== '') {
+        $headers[] = 'Authorization: Bearer ' . $token;
+    }
+
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'GET',
+            'header'  => implode("\r\n", $headers),
+            'timeout' => $timeout,
+        ],
+    ]);
+
+    try {
+        $responseBody = @file_get_contents($url, false, $context);
+    } catch (Throwable $e) {
+        $logger('Forge-Modelliste konnte nicht geladen werden: ' . $e->getMessage());
+        return null;
+    }
+
+    if ($responseBody === false) {
+        $logger('Forge-Modelliste konnte nicht geladen werden (HTTP-Fehler).');
+        return null;
+    }
+
+    $decoded = json_decode($responseBody, true);
+    if (!is_array($decoded)) {
+        $logger('Forge-Modelliste ungültig oder leer.');
+        return null;
+    }
+
+    return $decoded;
+}
+
+function sv_resolve_forge_model(array $config, ?string $requestedModelName, callable $logger): string
+{
+    $requested = trim((string)$requestedModelName);
+    $models    = sv_forge_fetch_model_list($config, $logger);
+
+    if ($models === null || $models === []) {
+        if ($requested === '') {
+            $logger('Forge model fallback used (no request, no model list).');
+        } else {
+            $logger('Forge model fallback used (requested=' . $requested . ', no model list).');
+        }
+
+        return SV_FORGE_FALLBACK_MODEL;
+    }
+
+    if ($requested === '') {
+        $logger('Forge model fallback used (no model specified).');
+        return SV_FORGE_FALLBACK_MODEL;
+    }
+
+    $requestedLower = strtolower($requested);
+
+    foreach ($models as $model) {
+        if (!is_array($model)) {
+            continue;
+        }
+
+        $candidates = [];
+        foreach (['model_name', 'title', 'filename', 'name'] as $field) {
+            if (isset($model[$field]) && is_string($model[$field])) {
+                $candidates[] = trim((string)$model[$field]);
+            }
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($candidate === '') {
+                continue;
+            }
+            $candidateLower = strtolower($candidate);
+            if ($candidateLower === $requestedLower
+                || str_contains($candidateLower, $requestedLower)
+                || str_contains($requestedLower, $candidateLower)
+            ) {
+                if ($candidateLower !== $requestedLower) {
+                    $logger('Forge model resolved via fuzzy match: requested=' . $requested . ', used=' . $candidate . '.');
+                }
+                return $candidate;
+            }
+        }
+    }
+
+    $logger('Forge model fallback used (requested=' . $requested . ', fallback=' . SV_FORGE_FALLBACK_MODEL . ').');
+    return SV_FORGE_FALLBACK_MODEL;
+}
+
 function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $payload, callable $logger): array
 {
     $endpoint = sv_forge_endpoint_config($config);
@@ -318,7 +436,20 @@ function sv_queue_forge_regeneration(
     $payload  = $validation['payload'];
     $promptId = $validation['prompt_id'];
 
+    $requestedModel = (string)($payload['model'] ?? '');
+    $resolvedModel  = sv_resolve_forge_model($config, $requestedModel, $logger);
+    $payload['model'] = $resolvedModel;
+
     $jobId = sv_create_forge_job($pdo, $mediaId, $payload, $promptId, $logger);
+
+    if ($resolvedModel !== $requestedModel) {
+        $logger('Forge-Modell in Job #' . $jobId . ' angepasst: requested=' . $requestedModel . ', used=' . $resolvedModel . '.');
+        sv_audit_log($pdo, 'forge_model_resolved', 'jobs', $jobId, [
+            'requested_model' => $requestedModel,
+            'resolved_model'  => $resolvedModel,
+            'fallback_used'   => $resolvedModel === SV_FORGE_FALLBACK_MODEL,
+        ]);
+    }
 
     $result = [
         'job_id'     => $jobId,
