@@ -84,11 +84,30 @@ function sv_interpret_scanner_response(array $data): array
         if (!$t) {
             return;
         }
-        $label = $t['label'] ?? null;
-        if (!is_string($label) || $label === '') {
+        $label = isset($t['label']) && is_string($t['label']) ? trim($t['label']) : '';
+        if ($label === '') {
             return;
         }
-        $tagSet[$label] = true;
+        $confidence = null;
+        foreach (['confidence', 'probability', 'score'] as $confKey) {
+            if (isset($t[$confKey]) && is_numeric($t[$confKey])) {
+                $confidence = (float)$t[$confKey];
+                break;
+            }
+        }
+        if ($confidence === null) {
+            $confidence = 1.0;
+        }
+        if ($confidence <= 0.0) {
+            return;
+        }
+        if (!isset($tagSet[$label]) || $tagSet[$label]['confidence'] < $confidence) {
+            $tagSet[$label] = [
+                'name'       => $label,
+                'confidence' => $confidence,
+                'type'       => is_string($t['type'] ?? null) ? (string)$t['type'] : 'content',
+            ];
+        }
     };
 
     foreach ($tagMod as $t) {
@@ -102,14 +121,7 @@ function sv_interpret_scanner_response(array $data): array
         }
     }
 
-    $tags = [];
-    foreach (array_keys($tagSet) as $label) {
-        $tags[] = [
-            'name'       => $label,
-            'confidence' => 1.0,
-            'type'       => 'content',
-        ];
-    }
+    $tags = array_values($tagSet);
 
     return [
         'nsfw_score' => $risk,
@@ -204,17 +216,21 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): void
 
     foreach ($tags as $tag) {
         if (is_string($tag)) {
-            $name       = $tag;
+            $name       = trim($tag);
             $confidence = 1.0;
             $type       = 'content';
         } elseif (is_array($tag)) {
-            $name       = (string)($tag['name'] ?? '');
+            $name       = isset($tag['name']) ? trim((string)$tag['name']) : '';
             if ($name === '') {
                 continue;
             }
-            $confidence = isset($tag['confidence']) ? (float)$tag['confidence'] : 1.0;
+            $confidence = isset($tag['confidence']) && is_numeric($tag['confidence']) ? (float)$tag['confidence'] : 1.0;
             $type       = (string)($tag['type'] ?? 'content');
         } else {
+            continue;
+        }
+
+        if ($confidence <= 0.0) {
             continue;
         }
 
@@ -610,9 +626,20 @@ function sv_store_extracted_metadata(
     $promptStmt->execute([$mediaId]);
     $existingPromptId = $promptStmt->fetchColumn();
     $hasNormalized    = sv_normalized_prompt_has_data($normalized);
+    $hasPromptText    = $rawBlock !== null && trim($rawBlock) !== '';
 
     if ($rawBlock !== null && $normalized['source_metadata'] === null) {
         $normalized['source_metadata'] = $rawBlock;
+    }
+    if (!$hasNormalized && $hasPromptText) {
+        $normalized['prompt']          = $normalized['prompt'] ?? trim($rawBlock);
+        if ($normalized['source_metadata'] === null) {
+            $normalized['source_metadata'] = json_encode([
+                'raw_parameters' => $rawBlock,
+                'context'        => $selectedCandidate,
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+        $hasNormalized = sv_normalized_prompt_has_data($normalized);
     }
 
     if ($existingPromptId === false && ($hasNormalized || $rawBlock !== null)) {
