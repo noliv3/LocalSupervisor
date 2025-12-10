@@ -411,6 +411,125 @@ function sv_media_consistency_status(PDO $pdo, int $mediaId): array
     ];
 }
 
+function sv_collect_integrity_issues(PDO $pdo, ?array $mediaIds = null): array
+{
+    $mediaIds = $mediaIds !== null
+        ? array_values(array_filter(array_map('intval', $mediaIds), static fn ($v) => $v > 0))
+        : null;
+
+    $issueByMedia = [];
+    $issueByType  = [];
+
+    if ($mediaIds !== null && $mediaIds === []) {
+        return [
+            'by_media' => $issueByMedia,
+            'by_type'  => $issueByType,
+        ];
+    }
+
+    $registerIssue = static function (int $mediaId, string $type, string $message) use (&$issueByMedia, &$issueByType): void {
+        $entry = [
+            'media_id' => $mediaId,
+            'type'     => $type,
+            'message'  => $message,
+        ];
+        $issueByMedia[$mediaId][] = $entry;
+        $issueByType[$type][]     = $entry;
+    };
+
+    $filterSql   = '';
+    $filterParts = [];
+    if ($mediaIds !== null) {
+        $placeholders = implode(',', array_fill(0, count($mediaIds), '?'));
+        $filterSql    = ' AND m.id IN (' . $placeholders . ')';
+        $filterParts  = $mediaIds;
+    }
+
+    $hashSql  = "SELECT m.id FROM media m WHERE (m.hash IS NULL OR TRIM(m.hash) = '')" . $filterSql;
+    $hashStmt = $pdo->prepare($hashSql);
+    $hashStmt->execute($filterParts);
+    foreach ($hashStmt->fetchAll(PDO::FETCH_COLUMN) as $mediaId) {
+        $registerIssue((int)$mediaId, 'hash', 'Hash fehlt.');
+    }
+
+    $promptSql  = "SELECT DISTINCT p.media_id FROM prompts p JOIN media m ON m.id = p.media_id"
+        . " WHERE (p.source_metadata IS NULL OR TRIM(p.source_metadata) = '')" . $filterSql;
+    $promptStmt = $pdo->prepare($promptSql);
+    $promptStmt->execute($filterParts);
+    foreach ($promptStmt->fetchAll(PDO::FETCH_COLUMN) as $mediaId) {
+        $registerIssue((int)$mediaId, 'prompt', 'Prompt vorhanden, aber Roh-Metadaten fehlen.');
+    }
+
+    $tagSql  = "SELECT DISTINCT mt.media_id FROM media_tags mt JOIN media m ON m.id = mt.media_id"
+        . " WHERE mt.confidence IS NULL" . $filterSql;
+    $tagStmt = $pdo->prepare($tagSql);
+    $tagStmt->execute($filterParts);
+    foreach ($tagStmt->fetchAll(PDO::FETCH_COLUMN) as $mediaId) {
+        $registerIssue((int)$mediaId, 'tag', 'Tag-Konfidenz fehlt.');
+    }
+
+    $fileSql  = "SELECT m.id, m.path FROM media m WHERE m.status = 'active' AND m.path IS NOT NULL" . $filterSql;
+    $fileStmt = $pdo->prepare($fileSql);
+    $fileStmt->execute($filterParts);
+    while ($row = $fileStmt->fetch(PDO::FETCH_ASSOC)) {
+        $mediaId = (int)$row['id'];
+        $path    = (string)$row['path'];
+        if (!is_file($path)) {
+            $registerIssue($mediaId, 'file', 'Dateipfad nicht gefunden.');
+        }
+    }
+
+    return [
+        'by_media' => $issueByMedia,
+        'by_type'  => $issueByType,
+    ];
+}
+
+function sv_run_simple_integrity_repair(PDO $pdo, callable $logLine): array
+{
+    $changes = [
+        'status_missing_set' => 0,
+        'tag_rows_removed'   => 0,
+        'prompts_removed'    => 0,
+    ];
+
+    $fileStmt = $pdo->query("SELECT id, path FROM media WHERE status = 'active' AND path IS NOT NULL");
+    while ($row = $fileStmt->fetch(PDO::FETCH_ASSOC)) {
+        $mediaId = (int)$row['id'];
+        $path    = (string)$row['path'];
+        if (!is_file($path)) {
+            $update = $pdo->prepare("UPDATE media SET status = 'missing' WHERE id = ?");
+            $update->execute([$mediaId]);
+            $changes['status_missing_set']++;
+            $logLine('Media #' . $mediaId . ' als missing markiert (Datei fehlt).');
+        }
+    }
+
+    $deleteTags = $pdo->prepare('DELETE FROM media_tags WHERE confidence IS NULL');
+    $deleteTags->execute();
+    $changes['tag_rows_removed'] = (int)$deleteTags->rowCount();
+    if ($changes['tag_rows_removed'] > 0) {
+        $logLine('Tag-Zuordnungen ohne Confidence entfernt: ' . $changes['tag_rows_removed']);
+    }
+
+    $promptIdsStmt = $pdo->query(
+        "SELECT id FROM prompts WHERE "
+        . "(prompt IS NULL OR TRIM(prompt) = '')"
+        . " AND (negative_prompt IS NULL OR TRIM(negative_prompt) = '')"
+        . " AND (source_metadata IS NULL OR TRIM(source_metadata) = '')"
+    );
+    $promptIds = $promptIdsStmt->fetchAll(PDO::FETCH_COLUMN);
+    if (!empty($promptIds)) {
+        $placeholders = implode(',', array_fill(0, count($promptIds), '?'));
+        $deletePrompts = $pdo->prepare('DELETE FROM prompts WHERE id IN (' . $placeholders . ')');
+        $deletePrompts->execute(array_map('intval', $promptIds));
+        $changes['prompts_removed'] = (int)$deletePrompts->rowCount();
+        $logLine('Leere Prompt-Einträge entfernt: ' . $changes['prompts_removed']);
+    }
+
+    return $changes;
+}
+
 function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, callable $logLine): array
 {
     $repairMode = $mode === 'simple' ? 'simple' : 'report';

@@ -96,6 +96,7 @@ $showAdult = sv_normalize_adult_flag($_GET);
 $page    = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
 $perPage = 100;
 $offset  = ($page - 1) * $perPage;
+$issueFilter = isset($_GET['issues']) && ((string)$_GET['issues'] === '1');
 
 $typeFilter       = $_GET['type'] ?? 'all';
 $hasPromptFilter  = $_GET['has_prompt'] ?? 'all';
@@ -173,32 +174,82 @@ if ($incompleteFilter === 'prompt') {
 }
 
 $whereSql = $where === [] ? '1=1' : implode(' AND ', $where);
+$issueReport = [];
 
-$countSql = 'SELECT COUNT(*) FROM media m WHERE ' . $whereSql;
-$countStmt = $pdo->prepare($countSql);
-$countStmt->execute($params);
-$total = (int)$countStmt->fetchColumn();
+if ($issueFilter) {
+    $idSql = 'SELECT m.id FROM media m WHERE ' . $whereSql . ' ORDER BY m.id DESC';
+    $idStmt = $pdo->prepare($idSql);
+    $idStmt->execute($params);
+    $candidateIds = array_map('intval', $idStmt->fetchAll(PDO::FETCH_COLUMN));
 
-$listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
-       EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
-       EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
-       EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-       EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
+    $issueReport = sv_collect_integrity_issues($pdo, $candidateIds);
+    $issueMediaMap = $issueReport['by_media'] ?? [];
+
+    $issueIds = [];
+    foreach ($candidateIds as $cid) {
+        if (isset($issueMediaMap[$cid])) {
+            $issueIds[] = $cid;
+        }
+    }
+
+    $total = count($issueIds);
+    $pages = max(1, (int)ceil($total / $perPage));
+    $pageIssueIds = array_slice($issueIds, $offset, $perPage);
+
+    if ($pageIssueIds === []) {
+        $rows = [];
+    } else {
+        $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
+        $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
+           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
+           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
+FROM media m
+WHERE m.id IN (' . $placeholders . ')
+ORDER BY m.id DESC';
+        $listStmt = $pdo->prepare($listSql);
+        $listStmt->execute($pageIssueIds);
+        $fetched = $listStmt->fetchAll(PDO::FETCH_ASSOC);
+        $rows = [];
+        $map = [];
+        foreach ($fetched as $row) {
+            $map[(int)$row['id']] = $row;
+        }
+        foreach ($pageIssueIds as $pid) {
+            if (isset($map[$pid])) {
+                $rows[] = $map[$pid];
+            }
+        }
+    }
+} else {
+    $countSql = 'SELECT COUNT(*) FROM media m WHERE ' . $whereSql;
+    $countStmt = $pdo->prepare($countSql);
+    $countStmt->execute($params);
+    $total = (int)$countStmt->fetchColumn();
+
+    $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
+           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
+           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
 WHERE ' . $whereSql . '
 ORDER BY m.id DESC
 LIMIT :limit OFFSET :offset';
 
-$listStmt = $pdo->prepare($listSql);
-foreach ($params as $k => $v) {
-    $listStmt->bindValue($k, $v);
-}
-$listStmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
-$listStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
-$listStmt->execute();
+    $listStmt = $pdo->prepare($listSql);
+    foreach ($params as $k => $v) {
+        $listStmt->bindValue($k, $v);
+    }
+    $listStmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
+    $listStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $listStmt->execute();
 
-$rows = $listStmt->fetchAll(PDO::FETCH_ASSOC);
-$pages = max(1, (int)ceil($total / $perPage));
+    $rows = $listStmt->fetchAll(PDO::FETCH_ASSOC);
+    $pages = max(1, (int)ceil($total / $perPage));
+    $issueReport = sv_collect_integrity_issues($pdo, array_map(static fn ($r) => (int)$r['id'], $rows));
+}
 
 $queryParams = [
     'type'       => $typeFilter,
@@ -208,8 +259,11 @@ $queryParams = [
     'status'     => $statusFilter,
     'min_rating' => $minRating,
     'incomplete' => $incompleteFilter,
+    'issues'     => $issueFilter ? '1' : '0',
     'adult'      => $showAdult ? '1' : '0',
 ];
+
+$issuesByMedia = $issueReport['by_media'] ?? [];
 
 ?>
 <!doctype html>
@@ -321,6 +375,10 @@ $queryParams = [
             background: #5c6bc0;
             color: #fff;
         }
+        .badge.issue {
+            background: #f57f17;
+            color: #fff;
+        }
         .pager {
             margin: 10px 0;
             font-size: 13px;
@@ -383,6 +441,10 @@ $queryParams = [
         </select>
     </label>
     <label>
+        <input type="checkbox" name="issues" value="1" <?= $issueFilter ? 'checked' : '' ?>>
+        nur mit Problemen
+    </label>
+    <label>
         Status:
         <select name="status">
             <option value="all"      <?= $statusFilter === 'all' ? 'selected' : '' ?>>alle</option>
@@ -435,6 +497,7 @@ $queryParams = [
         $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
         $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
+        $hasIssues = isset($issuesByMedia[$id]);
 
         $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
         $detailParams = array_merge($queryParams, ['id' => $id, 'p' => $page]);
@@ -458,6 +521,9 @@ $queryParams = [
             </div>
             <div class="badges">
                 <span class="badge <?= $type === 'video' ? 'video' : 'image' ?>"><?= $type === 'video' ? 'V' : 'I' ?></span>
+                <?php if ($hasIssues): ?>
+                    <span class="badge issue" title="Integritätsprobleme erkannt">!</span>
+                <?php endif; ?>
                 <?php if ($hasPrompt && $promptComplete): ?>
                     <span class="badge prompt present" title="Prompt vollständig">P</span>
                 <?php elseif ($hasPrompt && !$promptComplete): ?>
