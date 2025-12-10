@@ -68,6 +68,11 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **UI-Anzeigen**: `media_view.php` listet konkrete Probleme des Mediums (erste drei Zeilen, Rest aufklappbar). `mediadb.php` bietet einen Filter `?issues=1` und markiert betroffene Medien in der Grid-Ansicht. Das Dashboard (`index.php`) zeigt die Anzahl der problematischen Medien im Abschnitt „Integritätsstatus“.
 - **Einfache Reparatur**: Über das Dashboard (Internal-Key/IP-Whitelist erforderlich) kann eine minimale Reparatur ausgelöst werden. Sie setzt nur den Status auf `missing`, wenn Dateien fehlen, entfernt `media_tags`-Einträge ohne Confidence und löscht komplett leere Prompt-Objekte. Alle Schritte laufen über `SCRIPTS/operations.php` und werden auditgeloggt.
 
+## Forge-Regeneration
+- **Ablauf**: In der Detailansicht (`media_view.php`) kann für Bildmedien mit vollständigen Prompts die Aktion „Regen über Forge“ ausgelöst werden. Dabei wird ein Forge-Payload aus den gespeicherten Prompt-Parametern gebaut, ein Job in `jobs` mit Typ `forge_regen` angelegt und optional sofort an den konfigurierten Forge-Endpunkt gesendet.
+- **Job-Verfolgung**: Die Job-Request/Response-Daten werden in `jobs.forge_request_json`/`jobs.forge_response_json` abgelegt; Statusübergänge (queued/running/done/error) bleiben auditierbar. Das Dashboard (`index.php`) zeigt eine kompakte Übersicht offener/erfolgreicher/fehlerhafter Forge-Jobs, detaillierte Einsicht erfolgt aktuell über DB-Tools.
+- **Unveränderte Ablage**: Die physische Ablage und Hash-Logik bleiben unverändert; Forge-Ausgaben werden derzeit nur als Jobs erfasst und nicht automatisch in den Medienbestand zurückgeschrieben.
+
 ## Bekannte Einschränkungen / Offene Baustellen
 - Prompt-Historie fehlt; Raw-Blöcke werden zwar gespeichert, aber Historisierung/Versionierung der Prompts ist nicht vorhanden.
 - Automatische Regeneration aus bestehenden `media_meta`-Snapshots existiert nicht; Rebuild liest immer von der Quelldatei.

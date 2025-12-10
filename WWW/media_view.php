@@ -116,6 +116,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $actionMessage = 'Prompt-Rebuild fehlgeschlagen.';
             }
+        } elseif ($action === 'forge_regen') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
+            try {
+                $dispatchNow = sv_forge_endpoint_config($config) !== null;
+                $result = sv_queue_forge_regeneration($pdo, $config, $id, $dispatchNow, $logger);
+                $actionSuccess = true;
+                $statusLabel = htmlspecialchars((string)($result['status'] ?? 'queued'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                $actionMessage = 'Forge-Job #' . (int)($result['job_id'] ?? 0) . ' erstellt (Status: ' . $statusLabel . ').';
+                if (!empty($result['dispatched']) && ($result['status'] ?? '') === 'running') {
+                    $actionMessage .= ' Sofort-Dispatch ausgelöst.';
+                } elseif (!$dispatchNow) {
+                    $actionMessage .= ' Dispatch übersprungen (keine Forge-Konfiguration).';
+                }
+            } catch (Throwable $e) {
+                $actionSuccess = false;
+                $actionMessage = 'Forge-Regeneration nicht möglich: ' . $e->getMessage();
+            }
         } elseif ($action === 'logical_delete') {
             $logger       = sv_operation_logger(null, $actionLogs);
             $result       = sv_mark_media_missing($pdo, $id, $logger);
@@ -268,6 +285,7 @@ if ($promptExists) {
 }
 
 $type = (string)$media['type'];
+$canForgeRegen = $type === 'image' && $consistencyStatus['prompt_complete'];
 $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
 ?>
 <!doctype html>
@@ -577,6 +595,14 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
             <input type="hidden" name="media_id" value="<?= (int)$id ?>">
             <input type="hidden" name="action" value="rebuild_prompt">
             <button type="submit">Prompt neu aufbauen</button>
+        </form>
+    <?php endif; ?>
+
+    <?php if ($canForgeRegen): ?>
+        <form method="post" style="display:inline-block; margin-right:8px;">
+            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+            <input type="hidden" name="action" value="forge_regen">
+            <button type="submit">Regen über Forge</button>
         </form>
     <?php endif; ?>
 
