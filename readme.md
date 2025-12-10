@@ -40,6 +40,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
 
 ## CLI- und Web-Operations
+> Hinweis: Alle CLI-Kommandos laufen ausschließlich über `SCRIPTS/`; im `WWW/`-Verzeichnis existieren keine parallelen CLI-Dateien mehr (Legacy-Wrapper wurden entfernt). Deployments sollten sicherstellen, dass nur das bereinigte `WWW/`-Set auf dem Webserver liegt.
 | Befehl/Endpoint | Zweck | Wichtige Parameter |
 | --- | --- | --- |
 | `php SCRIPTS/scan_path_cli.php <path> [--limit=N] [--offset=N]` | Erstimport eines Verzeichnisses, rekursiv | Pfad zur Quelle; Limits für Batches |
