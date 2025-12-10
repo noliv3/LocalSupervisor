@@ -203,6 +203,110 @@ function sv_run_prompts_rebuild_operation(
     ];
 }
 
+function sv_run_prompt_rebuild_single(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
+    $stmt = $pdo->prepare('SELECT id, path, type, status FROM media WHERE id = ?');
+    $stmt->execute([$mediaId]);
+    $media = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$media) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    $path   = (string)$media['path'];
+    $type   = (string)$media['type'];
+    $status = (string)$media['status'];
+
+    $logger('Prompt-Rebuild (Single) für Media ID ' . $mediaId);
+
+    if ($status !== 'active') {
+        $logger('  -> Übersprungen: Status ist nicht active.');
+        return [
+            'processed' => 0,
+            'skipped'   => 1,
+            'errors'    => 0,
+        ];
+    }
+
+    if ($type !== 'image') {
+        $logger('  -> Übersprungen: Nur Bilder werden unterstützt.');
+        return [
+            'processed' => 0,
+            'skipped'   => 1,
+            'errors'    => 0,
+        ];
+    }
+
+    if (!is_file($path)) {
+        $logger('  -> Datei nicht gefunden, Status prüfen (Filesync?).');
+        return [
+            'processed' => 0,
+            'skipped'   => 1,
+            'errors'    => 0,
+        ];
+    }
+
+    try {
+        $metadata = sv_extract_metadata($path, $type, 'prompts_rebuild_single', $logger);
+        sv_store_extracted_metadata($pdo, $mediaId, $type, $metadata, 'prompts_rebuild_single', $logger);
+        $logger('  -> Rebuild abgeschlossen.');
+        sv_audit_log($pdo, 'prompt_rebuild_single', 'media', $mediaId, [
+            'path'   => $path,
+            'status' => $status,
+        ]);
+        return [
+            'processed' => 1,
+            'skipped'   => 0,
+            'errors'    => 0,
+        ];
+    } catch (Throwable $e) {
+        $logger('  -> Fehler: ' . $e->getMessage());
+        return [
+            'processed' => 0,
+            'skipped'   => 0,
+            'errors'    => 1,
+            'error'     => $e->getMessage(),
+        ];
+    }
+}
+
+function sv_mark_media_missing(PDO $pdo, int $mediaId, callable $logger): array
+{
+    $stmt = $pdo->prepare('SELECT id, status FROM media WHERE id = ?');
+    $stmt->execute([$mediaId]);
+    $media = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$media) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    $currentStatus = (string)($media['status'] ?? '');
+    $logger('Logisches Löschen für Media ID ' . $mediaId . ' (Status: ' . $currentStatus . ')');
+
+    if ($currentStatus === 'missing') {
+        $logger('  -> Bereits als missing markiert, keine Änderung.');
+        return [
+            'changed'         => false,
+            'previous_status' => $currentStatus,
+        ];
+    }
+
+    $update = $pdo->prepare("UPDATE media SET status = 'missing' WHERE id = ?");
+    $update->execute([$mediaId]);
+
+    sv_audit_log($pdo, 'media_mark_missing', 'media', $mediaId, [
+        'previous_status' => $currentStatus,
+        'new_status'      => 'missing',
+    ]);
+
+    $logger('  -> Status auf missing gesetzt.');
+
+    return [
+        'changed'         => true,
+        'previous_status' => $currentStatus,
+    ];
+}
+
 function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, callable $logLine): array
 {
     $repairMode = $mode === 'simple' ? 'simple' : 'report';
