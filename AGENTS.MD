@@ -27,6 +27,10 @@
 - Jede Codeänderung im PR-Output knapp dokumentieren (Kernstellen, keine Diff-Wände).
 - README und AGENTS müssen aktuelle Abläufe, Schnittstellen und Sicherheitsregeln widerspiegeln, sobald sie geändert werden.
 
+## Forge-Regeneration
+- Forge-bezogene Operationen laufen ausschließlich über `SCRIPTS/operations.php` (Job-Erzeugung/Dispatch) und `WWW/media_view.php` (UI-Auslöser).
+- Neue Forge-Funktionen müssen das `jobs`-Modell verwenden und auditierbar sein; keine direkten Forge-Helper im Webroot anlegen.
+
 ## Konsistenz- und Rebuild-Funktionen
 - Neue Konsistenzanzeigen oder Prompt-Rebuild-Komfortpfade müssen über `SCRIPTS/operations.php` laufen und im Dashboard/Views eingebunden werden.
 - Web-Formulare dürfen keine neuen Schreibpfade öffnen, sondern bestehende Internal-Key-Mechanismen nutzen.

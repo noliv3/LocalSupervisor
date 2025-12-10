@@ -32,6 +32,7 @@ $scanStats   = [];
 $metaStats   = [];
 $importStats = [];
 $jobStats    = [];
+$forgeJobOverview = [];
 $lastRuns    = [];
 $integrityStatus = ['media_with_issues' => 0];
 $knownActions = [
@@ -292,6 +293,12 @@ try {
     }, $jobStats['byStatus']));
 } catch (Throwable $e) {
     $statErrors['jobs'] = $e->getMessage();
+}
+
+try {
+    $forgeJobOverview = sv_forge_job_overview($pdo);
+} catch (Throwable $e) {
+    $statErrors['forge_jobs'] = $e->getMessage();
 }
 
 try {
@@ -639,6 +646,23 @@ $cliEntries = [
                 <th><?= htmlspecialchars((string)($jobStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></th>
             </tr>
         </table>
+    <?php endif; ?>
+
+    <h3>Forge-Jobs (Regeneration)</h3>
+    <?php if (isset($statErrors['forge_jobs'])): ?>
+        <p>Fehler bei Forge-Jobs: <?= htmlspecialchars((string)$statErrors['forge_jobs'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php else: ?>
+        <p>Offene Forge-Jobs: <?= htmlspecialchars((string)($forgeJobOverview['open'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Erfolgreich: <?= htmlspecialchars((string)($forgeJobOverview['done'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Fehler: <?= htmlspecialchars((string)($forgeJobOverview['error'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+        <?php if (!empty($forgeJobOverview['by_status'])): ?>
+            <ul>
+                <?php foreach ($forgeJobOverview['by_status'] as $status => $cnt): ?>
+                    <li><?= htmlspecialchars((string)$status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>: <?= htmlspecialchars((string)$cnt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                <?php endforeach; ?>
+            </ul>
+        <?php else: ?>
+            <p>Keine Forge-Jobs vorhanden.</p>
+        <?php endif; ?>
+        <p>Details können aktuell über Datenbank-Tools eingesehen werden.</p>
     <?php endif; ?>
 
     <h2>CLI-Übersicht</h2>

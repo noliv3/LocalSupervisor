@@ -8,6 +8,8 @@ require_once __DIR__ . '/logging.php';
 require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
 
+const SV_FORGE_JOB_TYPE = 'forge_regen';
+
 function sv_load_config(?string $baseDir = null): array
 {
     $baseDir = $baseDir ?? sv_base_dir();
@@ -60,6 +62,302 @@ function sv_prompt_core_complete_condition(string $alias = 'p'): string
         "{$alias}.height IS NOT NULL",
         "{$alias}.scheduler IS NOT NULL",
     ]);
+}
+
+function sv_load_media_with_prompt(PDO $pdo, int $mediaId): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT m.*, p.id AS prompt_id, p.prompt, p.negative_prompt, p.model, p.sampler, p.cfg_scale, p.steps, '
+        . 'p.seed, p.width, p.height, p.scheduler, p.sampler_settings, p.loras, p.controlnet, p.source_metadata '
+        . 'FROM media m '
+        . 'LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1) '
+        . 'WHERE m.id = :id'
+    );
+    $stmt->execute([':id' => $mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$row) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    return $row;
+}
+
+function sv_validate_forge_prompt_payload(array $mediaRow): array
+{
+    $type = (string)($mediaRow['type'] ?? '');
+    if ($type !== 'image') {
+        throw new InvalidArgumentException('Nur Bildmedien können regeneriert werden.');
+    }
+
+    $promptId = $mediaRow['prompt_id'] ?? null;
+    if ($promptId === null) {
+        throw new InvalidArgumentException('Kein Prompt für dieses Medium gefunden.');
+    }
+
+    $requiredFields = [
+        'prompt',
+        'negative_prompt',
+        'model',
+        'sampler',
+        'cfg_scale',
+        'steps',
+        'seed',
+        'width',
+        'height',
+    ];
+
+    foreach ($requiredFields as $field) {
+        if (!isset($mediaRow[$field])) {
+            throw new InvalidArgumentException('Prompteintrag unvollständig: Feld fehlt: ' . $field);
+        }
+        if (is_string($mediaRow[$field]) && trim($mediaRow[$field]) === '') {
+            throw new InvalidArgumentException('Prompteintrag unvollständig: Feld leer: ' . $field);
+        }
+    }
+
+    $payload = [
+        'prompt'          => (string)$mediaRow['prompt'],
+        'negative_prompt' => (string)$mediaRow['negative_prompt'],
+        'width'           => (int)$mediaRow['width'],
+        'height'          => (int)$mediaRow['height'],
+        'steps'           => (int)$mediaRow['steps'],
+        'cfg_scale'       => (float)$mediaRow['cfg_scale'],
+        'seed'            => (string)$mediaRow['seed'],
+        'model'           => (string)$mediaRow['model'],
+        'sampler'         => (string)$mediaRow['sampler'],
+    ];
+
+    if (!empty($mediaRow['scheduler'])) {
+        $payload['scheduler'] = (string)$mediaRow['scheduler'];
+    }
+    if (!empty($mediaRow['sampler_settings'])) {
+        $payload['sampler_settings'] = json_decode((string)$mediaRow['sampler_settings'], true) ?? (string)$mediaRow['sampler_settings'];
+    }
+    if (!empty($mediaRow['loras'])) {
+        $payload['loras'] = json_decode((string)$mediaRow['loras'], true) ?? (string)$mediaRow['loras'];
+    }
+    if (!empty($mediaRow['controlnet'])) {
+        $payload['controlnet'] = json_decode((string)$mediaRow['controlnet'], true) ?? (string)$mediaRow['controlnet'];
+    }
+    if (!empty($mediaRow['source_metadata'])) {
+        $payload['source_metadata'] = (string)$mediaRow['source_metadata'];
+    }
+
+    return [
+        'payload'   => $payload,
+        'prompt_id' => (int)$promptId,
+    ];
+}
+
+function sv_create_forge_job(PDO $pdo, int $mediaId, array $payload, ?int $promptId, callable $logger): int
+{
+    $now = date('c');
+    $requestJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
+        . 'VALUES (:media_id, :prompt_id, :type, :status, :created_at, :updated_at, :forge_request_json)'
+    );
+    $stmt->execute([
+        ':media_id'          => $mediaId,
+        ':prompt_id'         => $promptId,
+        ':type'              => SV_FORGE_JOB_TYPE,
+        ':status'            => 'queued',
+        ':created_at'        => $now,
+        ':updated_at'        => $now,
+        ':forge_request_json'=> $requestJson,
+    ]);
+
+    $jobId = (int)$pdo->lastInsertId();
+    $logger('Forge-Job angelegt: ID=' . $jobId . ' (Status queued)');
+    sv_audit_log($pdo, 'forge_job_created', 'jobs', $jobId, [
+        'media_id'   => $mediaId,
+        'prompt_id'  => $promptId,
+        'job_type'   => SV_FORGE_JOB_TYPE,
+        'status'     => 'queued',
+    ]);
+
+    return $jobId;
+}
+
+function sv_forge_endpoint_config(array $config): ?array
+{
+    if (!isset($config['forge']) || !is_array($config['forge'])) {
+        return null;
+    }
+
+    $forge = $config['forge'];
+    $baseUrl = isset($forge['base_url']) && is_string($forge['base_url']) ? trim($forge['base_url']) : '';
+    $token   = isset($forge['token']) && is_string($forge['token']) ? trim($forge['token']) : '';
+    $timeout = isset($forge['timeout']) ? (int)$forge['timeout'] : 15;
+
+    if ($baseUrl === '' || $token === '') {
+        return null;
+    }
+
+    return [
+        'base_url' => $baseUrl,
+        'token'    => $token,
+        'timeout'  => $timeout > 0 ? $timeout : 15,
+    ];
+}
+
+function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $payload, callable $logger): array
+{
+    $endpoint = sv_forge_endpoint_config($config);
+    if ($endpoint === null) {
+        $logger('Forge-Dispatch übersprungen: keine gültige Forge-Konfiguration.');
+        return [
+            'dispatched' => false,
+            'status'     => 'queued',
+            'message'    => 'Forge-Konfiguration fehlt oder ist unvollständig.',
+        ];
+    }
+
+    $url      = rtrim($endpoint['base_url'], '/');
+    $timeout  = $endpoint['timeout'];
+    $headers  = [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $endpoint['token'],
+    ];
+
+    $logger('Sende Forge-Request für Job ID ' . $jobId . ' an ' . $url);
+
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'POST',
+            'header'  => implode("\r\n", $headers),
+            'content' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            'timeout' => $timeout,
+        ],
+    ]);
+
+    $responseBody = @file_get_contents($url, false, $context);
+    $httpCode     = null;
+    if (isset($http_response_header) && is_array($http_response_header)) {
+        foreach ($http_response_header as $headerLine) {
+            if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
+                $httpCode = (int)$matches[1];
+                break;
+            }
+        }
+    }
+
+    $now = date('c');
+    $responseJson = $responseBody !== false ? $responseBody : null;
+
+    if ($httpCode !== null && $httpCode >= 200 && $httpCode < 300 && $responseBody !== false) {
+        $status = 'running';
+        $logger('Forge-Dispatch erfolgreich, Status auf running gesetzt.');
+        $update = $pdo->prepare(
+            'UPDATE jobs SET status = :status, forge_response_json = :response, updated_at = :updated_at WHERE id = :id'
+        );
+        $update->execute([
+            ':status'     => $status,
+            ':response'   => $responseJson,
+            ':updated_at' => $now,
+            ':id'         => $jobId,
+        ]);
+
+        sv_audit_log($pdo, 'forge_job_dispatched', 'jobs', $jobId, [
+            'status'      => $status,
+            'http_code'   => $httpCode,
+        ]);
+
+        return [
+            'dispatched' => true,
+            'status'     => $status,
+            'response'   => $responseJson,
+        ];
+    }
+
+    $status = 'queued';
+    $error  = 'Forge-Dispatch fehlgeschlagen';
+    if ($httpCode !== null) {
+        $error .= ' (HTTP ' . $httpCode . ')';
+    }
+    $logger($error);
+
+    $update = $pdo->prepare(
+        'UPDATE jobs SET status = :status, forge_response_json = :response, error_message = :error, updated_at = :updated_at '
+        . 'WHERE id = :id'
+    );
+    $update->execute([
+        ':status'     => $status,
+        ':response'   => $responseJson,
+        ':error'      => $error,
+        ':updated_at' => $now,
+        ':id'         => $jobId,
+    ]);
+
+    sv_audit_log($pdo, 'forge_job_dispatch_failed', 'jobs', $jobId, [
+        'status'    => $status,
+        'http_code' => $httpCode,
+        'error'     => $error,
+    ]);
+
+    return [
+        'dispatched' => false,
+        'status'     => $status,
+        'error'      => $error,
+        'response'   => $responseJson,
+    ];
+}
+
+function sv_queue_forge_regeneration(
+    PDO $pdo,
+    array $config,
+    int $mediaId,
+    bool $dispatchNow,
+    callable $logger
+): array {
+    $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
+    $validation = sv_validate_forge_prompt_payload($mediaRow);
+
+    $payload  = $validation['payload'];
+    $promptId = $validation['prompt_id'];
+
+    $jobId = sv_create_forge_job($pdo, $mediaId, $payload, $promptId, $logger);
+
+    $result = [
+        'job_id'     => $jobId,
+        'status'     => 'queued',
+        'dispatched' => false,
+    ];
+
+    if ($dispatchNow) {
+        $dispatchResult = sv_dispatch_forge_job($pdo, $config, $jobId, $payload, $logger);
+        $result = array_merge($result, $dispatchResult);
+    }
+
+    return $result;
+}
+
+function sv_forge_job_overview(PDO $pdo): array
+{
+    $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type = :type GROUP BY status');
+    $stmt->execute([':type' => SV_FORGE_JOB_TYPE]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $byStatus = [];
+    foreach ($rows as $row) {
+        $status = (string)($row['status'] ?? '');
+        $byStatus[$status] = (int)$row['cnt'];
+    }
+
+    $openStatuses = ['queued', 'pending', 'running'];
+    $openCount = 0;
+    foreach ($openStatuses as $status) {
+        $openCount += $byStatus[$status] ?? 0;
+    }
+
+    return [
+        'by_status' => $byStatus,
+        'open'      => $openCount,
+        'done'      => $byStatus['done'] ?? 0,
+        'error'     => $byStatus['error'] ?? 0,
+    ];
 }
 
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array
