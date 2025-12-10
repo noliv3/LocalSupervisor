@@ -33,6 +33,7 @@ $metaStats   = [];
 $importStats = [];
 $jobStats    = [];
 $lastRuns    = [];
+$integrityStatus = ['media_with_issues' => 0];
 $knownActions = [
     'scan_start'           => 'Scan (Dashboard)',
     'rescan_start'         => 'Rescan (Dashboard)',
@@ -41,6 +42,7 @@ $knownActions = [
     'prompts_rebuild_missing' => 'Prompt-Rebuild fehlender Kerndaten',
     'consistency_report'   => 'Consistency-Report',
     'consistency_repair'   => 'Consistency-Repair',
+    'integrity_simple_repair' => 'Einfache Reparatur',
     'db_backup'            => 'DB-Backup',
     'migrate'              => 'Migration',
     'cleanup_missing'      => 'Cleanup Missing',
@@ -52,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     sv_require_internal_access($config, 'dashboard_action');
 
     $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check'];
+    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check', 'integrity_simple_repair'];
 
     if (!in_array($action, $allowedActions, true)) {
         $jobMessage = 'Ungültige Aktion.';
@@ -202,6 +204,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Throwable $e) {
             $jobMessage = 'Consistency-Check-Fehler: ' . $e->getMessage();
         }
+    } elseif ($action === 'integrity_simple_repair') {
+        [$logFile, $logger] = sv_create_operation_log($config, 'integrity_simple', $logLines, 20);
+        try {
+            $changes = sv_run_simple_integrity_repair($pdo, $logger);
+            $jobMessage = 'Einfache Reparatur abgeschlossen: missing gesetzt=' . (int)$changes['status_missing_set']
+                . ', Tags entfernt=' . (int)$changes['tag_rows_removed']
+                . ', leere Prompts entfernt=' . (int)$changes['prompts_removed'];
+            sv_audit_log($pdo, 'integrity_simple_repair', 'db', null, [
+                'changes'    => $changes,
+                'log_file'   => $logFile,
+                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            $jobMessage = 'Einfache Reparatur fehlgeschlagen: ' . $e->getMessage();
+        }
     }
 }
 
@@ -275,6 +292,13 @@ try {
     }, $jobStats['byStatus']));
 } catch (Throwable $e) {
     $statErrors['jobs'] = $e->getMessage();
+}
+
+try {
+    $integrityReport = sv_collect_integrity_issues($pdo);
+    $integrityStatus['media_with_issues'] = count($integrityReport['by_media'] ?? []);
+} catch (Throwable $e) {
+    $statErrors['integrity'] = $e->getMessage();
 }
 
 if (!empty($knownActions)) {
@@ -472,6 +496,20 @@ $cliEntries = [
             </select>
         </label>
         <button type="submit">Consistency-Check starten</button>
+    </form>
+
+    <h2>Integritätsstatus</h2>
+    <?php if (isset($statErrors['integrity'])): ?>
+        <p>Fehler bei der Integritätsanalyse: <?= htmlspecialchars((string)$statErrors['integrity'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php else: ?>
+        <p>Medien mit erkannten Problemen: <?= htmlspecialchars((string)$integrityStatus['media_with_issues'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php endif; ?>
+    <p>Hinweis: Anzeige ist nur lesend und nutzt die Prüfungen aus operations.php.</p>
+
+    <form method="post">
+        <input type="hidden" name="action" value="integrity_simple_repair">
+        <p><strong>Einfache Reparatur durchführen</strong> (setzt fehlende Dateien auf Status missing, entfernt leere Prompts und Tag-Einträge ohne Confidence).</p>
+        <button type="submit">Einfache Reparatur durchführen</button>
     </form>
 
     <?php if ($jobMessage !== null): ?>

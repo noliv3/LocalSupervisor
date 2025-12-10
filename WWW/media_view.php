@@ -161,6 +161,8 @@ $tagStmt->execute([':id' => $id]);
 $tags = $tagStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $consistencyStatus = sv_media_consistency_status($pdo, $id);
+$issueReport = sv_collect_integrity_issues($pdo, [$id]);
+$mediaIssues = $issueReport['by_media'][$id] ?? [];
 
 $groupedMeta = [];
 foreach ($metaRows as $meta) {
@@ -407,6 +409,13 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
             color: #555;
             margin-top: 6px;
         }
+        .issues-block ul {
+            margin: 0 0 8px 16px;
+            padding: 0;
+        }
+        .issues-block li {
+            margin: 4px 0;
+        }
     </style>
 </head>
 <body>
@@ -453,6 +462,33 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
         </span>
     </div>
 </div>
+
+<?php if ($mediaIssues !== []): ?>
+<div class="consistency issues-block">
+    <h3>Integritätsprobleme</h3>
+    <ul>
+        <?php foreach (array_slice($mediaIssues, 0, 3) as $issue): ?>
+            <li>
+                <strong><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>:</strong>
+                <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            </li>
+        <?php endforeach; ?>
+    </ul>
+    <?php if (count($mediaIssues) > 3): ?>
+        <details>
+            <summary>Weitere Probleme einblenden</summary>
+            <ul>
+                <?php foreach ($mediaIssues as $issue): ?>
+                    <li>
+                        <strong><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>:</strong>
+                        <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        </details>
+    <?php endif; ?>
+</div>
+<?php endif; ?>
 
 <div class="media-block">
     <?php if ($type === 'image'): ?>
