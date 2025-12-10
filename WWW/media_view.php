@@ -2,6 +2,8 @@
 declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/security.php';
+require_once __DIR__ . '/../SCRIPTS/operations.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -77,11 +79,57 @@ function sv_limit_string(string $value, int $maxLen): string
 
 $showAdult = sv_normalize_adult_flag($_GET);
 
+$actionMessage = null;
+$actionSuccess = null;
+$actionLogs    = [];
+$actionLogFile = null;
+
 $id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
 if ($id <= 0) {
     http_response_code(400);
     echo 'Ungültige ID';
     exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        sv_require_internal_access($config, 'media_action');
+
+        $postId = isset($_POST['media_id']) ? (int)$_POST['media_id'] : 0;
+        if ($postId !== $id) {
+            throw new RuntimeException('Media-ID stimmt nicht überein.');
+        }
+
+        $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
+
+        if ($action === 'rebuild_prompt') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'prompts_single', $actionLogs, 10);
+            $result = sv_run_prompt_rebuild_single($pdo, $config, $id, $logger);
+            $processed     = (int)($result['processed'] ?? 0);
+            $skipped       = (int)($result['skipped'] ?? 0);
+            $errors        = (int)($result['errors'] ?? 0);
+            $actionSuccess = $errors === 0;
+            if ($actionSuccess && $processed > 0) {
+                $actionMessage = 'Prompt-Rebuild für dieses Medium abgeschlossen.';
+            } elseif ($actionSuccess && $skipped > 0) {
+                $actionMessage = 'Prompt-Rebuild übersprungen (Status/Datei prüfen).';
+            } else {
+                $actionMessage = 'Prompt-Rebuild fehlgeschlagen.';
+            }
+        } elseif ($action === 'logical_delete') {
+            $logger       = sv_operation_logger(null, $actionLogs);
+            $result       = sv_mark_media_missing($pdo, $id, $logger);
+            $actionSuccess = true;
+            $actionMessage = $result['changed']
+                ? 'Medium als missing markiert.'
+                : 'Medium war bereits als missing markiert.';
+        } else {
+            throw new RuntimeException('Unbekannte Aktion.');
+        }
+    } catch (Throwable $e) {
+        $actionSuccess = false;
+        $actionMessage = 'Aktion fehlgeschlagen: ' . $e->getMessage();
+    }
 }
 
 $mediaStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
@@ -398,14 +446,38 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
 </div>
 
 <div class="actions">
-    <h2>Aktionen (Platzhalter)</h2>
-    <?php if ($showRebuildButton): ?>
-        <button type="button" disabled title="Wird später mit Forge/Regeneration verknüpft">Prompt/Rebuild vorbereiten</button>
-        <!-- TODO: Hook for Forge regeneration -->
+    <h2>Aktionen</h2>
+    <?php if ($actionMessage !== null): ?>
+        <div style="padding:8px; border:1px solid <?= $actionSuccess ? '#4caf50' : '#e53935' ?>; background: <?= $actionSuccess ? '#e8f5e9' : '#ffebee' ?>; margin-bottom:10px;">
+            <strong><?= $actionSuccess ? 'OK' : 'Fehler' ?>:</strong>
+            <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            <?php if ($actionLogFile): ?>
+                <div>Logdatei: <?= htmlspecialchars((string)$actionLogFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <?php endif; ?>
+            <?php if ($actionLogs !== []): ?>
+                <details style="margin-top:6px;">
+                    <summary>Details</summary>
+                    <pre style="white-space:pre-wrap; background:#f6f8fa; padding:6px;"><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                </details>
+            <?php endif; ?>
+        </div>
     <?php endif; ?>
-    <button type="button" disabled title="Wird später für manuelles Löschen genutzt">Medium löschen (manuell)</button>
-    <!-- TODO: Hook for logical delete / status=deleted -->
-    <div class="action-note">Noch keine Server-Logik hinterlegt; Buttons sind nur UI-Vorbereitung.</div>
+
+    <?php if ($showRebuildButton): ?>
+        <form method="post" style="display:inline-block; margin-right:8px;">
+            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+            <input type="hidden" name="action" value="rebuild_prompt">
+            <button type="submit">Prompt neu aufbauen</button>
+        </form>
+    <?php endif; ?>
+
+    <form method="post" style="display:inline-block; margin-right:8px;" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
+        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+        <input type="hidden" name="action" value="logical_delete">
+        <button type="submit">Medium logisch löschen</button>
+    </form>
+
+    <div class="action-note">Aktionen erfordern Internal-Key und IP-Whitelist. Löschfunktion setzt nur den Status auf missing.</div>
 </div>
 
 <div class="media-block">
