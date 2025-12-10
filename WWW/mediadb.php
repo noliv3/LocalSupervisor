@@ -182,7 +182,30 @@ if ($issueFilter) {
     $idStmt->execute($params);
     $candidateIds = array_map('intval', $idStmt->fetchAll(PDO::FETCH_COLUMN));
 
-    $issueReport = sv_collect_integrity_issues($pdo, $candidateIds);
+    $issueReport = [
+        'by_media' => [],
+        'by_type'  => [],
+    ];
+
+    $issueChunkSize = 900; // stay below SQLite placeholder limit (999)
+    foreach (array_chunk($candidateIds, $issueChunkSize) as $chunk) {
+        $chunkReport = sv_collect_integrity_issues($pdo, $chunk);
+
+        foreach (($chunkReport['by_media'] ?? []) as $mid => $entries) {
+            if (!isset($issueReport['by_media'][$mid])) {
+                $issueReport['by_media'][$mid] = [];
+            }
+            $issueReport['by_media'][$mid] = array_merge($issueReport['by_media'][$mid], $entries);
+        }
+
+        foreach (($chunkReport['by_type'] ?? []) as $type => $entries) {
+            if (!isset($issueReport['by_type'][$type])) {
+                $issueReport['by_type'][$type] = [];
+            }
+            $issueReport['by_type'][$type] = array_merge($issueReport['by_type'][$type], $entries);
+        }
+    }
+
     $issueMediaMap = $issueReport['by_media'] ?? [];
 
     $issueIds = [];
