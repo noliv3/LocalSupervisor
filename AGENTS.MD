@@ -1,30 +1,27 @@
-# Agent Notes
+# AGENT RULES – SuperVisOr
 
-Scope: gesamtes Repository.
+## Scope
+- Gilt für das gesamte Repository; keine Unterordner mit abweichenden Vorgaben.
+- Erlaubt: Zielgerichtete Änderungen an PHP/SQL/Config/Docs, wenn explizit beauftragt.
+- Nicht erlaubt ohne Auftrag: Änderungen an `CONFIG/`, `DB/`, `SCRIPTS/migrations/`, sicherheitsrelevanten Parametern oder Logik, die Datenfluss oder Zugriffsmodell beeinflusst.
+- Gefährliche Bereiche: `CONFIG/config.php`, `SCRIPTS/migrations/*`, `DB/schema.sql`, `SCRIPTS/security.php`, `WWW/media_stream.php`, `WWW/thumb.php` (Pfadvalidierung), `SCRIPTS/paths.php`.
 
-- Halte README und diese Datei aktuell, wenn Abläufe, Anforderungen oder Bedienhinweise geändert werden.
-- Dashboard (`WWW/index.php`) startet Scan/Rescan/Filesync sowie Prompt-Rebuild und Consistency-Checks direkt über `SCRIPTS/operations.php`, zeigt Kernstatistiken (Media/Prompts/Tags/Logs) und führt eine CLI-Referenz mit typischen Aufrufen; produktive neue CLIs bleiben dünne Wrapper auf die zentrale Operations-Schicht und gehören in README und hier dokumentiert.
-- Metadaten gehören in `media_meta`; erweitere Parser zentral in `sv_extract_metadata` statt Ad-hoc-Logik zu verteilen. Prompt-Kandidaten werden über `sv_collect_prompt_candidates`/`sv_select_prompt_candidate` priorisiert, bevor `sv_normalize_prompt_block` strukturiert nach `prompts` schreibt und Raw-Blöcke ablegt.
-- Prompt-Parsing ist in `SCRIPTS/prompt_parser.php` sowie `sv_extract_metadata`/`sv_store_extracted_metadata` gebündelt; neue Quellen bitte dort ergänzen statt eigene Parser-CLIs anzulegen. Legacy-Helfer wie `exif_prompts_cli.php` sollten denselben Pfad nutzen und als solche gekennzeichnet bleiben.
-- Metadaten/Prompts werden im Web read-only über `WWW/mediadb.php` (Liste) und `WWW/media_view.php` (Detail) angezeigt;
-  neue UI-Felder bitte dort integrieren statt separate Viewer zu bauen.
-- Konsistenzprüfungen laufen manuell über `php SCRIPTS/consistency_check.php` (optional `--repair=simple`); Ergebnisse landen in `LOGS/consistency_*.log` und in `consistency_log`, sobald Migration 002 eingespielt ist.
-- Bevorzugte Referenzquelle für Schema/DB ist `DB/schema.sql`; bei Änderungen immer Daten- und Indextabellen dokumentieren.
-- CLI-Flows basieren auf `SCRIPTS/scan_core.php` plus Wrappern; wenn du Erweiterungen baust, beschreibe den Aufrufpfad (CLI/Web) und Logging-Orte.
-- Laufzeit-Logs liegen pro Kanal unter `LOGS/<channel>/` (Scan/Rescan/Filesync/Prompts/Consistency/Security) mit automatischer Rotation (operativ 50 Dateien, Consistency 30, Security 60 Tage).
-- Schema-Migrationen werden ausschließlich manuell per `php SCRIPTS/migrate.php` ausgeführt; neue Migrationen liegen in `SCRIPTS/migrations/` und tragen den Dateinamen auch als `version`-Eintrag in `schema_migrations`.
-- Vermeide Try/Catch-Blöcke um Imports (`require`, `include`); Fehler sollen früh sichtbar bleiben.
-- Sicherheitsrelevante Einstellungen (API-Keys, IP-Whitelist, Tokens) liegen in `CONFIG/config.php` und dürfen nicht mit Dummy-Werten in Commits geleakt werden.
-- Betrieb / Heavy Tasks: Vor Migrationen oder Reparaturen zuerst `php SCRIPTS/db_backup.php` ausführen, dann `php SCRIPTS/migrate.php`, anschließend `php SCRIPTS/consistency_check.php` (report-only) und erst danach große Scans/Rescans/Filesync-Läufe (ggf. mit `--limit`/`--offset`).
-- Kritische Writes aus dem Web (Scan/Rescan/Filesync, spätere Mutationen) müssen über `sv_require_internal_access` abgesichert werden (Header/Query/Cookie `internal_key` plus IP-Whitelist); UI-Aktionen wie Ratings/Kommentare gelten als „low impact“ und dürfen ohne Key laufen, sollten aber entsprechend kommentiert sein.
-- Neue Web-Parameter immer über Whitelists/Bereiche absichern; siehe `WWW/mediadb.php`, `WWW/media_view.php` und `WWW/thumb.php` für Beispiele.
-- Ergänzende Härtungsnotizen stehen in `SECURITY_REVIEW.md`; halte README und diese Datei synchron, wenn Sicherheits- oder Betriebsabläufe angepasst werden.
-- Medienpfade werden direkt aus `paths.*` genutzt; der Web-Stream erfolgt über `WWW/media_stream.php`, das die konfigurierten Basispfade (SFW/NSFW, Bild/Video) validiert, statt Webroot-Symlinks anzulegen.
+## Arbeitsanweisungen
+- Refactor nur mit klarer Zielsetzung; keine breitflächigen Umbenennungen oder Formatierungen.
+- Keine Phantom-Dateien oder temporären Ablagen anlegen; bestehende Dateien weiterverwenden.
+- Keine Duplikate von CLIs, Views oder Parsern; Erweiterungen gehören in die bestehenden zentralen Komponenten.
+- Keine Eingriffe ohne expliziten Auftrag; Dokumentation immer in README und AGENTS aktualisieren, wenn Abläufe/Schnittstellen betroffen sind.
 
-## Dokumentation
-- Vollständige Inventar- und Risikobewertungen aus dem aktuellen Codex-Audit liegen in `CODEX_AUDIT.md`.
+## Strukturregeln
+- Kernel-Logik liegt in `SCRIPTS/` (scan_core, prompt_parser, operations, logging, security, paths); Web-spezifische Logik bleibt in `WWW/`.
+- Legacy-Dateien markieren statt entfernen, sofern nicht beauftragt; neue Funktionen an die bestehende Architektur anlehnen.
+- Migrationen bleiben manuell; keine automatische Schemaänderung aus Web/CLI außer über `migrate.php`.
 
-## Review-Status (Prompt/CLIs)
-- Prompt-Kandidatenauswahl deckt EXIF-Kommentare, PNG-Text, parameterartige Strings und JSON-Blöcke (`sd-metadata`, `workflow`) ab; Priorisierung läuft über `sv_collect_prompt_candidates`/`sv_select_prompt_candidate`, Normalisierung über `sv_normalize_prompt_block` mit Ablage eines Raw-Blocks in `media_meta` und `prompts.source_metadata`.【F:SCRIPTS/prompt_parser.php†L185-L379】【F:SCRIPTS/scan_core.php†L510-L686】 Künftige Parser-Quellen bitte weiterhin dort integrieren.
-- `prompts_rebuild_cli.php` arbeitet nur auf aktiven Bildern mit fehlenden Prompt-Kernfeldern und liest die Quelldatei erneut aus; vorhandene `media_meta`-Snapshots oder Historien werden dabei nicht ausgewertet, was für die Planung eines „Rebuild aus DB-Rohdaten“ zu berücksichtigen ist.【F:SCRIPTS/prompts_rebuild_cli.php†L42-L94】【F:SCRIPTS/scan_core.php†L616-L683】
-- Dashboard-Buttons starten ausschließlich Scan/Rescan/Filesync; Rebuild, Backup, Migration, Konsistenzchecks oder EXIF-Füller bleiben manuell/CLI-only, bis eine UI-Erweiterung umgesetzt wird.【F:WWW/index.php†L29-L116】 Sensitivitäts-/Secrets-Checks für Metadaten sind aktuell nicht vorhanden; Raw-Blöcke werden unverändert gespeichert.【F:SCRIPTS/scan_core.php†L520-L686】
+## Sicherheitsregeln
+- Internal-Key-Flow bewahren: Web-Schreibaktionen nur mit `sv_require_internal_access` (Header/Query/Cookie `internal_key` plus IP-Whitelist).
+- Logging-Pflicht für sicherheitsrelevante Aktionen (Backups, Migrationen, Konsistenz-Reparaturen, Web-Starts von Scan/Rescan/Filesync).
+- Pfadvalidierung nicht umgehen: keine Symlinks nutzen, keine Direktzugriffe außerhalb der erlaubten Media-Roots.
+
+## Dokumentationspflichten
+- Jede Codeänderung im PR-Output knapp dokumentieren (Kernstellen, keine Diff-Wände).
+- README und AGENTS müssen aktuelle Abläufe, Schnittstellen und Sicherheitsregeln widerspiegeln, sobald sie geändert werden.
