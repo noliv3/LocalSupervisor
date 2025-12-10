@@ -161,7 +161,8 @@ $total = (int)$countStmt->fetchColumn();
 
 $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
        EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
-       EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta
+       EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
+       EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
 WHERE ' . $whereSql . '
 ORDER BY m.id DESC
@@ -278,6 +279,22 @@ $queryParams = [
             background: #e0e0e0;
             color: #222;
         }
+        .badge.prompt.present {
+            background: #2e7d32;
+            color: #fff;
+        }
+        .badge.prompt.missing {
+            background: #bdbdbd;
+            color: #111;
+        }
+        .badge.meta.missing {
+            background: #ef9a9a;
+            color: #222;
+        }
+        .badge.tag {
+            background: #5c6bc0;
+            color: #fff;
+        }
         .pager {
             margin: 10px 0;
             font-size: 13px;
@@ -380,6 +397,7 @@ $queryParams = [
         $status  = (string)($row['status'] ?? '');
         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
+        $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
 
         $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
         $detailParams = array_merge($queryParams, ['id' => $id, 'p' => $page]);
@@ -404,10 +422,17 @@ $queryParams = [
             <div class="badges">
                 <span class="badge <?= $type === 'video' ? 'video' : 'image' ?>"><?= $type === 'video' ? 'V' : 'I' ?></span>
                 <?php if ($hasPrompt): ?>
-                    <span class="badge prompt">Prompt</span>
+                    <span class="badge prompt present" title="Prompt vorhanden">P</span>
+                <?php else: ?>
+                    <span class="badge prompt missing" title="Kein Prompt hinterlegt">P?</span>
                 <?php endif; ?>
                 <?php if ($hasMeta): ?>
-                    <span class="badge meta">Meta</span>
+                    <span class="badge meta" title="Metadaten vorhanden">M</span>
+                <?php else: ?>
+                    <span class="badge meta missing" title="Keine Metadaten gefunden">M?</span>
+                <?php endif; ?>
+                <?php if ($hasTags): ?>
+                    <span class="badge tag" title="Tags gespeichert">T</span>
                 <?php endif; ?>
                 <?php if ($hasNsfw): ?>
                     <span class="badge nsfw">FSK18</span>
