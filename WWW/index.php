@@ -38,6 +38,7 @@ $knownActions = [
     'rescan_start'         => 'Rescan (Dashboard)',
     'filesync_start'       => 'Filesync (Dashboard)',
     'prompts_rebuild'      => 'Prompt-Rebuild (Dashboard)',
+    'prompts_rebuild_missing' => 'Prompt-Rebuild fehlender Kerndaten',
     'consistency_report'   => 'Consistency-Report',
     'consistency_repair'   => 'Consistency-Repair',
     'db_backup'            => 'DB-Backup',
@@ -45,11 +46,13 @@ $knownActions = [
     'cleanup_missing'      => 'Cleanup Missing',
 ];
 
+$comfortRebuildLimit = 100;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     sv_require_internal_access($config, 'dashboard_action');
 
     $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'consistency_check'];
+    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check'];
 
     if (!in_array($action, $allowedActions, true)) {
         $jobMessage = 'Ungültige Aktion.';
@@ -160,6 +163,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
         } catch (Throwable $e) {
             $jobMessage = 'Prompt-Rebuild-Fehler: ' . $e->getMessage();
+        }
+    } elseif ($action === 'prompts_rebuild_missing') {
+        [$logFile, $logger] = sv_create_operation_log($config, 'prompts_missing', $logLines, 10);
+
+        try {
+            $result = sv_run_prompt_rebuild_missing($pdo, $config, $logger, $comfortRebuildLimit);
+            $jobMessage = 'Komfort-Rebuild abgeschlossen: gefunden=' . (int)($result['found'] ?? 0)
+                . ', verarbeitet=' . (int)($result['processed'] ?? 0)
+                . ', übersprungen=' . (int)($result['skipped'] ?? 0)
+                . ', Fehler=' . (int)($result['errors'] ?? 0);
+            sv_audit_log($pdo, 'prompts_rebuild_missing', 'fs', null, [
+                'limit'     => $comfortRebuildLimit,
+                'found'     => $result['found'] ?? 0,
+                'processed' => $result['processed'] ?? 0,
+                'skipped'   => $result['skipped'] ?? 0,
+                'errors'    => $result['errors'] ?? 0,
+                'log_file'  => $logFile,
+                'user_agent'=> $_SERVER['HTTP_USER_AGENT'] ?? null,
+            ]);
+        } catch (Throwable $e) {
+            $jobMessage = 'Komfort-Rebuild-Fehler: ' . $e->getMessage();
         }
     } elseif ($action === 'consistency_check') {
         $mode   = is_string($_POST['consistency_mode'] ?? null) ? $_POST['consistency_mode'] : 'report';
@@ -428,6 +452,13 @@ $cliEntries = [
             <input type="number" name="rebuild_offset" min="0" step="1">
         </label>
         <button type="submit">Prompt-Rebuild starten</button>
+    </form>
+
+    <h2>Komfort-Rebuild fehlender Prompt-Kerndaten</h2>
+    <form method="post">
+        <input type="hidden" name="action" value="prompts_rebuild_missing">
+        <p>Startet Rebuild nur für Medien mit fehlenden Prompt-Kerndaten (internes Limit: <?= (int)$comfortRebuildLimit ?> Items).</p>
+        <button type="submit">Rebuild fehlender Prompts</button>
     </form>
 
     <h2>Konsistenzprüfung</h2>

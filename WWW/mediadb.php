@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+require_once __DIR__ . '/../SCRIPTS/operations.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -96,25 +97,30 @@ $page    = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
 $perPage = 100;
 $offset  = ($page - 1) * $perPage;
 
-$typeFilter      = $_GET['type'] ?? 'all';
-$hasPromptFilter = $_GET['has_prompt'] ?? 'all';
-$hasMetaFilter   = $_GET['has_meta'] ?? 'all';
-$pathFilter      = sv_limit_string((string)($_GET['q'] ?? ''), 200);
-$statusFilter    = $_GET['status'] ?? 'all';
-$minRating       = (int)($_GET['min_rating'] ?? 0);
+$typeFilter       = $_GET['type'] ?? 'all';
+$hasPromptFilter  = $_GET['has_prompt'] ?? 'all';
+$hasMetaFilter    = $_GET['has_meta'] ?? 'all';
+$pathFilter       = sv_limit_string((string)($_GET['q'] ?? ''), 200);
+$statusFilter     = $_GET['status'] ?? 'all';
+$minRating        = (int)($_GET['min_rating'] ?? 0);
+$incompleteFilter = $_GET['incomplete'] ?? 'none';
 
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
 $allowedMeta      = ['all', 'with', 'without'];
 $allowedStatus    = ['all', 'active', 'archived', 'deleted'];
+$allowedIncomplete= ['none', 'prompt', 'tags', 'meta', 'any'];
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
 $hasPromptFilter  = sv_normalize_enum($hasPromptFilter, $allowedPrompt, 'all');
 $hasMetaFilter    = sv_normalize_enum($hasMetaFilter, $allowedMeta, 'all');
 $statusFilter     = sv_normalize_enum($statusFilter, $allowedStatus, 'all');
 $minRating        = sv_clamp_int($minRating, 0, 3, 0);
+$incompleteFilter = sv_normalize_enum($incompleteFilter, $allowedIncomplete, 'none');
 
 $where  = [];
 $params = [];
+
+$promptCompleteClause = sv_prompt_core_complete_condition('p');
 
 if (!$showAdult) {
     $where[] = '(m.has_nsfw IS NULL OR m.has_nsfw = 0)';
@@ -140,6 +146,8 @@ if ($minRating > 0) {
     $params[':minRating'] = $minRating;
 }
 
+$promptCompleteExists = 'EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ')';
+
 if ($hasPromptFilter === 'with') {
     $where[] = 'EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id)';
 } elseif ($hasPromptFilter === 'without') {
@@ -152,6 +160,18 @@ if ($hasMetaFilter === 'with') {
     $where[] = 'NOT EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id)';
 }
 
+if ($incompleteFilter === 'prompt') {
+    $where[] = 'NOT ' . $promptCompleteExists;
+} elseif ($incompleteFilter === 'tags') {
+    $where[] = 'NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id)';
+} elseif ($incompleteFilter === 'meta') {
+    $where[] = 'NOT EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id)';
+} elseif ($incompleteFilter === 'any') {
+    $where[] = '((NOT ' . $promptCompleteExists . ')'
+        . ' OR NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id)'
+        . ' OR NOT EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id))';
+}
+
 $whereSql = $where === [] ? '1=1' : implode(' AND ', $where);
 
 $countSql = 'SELECT COUNT(*) FROM media m WHERE ' . $whereSql;
@@ -161,6 +181,7 @@ $total = (int)$countStmt->fetchColumn();
 
 $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
        EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
+       EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
        EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
        EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
@@ -186,6 +207,7 @@ $queryParams = [
     'q'          => $pathFilter,
     'status'     => $statusFilter,
     'min_rating' => $minRating,
+    'incomplete' => $incompleteFilter,
     'adult'      => $showAdult ? '1' : '0',
 ];
 
@@ -287,6 +309,10 @@ $queryParams = [
             background: #bdbdbd;
             color: #111;
         }
+        .badge.prompt.partial {
+            background: #fbc02d;
+            color: #222;
+        }
         .badge.meta.missing {
             background: #ef9a9a;
             color: #222;
@@ -347,6 +373,16 @@ $queryParams = [
         </select>
     </label>
     <label>
+        Konsistenz:
+        <select name="incomplete">
+            <option value="none"    <?= $incompleteFilter === 'none' ? 'selected' : '' ?>>alle</option>
+            <option value="prompt"  <?= $incompleteFilter === 'prompt' ? 'selected' : '' ?>>Prompt unvollständig</option>
+            <option value="tags"    <?= $incompleteFilter === 'tags' ? 'selected' : '' ?>>ohne Tags</option>
+            <option value="meta"    <?= $incompleteFilter === 'meta' ? 'selected' : '' ?>>ohne Metadaten</option>
+            <option value="any"     <?= $incompleteFilter === 'any' ? 'selected' : '' ?>>irgendetwas fehlt</option>
+        </select>
+    </label>
+    <label>
         Status:
         <select name="status">
             <option value="all"      <?= $statusFilter === 'all' ? 'selected' : '' ?>>alle</option>
@@ -396,6 +432,7 @@ $queryParams = [
         $rating  = (int)($row['rating'] ?? 0);
         $status  = (string)($row['status'] ?? '');
         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
+        $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
         $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
 
@@ -421,8 +458,10 @@ $queryParams = [
             </div>
             <div class="badges">
                 <span class="badge <?= $type === 'video' ? 'video' : 'image' ?>"><?= $type === 'video' ? 'V' : 'I' ?></span>
-                <?php if ($hasPrompt): ?>
-                    <span class="badge prompt present" title="Prompt vorhanden">P</span>
+                <?php if ($hasPrompt && $promptComplete): ?>
+                    <span class="badge prompt present" title="Prompt vollständig">P</span>
+                <?php elseif ($hasPrompt && !$promptComplete): ?>
+                    <span class="badge prompt partial" title="Prompt-Daten unvollständig">P*</span>
                 <?php else: ?>
                     <span class="badge prompt missing" title="Kein Prompt hinterlegt">P?</span>
                 <?php endif; ?>

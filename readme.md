@@ -58,6 +58,11 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `WWW/media_stream.php?path=...` | Streamt Originaldateien nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
 | `WWW/thumb.php?path=...` | Thumbnails nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
 
+## Konsistenz-Tools
+- **UI-Indikatoren**: `mediadb.php` und `media_view.php` zeigen Badges für Prompt-Vollständigkeit, Tags und Metadaten an. Filter `incomplete=` (prompt/tags/meta/any) erleichtern die Suche nach Lücken.
+- **Mini-Konsistenzcheck**: Direkt in der Detailansicht werden pro Medium die Stati (Prompt vollständig, Tags, Metadaten) angezeigt.
+- **Komfort-Rebuild**: Im Dashboard steht ein Button „Rebuild fehlender Prompts“, der nur Medien mit fehlenden Prompt-Kernfeldern (internes Limit 100) per Einzel-Rebuild anstößt und Audit-Log-Einträge schreibt.
+
 ## Bekannte Einschränkungen / Offene Baustellen
 - Prompt-Historie fehlt; Raw-Blöcke werden zwar gespeichert, aber Historisierung/Versionierung der Prompts ist nicht vorhanden.
 - Automatische Regeneration aus bestehenden `media_meta`-Snapshots existiert nicht; Rebuild liest immer von der Quelldatei.

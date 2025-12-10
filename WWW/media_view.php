@@ -160,6 +160,8 @@ $tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence FROM media_tags m
 $tagStmt->execute([':id' => $id]);
 $tags = $tagStmt->fetchAll(PDO::FETCH_ASSOC);
 
+$consistencyStatus = sv_media_consistency_status($pdo, $id);
+
 $groupedMeta = [];
 foreach ($metaRows as $meta) {
     $src = (string)$meta['source'];
@@ -173,6 +175,7 @@ $allowedTypes  = ['all', 'image', 'video'];
 $allowedPrompt = ['all', 'with', 'without'];
 $allowedMeta   = ['all', 'with', 'without'];
 $allowedStatus = ['all', 'active', 'archived', 'deleted'];
+$allowedIncomplete = ['none', 'prompt', 'tags', 'meta', 'any'];
 
 $typeFilter      = sv_normalize_enum($_GET['type'] ?? null, $allowedTypes, 'all');
 $hasPromptFilter = sv_normalize_enum($_GET['has_prompt'] ?? null, $allowedPrompt, 'all');
@@ -180,6 +183,7 @@ $hasMetaFilter   = sv_normalize_enum($_GET['has_meta'] ?? null, $allowedMeta, 'a
 $pathFilter      = sv_limit_string((string)($_GET['q'] ?? ''), 200);
 $statusFilter    = sv_normalize_enum($_GET['status'] ?? null, $allowedStatus, 'all');
 $minRating       = sv_clamp_int((int)($_GET['min_rating'] ?? 0), 0, 3, 0);
+$incompleteFilter = sv_normalize_enum($_GET['incomplete'] ?? null, $allowedIncomplete, 'none');
 $pageParam       = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
 
 $baseParams = [
@@ -189,6 +193,7 @@ $baseParams = [
     'q'          => $pathFilter,
     'status'     => $statusFilter,
     'min_rating' => $minRating,
+    'incomplete' => $incompleteFilter,
     'p'          => $pageParam,
     'adult'      => $showAdult ? '1' : '0',
 ];
@@ -231,7 +236,7 @@ function sv_date_field($value): string
 
 $promptExists   = $prompt !== null;
 $promptText     = trim((string)($prompt['prompt'] ?? ''));
-$needsRebuild   = !$promptExists || $promptText === '';
+$needsRebuild   = !$consistencyStatus['prompt_complete'];
 $negativePrompt = trim((string)($prompt['negative_prompt'] ?? ''));
 $showRebuildButton = $needsRebuild || (!empty($prompt['source_metadata']) && $promptText !== '');
 
@@ -349,6 +354,43 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
         .tag-type-nsfw { background: #ef9a9a; }
         .tag-type-technical { background: #c5e1a5; }
         .tag-type-other { background: #d7ccc8; }
+        .consistency {
+            margin: 12px 0;
+            padding: 10px;
+            background: #eef6ff;
+            border: 1px solid #cfdffa;
+            border-radius: 4px;
+        }
+        .consistency h2 {
+            margin-top: 0;
+            margin-bottom: 6px;
+        }
+        .consistency-badges {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .consistency-badge {
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .consistency-badge.ok {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+        }
+        .consistency-badge.warn {
+            background: #fff8e1;
+            color: #f57f17;
+            border: 1px solid #ffecb3;
+        }
+        .consistency-badge.error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+        }
         .actions {
             margin-top: 12px;
             padding: 10px;
@@ -380,6 +422,37 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
 </div>
 
 <h1>Media #<?= (int)$id ?> (<?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</h1>
+
+<?php
+$promptBadgeClass = $consistencyStatus['prompt_complete'] ? 'ok' : ($consistencyStatus['prompt_present'] ? 'warn' : 'error');
+$promptLabel = $consistencyStatus['prompt_complete']
+    ? 'Prompt vollständig'
+    : ($consistencyStatus['prompt_present'] ? 'Prompt unvollständig' : 'Prompt fehlt');
+
+$tagBadgeClass  = $consistencyStatus['has_tags'] ? 'ok' : 'error';
+$tagLabel       = $consistencyStatus['has_tags'] ? 'Tags vorhanden' : 'Keine Tags';
+
+$metaBadgeClass = $consistencyStatus['has_meta'] ? 'ok' : 'warn';
+$metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Metadaten fehlen';
+?>
+
+<div class="consistency">
+    <h2>Konsistenz</h2>
+    <div class="consistency-badges">
+        <span class="consistency-badge <?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+              title="Prompt-Vollständigkeit">
+            <?= htmlspecialchars($promptLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </span>
+        <span class="consistency-badge <?= htmlspecialchars($tagBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+              title="Tags für dieses Medium">
+            <?= htmlspecialchars($tagLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </span>
+        <span class="consistency-badge <?= htmlspecialchars($metaBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+              title="Metadaten-Einträge">
+            <?= htmlspecialchars($metaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </span>
+    </div>
+</div>
 
 <div class="media-block">
     <?php if ($type === 'image'): ?>
