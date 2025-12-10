@@ -41,6 +41,27 @@ function sv_open_pdo(array $config): PDO
     return $pdo;
 }
 
+function sv_prompt_core_complete_condition(string $alias = 'p'): string
+{
+    $alias = preg_replace('~[^a-zA-Z0-9_]+~', '', $alias);
+    $alias = $alias === '' ? 'p' : $alias;
+
+    return implode(' AND ', [
+        "{$alias}.prompt IS NOT NULL",
+        "TRIM({$alias}.prompt) <> ''",
+        "{$alias}.negative_prompt IS NOT NULL",
+        "{$alias}.source_metadata IS NOT NULL",
+        "{$alias}.model IS NOT NULL",
+        "{$alias}.sampler IS NOT NULL",
+        "{$alias}.cfg_scale IS NOT NULL",
+        "{$alias}.steps IS NOT NULL",
+        "{$alias}.seed IS NOT NULL",
+        "{$alias}.width IS NOT NULL",
+        "{$alias}.height IS NOT NULL",
+        "{$alias}.scheduler IS NOT NULL",
+    ]);
+}
+
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array
 {
     $scannerCfg    = $config['scanner'] ?? [];
@@ -203,6 +224,23 @@ function sv_run_prompts_rebuild_operation(
     ];
 }
 
+function sv_find_media_with_incomplete_prompts(PDO $pdo, int $limit = 100): array
+{
+    $limit = max(1, $limit);
+    $promptComplete = sv_prompt_core_complete_condition('p2');
+
+    $sql = "SELECT m.id FROM media m "
+        . "WHERE m.status = 'active' AND m.type = 'image' "
+        . "AND NOT EXISTS (SELECT 1 FROM prompts p2 WHERE p2.media_id = m.id AND {$promptComplete}) "
+        . "ORDER BY m.id ASC LIMIT :limit";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    return array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+}
+
 function sv_run_prompt_rebuild_single(PDO $pdo, array $config, int $mediaId, callable $logger): array
 {
     $stmt = $pdo->prepare('SELECT id, path, type, status FROM media WHERE id = ?');
@@ -270,6 +308,40 @@ function sv_run_prompt_rebuild_single(PDO $pdo, array $config, int $mediaId, cal
     }
 }
 
+function sv_run_prompt_rebuild_missing(PDO $pdo, array $config, callable $logger, int $maxBatch = 100): array
+{
+    $maxBatch    = max(1, $maxBatch);
+    $candidates  = sv_find_media_with_incomplete_prompts($pdo, $maxBatch);
+    $found       = count($candidates);
+    $processed   = 0;
+    $skipped     = 0;
+    $errors      = 0;
+
+    $logger('Komfort-Rebuild: ' . $found . ' Kandidaten (Limit ' . $maxBatch . ')');
+
+    foreach ($candidates as $mediaId) {
+        $result    = sv_run_prompt_rebuild_single($pdo, $config, $mediaId, $logger);
+        $processed += (int)($result['processed'] ?? 0);
+        $skipped   += (int)($result['skipped'] ?? 0);
+        $errors    += (int)($result['errors'] ?? 0);
+    }
+
+    sv_audit_log($pdo, 'prompts_rebuild_missing', 'media', null, [
+        'limit'     => $maxBatch,
+        'found'     => $found,
+        'processed' => $processed,
+        'skipped'   => $skipped,
+        'errors'    => $errors,
+    ]);
+
+    return [
+        'found'     => $found,
+        'processed' => $processed,
+        'skipped'   => $skipped,
+        'errors'    => $errors,
+    ];
+}
+
 function sv_mark_media_missing(PDO $pdo, int $mediaId, callable $logger): array
 {
     $stmt = $pdo->prepare('SELECT id, status FROM media WHERE id = ?');
@@ -304,6 +376,38 @@ function sv_mark_media_missing(PDO $pdo, int $mediaId, callable $logger): array
     return [
         'changed'         => true,
         'previous_status' => $currentStatus,
+    ];
+}
+
+function sv_media_consistency_status(PDO $pdo, int $mediaId): array
+{
+    $promptComplete = sv_prompt_core_complete_condition('p');
+
+    $stmt = $pdo->prepare(
+        'SELECT '
+        . '(SELECT CASE WHEN EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = :id AND ' . $promptComplete . ') '
+        . 'THEN 1 ELSE 0 END) AS prompt_complete, '
+        . '(SELECT CASE WHEN EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = :id) THEN 1 ELSE 0 END) AS prompt_present, '
+        . '(SELECT CASE WHEN EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = :id) THEN 1 ELSE 0 END) AS has_tags, '
+        . '(SELECT CASE WHEN EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = :id) THEN 1 ELSE 0 END) AS has_meta'
+    );
+    $stmt->execute([':id' => $mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [
+        'prompt_complete' => 0,
+        'prompt_present'  => 0,
+        'has_tags'        => 0,
+        'has_meta'        => 0,
+    ];
+
+    $promptPresent  = (int)($row['prompt_present'] ?? 0) === 1;
+    $promptCompleteFlag = (int)($row['prompt_complete'] ?? 0) === 1;
+
+    return [
+        'prompt_present'   => $promptPresent,
+        'prompt_complete'  => $promptCompleteFlag,
+        'prompt_incomplete'=> $promptPresent ? !$promptCompleteFlag : true,
+        'has_tags'         => (int)($row['has_tags'] ?? 0) === 1,
+        'has_meta'         => (int)($row['has_meta'] ?? 0) === 1,
     ];
 }
 
