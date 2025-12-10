@@ -108,6 +108,10 @@ $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta W
 $metaStmt->execute([':id' => $id]);
 $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
 
+$tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :id ORDER BY t.type, t.name');
+$tagStmt->execute([':id' => $id]);
+$tags = $tagStmt->fetchAll(PDO::FETCH_ASSOC);
+
 $groupedMeta = [];
 foreach ($metaRows as $meta) {
     $src = (string)$meta['source'];
@@ -175,6 +179,37 @@ function sv_date_field($value): string
         return '-';
     }
     return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+$promptExists   = $prompt !== null;
+$promptText     = trim((string)($prompt['prompt'] ?? ''));
+$needsRebuild   = !$promptExists || $promptText === '';
+$negativePrompt = trim((string)($prompt['negative_prompt'] ?? ''));
+$showRebuildButton = $needsRebuild || (!empty($prompt['source_metadata']) && $promptText !== '');
+
+$promptParams = [];
+if ($promptExists) {
+    if (($prompt['model'] ?? '') !== '') {
+        $promptParams['Model'] = (string)$prompt['model'];
+    }
+    if (($prompt['sampler'] ?? '') !== '') {
+        $promptParams['Sampler'] = (string)$prompt['sampler'];
+    }
+    if ($prompt['steps'] !== null) {
+        $promptParams['Steps'] = (string)$prompt['steps'];
+    }
+    if ($prompt['cfg_scale'] !== null) {
+        $promptParams['CFG Scale'] = (string)$prompt['cfg_scale'];
+    }
+    if (($prompt['seed'] ?? '') !== '') {
+        $promptParams['Seed'] = (string)$prompt['seed'];
+    }
+    if ($prompt['width'] !== null || $prompt['height'] !== null) {
+        $promptParams['Size'] = trim((string)($prompt['width'] ?? '-')) . ' × ' . trim((string)($prompt['height'] ?? '-'));
+    }
+    if (($prompt['scheduler'] ?? '') !== '') {
+        $promptParams['Scheduler'] = (string)$prompt['scheduler'];
+    }
 }
 
 $type = (string)$media['type'];
@@ -249,6 +284,39 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
             background: #f5f5f5;
             border: 1px dashed #bbb;
         }
+        .tags {
+            margin: 6px 0 10px;
+        }
+        .tag {
+            display: inline-block;
+            padding: 4px 6px;
+            margin: 2px;
+            border-radius: 4px;
+            background: #e0e0e0;
+            font-size: 12px;
+        }
+        .tag-type-content { background: #bbdefb; }
+        .tag-type-style { background: #ffe0b2; }
+        .tag-type-character { background: #f8bbd0; }
+        .tag-type-nsfw { background: #ef9a9a; }
+        .tag-type-technical { background: #c5e1a5; }
+        .tag-type-other { background: #d7ccc8; }
+        .actions {
+            margin-top: 12px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #f9f9f9;
+        }
+        .actions button {
+            margin-right: 8px;
+            padding: 6px 10px;
+        }
+        .action-note {
+            font-size: 12px;
+            color: #555;
+            margin-top: 6px;
+        }
     </style>
 </head>
 <body>
@@ -280,13 +348,24 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
     <?php endif; ?>
 </div>
 
-<?php if ($prompt): ?>
+<?php if ($promptExists): ?>
 <div class="prompt-block">
     <h2>Prompt</h2>
-    <textarea readonly><?= htmlspecialchars((string)($prompt['prompt'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
-    <?php if (!empty($prompt['negative_prompt'])): ?>
+    <h3>Prompt</h3>
+    <textarea readonly><?= htmlspecialchars($promptText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+    <?php if ($negativePrompt !== ''): ?>
         <h3>Negativer Prompt</h3>
-        <textarea readonly><?= htmlspecialchars((string)$prompt['negative_prompt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+        <textarea readonly><?= htmlspecialchars($negativePrompt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+    <?php endif; ?>
+    <?php if ($promptParams !== []): ?>
+        <h3>Parameter</h3>
+        <table class="meta">
+            <tbody>
+            <?php foreach ($promptParams as $label => $value): ?>
+                <tr><th><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></th><td><?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
     <?php endif; ?>
     <?php if (!empty($prompt['source_metadata'])): ?>
         <h3>Roh-Prompt/Metadaten</h3>
@@ -296,9 +375,38 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
 <?php else: ?>
 <div class="prompt-block">
     <h2>Prompt</h2>
-    <p>Kein Prompt gespeichert.</p>
+    <p><strong>Kein Prompt gefunden – Rebuild empfohlen.</strong></p>
 </div>
 <?php endif; ?>
+
+<div class="media-block">
+    <h2>Tags</h2>
+    <?php if ($tags === []): ?>
+        <p>Keine Tags gespeichert.</p>
+    <?php else: ?>
+        <div class="tags">
+            <?php foreach ($tags as $tag):
+                $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
+                $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
+                ?>
+                <span class="tag tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                    <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>
+                </span>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+</div>
+
+<div class="actions">
+    <h2>Aktionen (Platzhalter)</h2>
+    <?php if ($showRebuildButton): ?>
+        <button type="button" disabled title="Wird später mit Forge/Regeneration verknüpft">Prompt/Rebuild vorbereiten</button>
+        <!-- TODO: Hook for Forge regeneration -->
+    <?php endif; ?>
+    <button type="button" disabled title="Wird später für manuelles Löschen genutzt">Medium löschen (manuell)</button>
+    <!-- TODO: Hook for logical delete / status=deleted -->
+    <div class="action-note">Noch keine Server-Logik hinterlegt; Buttons sind nur UI-Vorbereitung.</div>
+</div>
 
 <div class="media-block">
     <h2>Kern-Metadaten</h2>
