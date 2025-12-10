@@ -273,6 +273,10 @@ function sv_normalize_prompt_block(string $raw, array $context = []): array
         $normalized['source_metadata'] = json_encode($metaPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 
+    if ($normalized['prompt'] === null && $rawText !== '') {
+        $normalized['prompt'] = $rawText;
+    }
+
     return $normalized;
 }
 
@@ -300,12 +304,14 @@ function sv_collect_prompt_candidates(array $meta): array
 
         $rawTextPool[] = $value;
 
-        $source   = (string)($pair['source'] ?? '');
-        $key      = (string)($pair['key'] ?? '');
-        $keyLower = strtolower($key);
-        $shortKey = strtolower(strrchr($keyLower, '.') ?: $keyLower);
+        $source       = (string)($pair['source'] ?? '');
+        $key          = (string)($pair['key'] ?? '');
+        $keyLower     = strtolower($key);
+        $shortKey     = strtolower(strrchr($keyLower, '.') ?: $keyLower);
+        $normalizedKey = preg_replace('/[\s_-]+/', ' ', $shortKey) ?? $shortKey;
 
-        if (in_array($shortKey, ['usercomment', 'imagedescription', 'xpcomment', 'comment', 'parameters'], true)) {
+        $parameterKeys = ['usercomment', 'image description', 'imagedescription', 'xpcomment', 'comment', 'parameters', 'parameter', 'generation parameters', 'generation data'];
+        if (in_array($normalizedKey, $parameterKeys, true)) {
             $candidates[] = [
                 'source'    => $source,
                 'key'       => $key,
@@ -314,7 +320,8 @@ function sv_collect_prompt_candidates(array $meta): array
             ];
         }
 
-        if (in_array($shortKey, ['sd-metadata', 'sd_metadata', 'sd metadata', 'workflow', 'workflow_json', 'workflow-json', 'workflowjson'], true)) {
+        $jsonKeys = ['sd-metadata', 'sd metadata', 'sd_metadata', 'workflow', 'workflow json', 'workflow_json', 'workflow-json', 'workflowjson', 'metadata'];
+        if (in_array($normalizedKey, $jsonKeys, true)) {
             $candidates[] = [
                 'source'    => $source,
                 'key'       => $key,
@@ -323,11 +330,11 @@ function sv_collect_prompt_candidates(array $meta): array
             ];
         }
 
-        if (in_array($shortKey, ['prompt', 'positive prompt', 'positive_prompt'], true)) {
+        if (in_array($normalizedKey, ['prompt', 'positive prompt', 'positive_prompt', 'positive'], true) || (strpos($normalizedKey, 'prompt') !== false && strpos($normalizedKey, 'negative') === false && strpos($normalizedKey, 'seed') === false)) {
             $positiveText = $value;
         }
 
-        if (in_array($shortKey, ['negative prompt', 'negative_prompt'], true)) {
+        if (in_array($normalizedKey, ['negative prompt', 'negative_prompt', 'negative'], true) || strpos($normalizedKey, 'negative prompt') !== false) {
             $negativeText = $value;
         }
     }
@@ -395,6 +402,10 @@ function sv_select_prompt_candidate(array $candidates): ?array
         foreach ($candidates as $candidate) {
             $shortKey = strtolower((string)($candidate['short_key'] ?? ($candidate['key'] ?? '')));
             $type     = (string)($candidate['type'] ?? '');
+            $text     = isset($candidate['text']) ? trim((string)$candidate['text']) : '';
+            if ($text === '') {
+                continue;
+            }
             if ($key === 'positive+negative' && $type === 'combined_prompt') {
                 return $candidate;
             }
