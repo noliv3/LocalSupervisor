@@ -68,6 +68,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **UI-Anzeigen**: `media_view.php` listet konkrete Probleme des Mediums (erste drei Zeilen, Rest aufklappbar). `mediadb.php` bietet einen Filter `?issues=1` und markiert betroffene Medien in der Grid-Ansicht. Das Dashboard (`index.php`) zeigt die Anzahl der problematischen Medien im Abschnitt „Integritätsstatus“.
 - **Einfache Reparatur**: Über das Dashboard (Internal-Key/IP-Whitelist erforderlich) kann eine minimale Reparatur ausgelöst werden. Sie setzt nur den Status auf `missing`, wenn Dateien fehlen, entfernt `media_tags`-Einträge ohne Confidence und löscht komplett leere Prompt-Objekte. Alle Schritte laufen über `SCRIPTS/operations.php` und werden auditgeloggt.
 
+## Prompt-Qualität (A/B/C)
+- **Zentrale Bewertung**: `SCRIPTS/operations.php` stellt eine Heuristik bereit (`sv_analyze_prompt_quality`), die Prompts in A/B/C klassifiziert, Score/Issues liefert und Tag-basierte bzw. hybride Vorschläge generiert.
+- **UI-Anzeigen**: `media_view.php` zeigt die Klasse, Score, Issues (Top 3) und optionale Vorschläge (Tag-basiert/Hybrid) direkt neben dem Prompt an.
+- **Filter/Badges**: `mediadb.php` bietet einen Filter `prompt_quality=A|B|C` (Alias `critical` für C) und zeigt pro Medium ein PQ-Badge mit Score/Issues an.
+- **Dashboard-Summary**: `index.php` summiert die Prompt-Klassen (Sample bis 2000 Medien) und verlinkt für kritische Prompts auf `mediadb.php?prompt_quality=C`.
+
 ## Forge-Regeneration
 - **Async-Flow**:
   1. In der Detailansicht (`media_view.php`) „Regen über Forge“ klicken: Prompt-Heuristik (A/B/C + Tag-Fallback) läuft im Web-Request, Modell wird gegen Forge gelöst, anschließend wird nur ein Job (`jobs.type=forge_regen`) im Status `queued` angelegt.
