@@ -75,6 +75,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
   3. UI-Feedback: `media_view.php` blendet ein Forge-Job-Panel ein und pollt den Status per AJAX; das Dashboard (`index.php`) zeigt eine Übersicht offener/erfolgreicher/fehlerhafter Jobs. Keine Web-Requests warten auf Forge.
 - **Replace in place**: Der Worker ersetzt die Datei auf demselben Pfad (inkl. Hash/Größe/Auflösung-Update), legt Backups an und führt danach Re-Scan/Metadaten-/Prompt-Aktualisierung durch, damit Tags/Prompts/Meta zum neuen Bild passen.
 - **Job-Verfolgung**: Die Job-Request/Response-Daten werden in `jobs.forge_request_json`/`jobs.forge_response_json` abgelegt; Statusübergänge (queued/running/done/error) bleiben auditierbar. Media-Details zeigen die letzten Jobs mit Status/Modell, das Dashboard fasst Zählungen zusammen.
+- **Versionen (read-only)**: `media_view.php` zeigt eine Versionsliste pro Medium. Version 0 entspricht dem Import, weitere Versionen stammen aus `forge_regen`-Jobs (Status ok/error). Sichtbar sind Zeitstempel, Quelle, gewünschtes/benutztes Modell, Prompt-Kategorie/Fallback, Hash-Wechsel sowie Backuppfad (falls vorhanden); keine Restore-Funktion.
 
 ### Job-Center (Dashboard)
 - `WWW/index.php` bietet einen Job-Center-Block mit Filtern für `job_type`, `status`, `media_id` und Zeitfenster (24h/7d/30d).

@@ -196,6 +196,7 @@ $tags = $tagStmt->fetchAll(PDO::FETCH_ASSOC);
 $consistencyStatus = sv_media_consistency_status($pdo, $id);
 $issueReport = sv_collect_integrity_issues($pdo, [$id]);
 $mediaIssues = $issueReport['by_media'][$id] ?? [];
+$versions = sv_get_media_versions($pdo, $id);
 
 $groupedMeta = [];
 foreach ($metaRows as $meta) {
@@ -466,6 +467,17 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
         .issues-block li {
             margin: 4px 0;
         }
+        .versions { margin-top: 12px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9; }
+        .version-card { border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px; margin-bottom: 8px; background: #fff; }
+        .version-card:last-child { margin-bottom: 0; }
+        .version-header { display: flex; justify-content: space-between; align-items: center; }
+        .version-title { font-weight: 700; }
+        .version-status { padding: 2px 6px; border-radius: 4px; font-size: 12px; border: 1px solid #ccc; text-transform: uppercase; letter-spacing: 0.5px; }
+        .version-status.ok { background: #e8f5e9; color: #2e7d32; border-color: #c8e6c9; }
+        .version-status.error { background: #ffebee; color: #c62828; border-color: #ffcdd2; }
+        .version-status.baseline { background: #f0f0f0; color: #555; }
+        .version-meta { margin-top: 6px; font-size: 12px; color: #333; }
+        .version-meta div { margin-bottom: 2px; }
     </style>
 </head>
 <body>
@@ -654,6 +666,34 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
         </div>
         <div class="job-hint">Status wird automatisch aktualisiert.</div>
     </div>
+</div>
+
+<div class="versions">
+    <h2>Versionen</h2>
+    <?php if ($versions === []): ?>
+        <div class="job-hint">Keine Versionsdaten verfügbar.</div>
+    <?php else: ?>
+        <?php foreach ($versions as $version): ?>
+            <div class="version-card">
+                <div class="version-header">
+                    <div class="version-title">
+                        Version #<?= (int)$version['version_index'] ?><?php if (!empty($version['is_current'])): ?> (aktuell)<?php endif; ?>
+                    </div>
+                    <div class="version-status <?= htmlspecialchars((string)$version['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        <?= htmlspecialchars((string)$version['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                    </div>
+                </div>
+                <div class="version-meta">
+                    <div>Quelle: <?= htmlspecialchars($version['source'] === 'import' ? 'Import/Scan' : 'Forge-Regen', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <div>Zeit: <?= htmlspecialchars((string)($version['timestamp'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <div>Modell: <?= htmlspecialchars((string)($version['model_requested'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php if (($version['model_used'] ?? null) && ($version['model_used'] ?? null) !== ($version['model_requested'] ?? null)): ?> → <?= htmlspecialchars((string)$version['model_used'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?></div>
+                    <div>Prompt: <?php if ($version['prompt_category'] !== null): ?>Kategorie <?= htmlspecialchars((string)$version['prompt_category'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php else: ?>–<?php endif; ?><?php if (!empty($version['fallback_used'])): ?>, Fallback aktiv<?php endif; ?></div>
+                    <div>Hash: <?php if (!empty($version['hash_old']) || !empty($version['hash_new'])): ?><?= htmlspecialchars((string)($version['hash_old'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> → <?= htmlspecialchars((string)($version['hash_new'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php else: ?><?= htmlspecialchars((string)($version['hash_new'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?></div>
+                    <div>Backup: <?php if (!empty($version['backup_path'])): ?><?= htmlspecialchars((string)$version['backup_path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php if (!empty($version['backup_exists'])): ?> (vorhanden)<?php else: ?> (Datei fehlt)<?php endif; ?><?php else: ?>kein Backup<?php endif; ?></div>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    <?php endif; ?>
 </div>
 
 <div class="media-block">
