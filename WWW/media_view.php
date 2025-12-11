@@ -119,15 +119,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'forge_regen') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
             try {
-                $dispatchNow = sv_forge_endpoint_config($config) !== null;
-                $result = sv_queue_forge_regeneration($pdo, $config, $id, $dispatchNow, $logger);
+                $result = sv_run_forge_regen_replace($pdo, $config, $id, $logger);
                 $actionSuccess = true;
-                $statusLabel = htmlspecialchars((string)($result['status'] ?? 'queued'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-                $actionMessage = 'Forge-Job #' . (int)($result['job_id'] ?? 0) . ' erstellt (Status: ' . $statusLabel . ').';
-                if (!empty($result['dispatched']) && ($result['status'] ?? '') === 'running') {
-                    $actionMessage .= ' Sofort-Dispatch ausgelöst.';
-                } elseif (!$dispatchNow) {
-                    $actionMessage .= ' Dispatch übersprungen (keine Forge-Konfiguration).';
+                $actionMessage = 'Forge-Regeneration abgeschlossen und Datei ersetzt. Neuer Hash: '
+                    . htmlspecialchars((string)($result['new_hash'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+                    . ' (Job #' . (int)($result['job_id'] ?? 0) . ').';
+                if (!empty($result['fallback_used'])) {
+                    $actionMessage .= ' Hinweis: Prompt-Fallback angewendet.';
+                }
+                if (!empty($result['tag_prompt_used'])) {
+                    $actionMessage .= ' Tag-basierte Rekonstruktion aktiv.';
                 }
             } catch (Throwable $e) {
                 $actionSuccess = false;
