@@ -37,6 +37,11 @@
 - Neue Konsistenzanzeigen oder Prompt-Rebuild-Komfortpfade müssen über `SCRIPTS/operations.php` laufen und im Dashboard/Views eingebunden werden.
 - Web-Formulare dürfen keine neuen Schreibpfade öffnen, sondern bestehende Internal-Key-Mechanismen nutzen.
 
+## Job-Management
+- Jobs werden ausschließlich über `SCRIPTS/operations.php` erzeugt, gesteuert oder ausgewertet.
+- Web-Schicht führt keine direkten SQL-Manipulationen auf Jobs aus, sondern ruft die Operations-Helper auf.
+- Neue Job-Typen müssen ihre Steuerlogik an die Job-API in `operations.php` anbinden.
+
 ## Integritäts- und Reparaturfunktionen
 - Integritätsprüfungen und Reparaturen müssen vollständig über `SCRIPTS/operations.php` laufen.
 - Webcode darf keine Reparaturlogik inline ausführen; er ruft ausschließlich die zentralen Operationen auf.

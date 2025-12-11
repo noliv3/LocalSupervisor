@@ -33,6 +33,16 @@ $metaStats   = [];
 $importStats = [];
 $jobStats    = [];
 $forgeJobOverview = [];
+$jobCenterMessage = null;
+$jobCenterError   = null;
+$jobCenterLog     = [];
+$jobCenterJobs    = [];
+$jobCenterFilters = [
+    'job_type' => '',
+    'status'   => '',
+    'media_id' => null,
+    'since'    => null,
+];
 $lastRuns    = [];
 $integrityStatus = ['media_with_issues' => 0];
 $knownActions = [
@@ -55,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     sv_require_internal_access($config, 'dashboard_action');
 
     $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check', 'integrity_simple_repair'];
+    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check', 'integrity_simple_repair', 'job_requeue', 'job_cancel'];
 
     if (!in_array($action, $allowedActions, true)) {
         $jobMessage = 'Ungültige Aktion.';
@@ -220,6 +230,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Throwable $e) {
             $jobMessage = 'Einfache Reparatur fehlgeschlagen: ' . $e->getMessage();
         }
+    } elseif ($action === 'job_requeue') {
+        $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
+        $logger = sv_operation_logger(null, $jobCenterLog);
+
+        if ($jobId <= 0) {
+            $jobCenterError = 'Job-ID fehlt oder ist ungültig.';
+        } else {
+            try {
+                $result = sv_requeue_job($pdo, $jobId, $logger);
+                $jobCenterMessage = $result['message'] ?? 'Job erneut eingereiht.';
+            } catch (Throwable $e) {
+                $jobCenterError = 'Requeue fehlgeschlagen: ' . $e->getMessage();
+            }
+        }
+    } elseif ($action === 'job_cancel') {
+        $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
+        $logger = sv_operation_logger(null, $jobCenterLog);
+
+        if ($jobId <= 0) {
+            $jobCenterError = 'Job-ID fehlt oder ist ungültig.';
+        } else {
+            try {
+                $result = sv_cancel_job($pdo, $jobId, $logger);
+                $jobCenterMessage = $result['message'] ?? 'Job abgebrochen.';
+            } catch (Throwable $e) {
+                $jobCenterError = 'Abbruch fehlgeschlagen: ' . $e->getMessage();
+            }
+        }
+    }
+}
+
+$jobFilterType   = isset($_GET['job_type']) && is_string($_GET['job_type']) ? trim($_GET['job_type']) : '';
+$jobFilterStatus = isset($_GET['job_status']) && is_string($_GET['job_status']) ? trim($_GET['job_status']) : '';
+$jobFilterMedia  = isset($_GET['job_media_id']) ? (int)$_GET['job_media_id'] : null;
+$jobFilterRange  = isset($_GET['job_range']) && is_string($_GET['job_range']) ? trim($_GET['job_range']) : '';
+$jobCenterInternalKey = isset($_GET['internal_key']) && is_string($_GET['internal_key']) ? trim($_GET['internal_key']) : '';
+
+if ($jobFilterType !== '') {
+    $jobCenterFilters['job_type'] = $jobFilterType;
+}
+if ($jobFilterStatus !== '') {
+    $jobCenterFilters['status'] = $jobFilterStatus;
+}
+if ($jobFilterMedia !== null && $jobFilterMedia > 0) {
+    $jobCenterFilters['media_id'] = $jobFilterMedia;
+}
+if ($jobFilterRange !== '') {
+    $ranges = [
+        '24h' => 86400,
+        '7d'  => 7 * 86400,
+        '30d' => 30 * 86400,
+    ];
+    if (isset($ranges[$jobFilterRange])) {
+        $jobCenterFilters['since'] = time() - $ranges[$jobFilterRange];
     }
 }
 
@@ -299,6 +363,12 @@ try {
     $forgeJobOverview = sv_forge_job_overview($pdo);
 } catch (Throwable $e) {
     $statErrors['forge_jobs'] = $e->getMessage();
+}
+
+try {
+    $jobCenterJobs = sv_list_jobs($pdo, $jobCenterFilters, 100);
+} catch (Throwable $e) {
+    $jobCenterError = 'Job-Liste konnte nicht geladen werden: ' . $e->getMessage();
 }
 
 try {
@@ -669,6 +739,118 @@ $cliEntries = [
             <p>Keine Forge-Jobs vorhanden.</p>
         <?php endif; ?>
         <p>Verarbeitung erfolgt ausschließlich über den Forge-Worker (z. B. <code>php SCRIPTS/forge_worker_cli.php --limit=1</code>) und wird von der Web-Oberfläche nur als Queue verwaltet.</p>
+    <?php endif; ?>
+
+    <h2>Job Center</h2>
+    <p>Übersicht und Steuerung der Jobs (forge_regen). Lesen ohne Internal-Key, Aktionen nur mit gültigem Internal-Key/IP-Whitelist.</p>
+
+    <form method="get">
+        <fieldset>
+            <legend>Filter</legend>
+            <label>
+                Job-Typ:
+                <select name="job_type">
+                    <option value="" <?= $jobCenterFilters['job_type'] === '' ? 'selected' : '' ?>>Alle</option>
+                    <option value="forge_regen" <?= $jobCenterFilters['job_type'] === 'forge_regen' ? 'selected' : '' ?>>forge_regen</option>
+                </select>
+            </label>
+            <label>
+                Status:
+                <select name="job_status">
+                    <?php $statusOptions = ['', 'queued', 'running', 'done', 'error', SV_JOB_STATUS_CANCELED]; ?>
+                    <?php foreach ($statusOptions as $statusOpt): ?>
+                        <?php $label = $statusOpt === '' ? 'Alle' : $statusOpt; ?>
+                        <option value="<?= htmlspecialchars($statusOpt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $jobCenterFilters['status'] === $statusOpt ? 'selected' : '' ?>><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label>
+                Media-ID:
+                <input type="number" name="job_media_id" min="1" step="1" value="<?= htmlspecialchars((string)($jobCenterFilters['media_id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+            </label>
+            <label>
+                Zeitraum:
+                <select name="job_range">
+                    <?php $rangeOptions = ['' => 'Alle', '24h' => 'Letzte 24h', '7d' => 'Letzte 7 Tage', '30d' => 'Letzte 30 Tage']; ?>
+                    <?php foreach ($rangeOptions as $rangeKey => $rangeLabel): ?>
+                        <option value="<?= htmlspecialchars($rangeKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $jobFilterRange === $rangeKey ? 'selected' : '' ?>><?= htmlspecialchars($rangeLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <?php if ($jobCenterInternalKey !== ''): ?>
+                <input type="hidden" name="internal_key" value="<?= htmlspecialchars($jobCenterInternalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+            <?php endif; ?>
+            <button type="submit">Filtern</button>
+        </fieldset>
+    </form>
+
+    <?php if ($jobCenterMessage !== null): ?>
+        <p style="color: green;"><?= htmlspecialchars($jobCenterMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php endif; ?>
+    <?php if ($jobCenterError !== null): ?>
+        <p style="color: red;"><?= htmlspecialchars($jobCenterError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php endif; ?>
+    <?php if (!empty($jobCenterLog)): ?>
+        <details>
+            <summary>Job-Center-Logs</summary>
+            <pre><?php foreach ($jobCenterLog as $line) { echo htmlspecialchars($line, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n"; } ?></pre>
+        </details>
+    <?php endif; ?>
+
+    <?php if ($jobCenterError === null && empty($jobCenterJobs)): ?>
+        <p>Keine Jobs im gewählten Filter.</p>
+    <?php elseif ($jobCenterError === null): ?>
+        <table border="1" cellpadding="4" cellspacing="0">
+            <tr>
+                <th>ID</th>
+                <th>Typ</th>
+                <th>Media</th>
+                <th>Status</th>
+                <th>Erstellt</th>
+                <th>Aktualisiert</th>
+                <th>Kurzinfo</th>
+                <th>Aktionen</th>
+            </tr>
+            <?php foreach ($jobCenterJobs as $job): ?>
+                <tr>
+                    <td><?= htmlspecialchars((string)$job['id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars((string)$job['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                    <td>
+                        <?php if (!empty($job['media_id'])): ?>
+                            <a href="media_view.php?id=<?= htmlspecialchars((string)$job['media_id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Media <?= htmlspecialchars((string)$job['media_id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></a>
+                        <?php else: ?>
+                            -
+                        <?php endif; ?>
+                    </td>
+                    <td><?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars((string)$job['created_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars((string)$job['updated_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars((string)$job['summary'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                    <td>
+                        <?php if (in_array($job['status'], ['error', 'done', SV_JOB_STATUS_CANCELED], true)): ?>
+                            <form method="post" style="display:inline">
+                                <input type="hidden" name="action" value="job_requeue">
+                                <input type="hidden" name="job_id" value="<?= htmlspecialchars((string)$job['id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                <?php if ($jobCenterInternalKey !== ''): ?>
+                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($jobCenterInternalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                <?php endif; ?>
+                                <button type="submit">Requeue</button>
+                            </form>
+                        <?php endif; ?>
+                        <?php if (in_array($job['status'], ['queued', 'running'], true)): ?>
+                            <form method="post" style="display:inline" onsubmit="return confirm('Job wirklich abbrechen?');">
+                                <input type="hidden" name="action" value="job_cancel">
+                                <input type="hidden" name="job_id" value="<?= htmlspecialchars((string)$job['id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                <?php if ($jobCenterInternalKey !== ''): ?>
+                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($jobCenterInternalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                <?php endif; ?>
+                                <button type="submit">Cancel</button>
+                            </form>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+        </table>
     <?php endif; ?>
 
     <h2>CLI-Übersicht</h2>
