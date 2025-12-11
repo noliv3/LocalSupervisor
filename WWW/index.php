@@ -27,6 +27,7 @@ $logLines    = [];
 $statErrors  = [];
 $mediaStats  = [];
 $promptStats = [];
+$promptQualitySummary = ['A' => 0, 'B' => 0, 'C' => 0];
 $tagStats    = [];
 $scanStats   = [];
 $metaStats   = [];
@@ -313,6 +314,28 @@ try {
     )->fetchColumn();
 } catch (Throwable $e) {
     $statErrors['prompts'] = $e->getMessage();
+}
+
+try {
+    $qualityStmt = $pdo->query(
+        'SELECT p.prompt, p.width, p.height FROM prompts p '
+        . 'JOIN (SELECT MAX(id) AS id FROM prompts GROUP BY media_id) latest ON latest.id = p.id '
+        . 'ORDER BY p.id DESC LIMIT 2000'
+    );
+    $qualityRows = $qualityStmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($qualityRows as $row) {
+        $quality = sv_prompt_quality_from_text(
+            $row['prompt'] ?? null,
+            isset($row['width']) ? (int)$row['width'] : null,
+            isset($row['height']) ? (int)$row['height'] : null
+        );
+        $class = $quality['quality_class'] ?? null;
+        if ($class !== null && isset($promptQualitySummary[$class])) {
+            $promptQualitySummary[$class]++;
+        }
+    }
+} catch (Throwable $e) {
+    $statErrors['prompt_quality'] = $e->getMessage();
 }
 
 try {
@@ -657,6 +680,18 @@ $cliEntries = [
             <li>Medien mit Prompt: <?= htmlspecialchars((string)($promptStats['mediaWithPrompts'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
             <li>Medien ohne Prompt: <?= htmlspecialchars((string)($promptStats['mediaWithoutPrompts'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
         </ul>
+        <?php if (isset($statErrors['prompt_quality'])): ?>
+            <p>Fehler bei Prompt-Qualität: <?= htmlspecialchars((string)$statErrors['prompt_quality'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+        <?php else: ?>
+            <div style="margin: 8px 0; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;">
+                <strong>Prompt-Qualität (Sample bis 2000 Medien):</strong>
+                <ul>
+                    <li>A (gut): <?= (int)$promptQualitySummary['A'] ?></li>
+                    <li>B (mittel): <?= (int)$promptQualitySummary['B'] ?></li>
+                    <li>C (kritisch): <?= (int)$promptQualitySummary['C'] ?> – <a href="mediadb.php?prompt_quality=C">anzeigen</a></li>
+                </ul>
+            </div>
+        <?php endif; ?>
     <?php endif; ?>
 
     <h3>Tags</h3>

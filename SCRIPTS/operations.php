@@ -462,11 +462,14 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     $payload['_sv_requested_model'] = $requestedModel;
 
     $payload['_sv_regen_plan'] = [
-        'category'       => $regenPlan['category'],
-        'final_prompt'   => $regenPlan['final_prompt'],
-        'fallback_used'  => $regenPlan['fallback_used'],
-        'tag_prompt_used'=> $regenPlan['tag_prompt_used'],
-        'original_prompt'=> $regenPlan['original_prompt'] ?? null,
+        'category'        => $regenPlan['category'],
+        'final_prompt'    => $regenPlan['final_prompt'],
+        'fallback_used'   => $regenPlan['fallback_used'],
+        'tag_prompt_used' => $regenPlan['tag_prompt_used'],
+        'original_prompt' => $regenPlan['original_prompt'] ?? null,
+        'quality_score'   => $regenPlan['assessment']['score'] ?? null,
+        'quality_issues'  => $regenPlan['assessment']['issues'] ?? null,
+        'tag_fragment'    => $regenPlan['tag_fragment'] ?? null,
     ];
 
     return [
@@ -723,81 +726,136 @@ function sv_fetch_media_tags_for_regen(PDO $pdo, int $mediaId, int $limit = 8): 
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
-function sv_assess_prompt_quality(string $prompt, array $tags): array
+function sv_build_tag_prompt(array $tags, int $limit = SV_FORGE_MAX_TAGS_PROMPT): ?string
 {
-    $normalized   = trim($prompt);
-    $wordCount    = preg_match_all('/[\p{L}\p{N}]{2,}/u', $normalized, $wordMatches);
-    $fragmentsRaw = explode(',', $normalized);
-    $fragments    = array_map('trim', $fragmentsRaw);
-    $emptyFragments = 0;
-    $shortFragments = 0;
-    foreach ($fragments as $fragment) {
-        if ($fragment === '') {
-            $emptyFragments++;
+    $names = [];
+    foreach ($tags as $tag) {
+        if (!isset($tag['name']) || !is_string($tag['name'])) {
             continue;
         }
-        $fragmentWords = preg_match_all('/[\p{L}\p{N}]{2,}/u', $fragment, $fragMatches);
-        if ($fragmentWords <= 1 || strlen($fragment) < 8) {
-            $shortFragments++;
+        $names[] = trim((string)$tag['name']);
+    }
+
+    $names = array_values(array_filter($names, static fn ($n) => $n !== ''));
+    if ($names === []) {
+        return null;
+    }
+
+    $limited = array_slice($names, 0, max(1, $limit));
+
+    return implode(', ', $limited);
+}
+
+function sv_analyze_prompt_quality(?array $promptRow, array $tags): array
+{
+    $promptText = '';
+    if ($promptRow !== null) {
+        $promptText = trim((string)($promptRow['prompt'] ?? ''));
+    }
+
+    $width  = isset($promptRow['width']) ? (int)$promptRow['width'] : null;
+    $height = isset($promptRow['height']) ? (int)$promptRow['height'] : null;
+
+    $score  = 85;
+    $issues = [];
+
+    $tagPrompt = sv_build_tag_prompt($tags);
+    $hybridSuggestion = null;
+
+    if ($promptText === '') {
+        $issues[] = 'too_short';
+        $issues[] = 'missing_subject';
+        $score -= 35;
+    }
+
+    $fragments = array_filter(array_map('trim', explode(',', $promptText)), static fn ($f) => $f !== '');
+    $wordCount = $promptText === '' ? 0 : (int)preg_match_all('/[\p{L}\p{N}]{2,}/u', $promptText, $wordMatches);
+    $fragmentWordCounts = [];
+    foreach ($fragments as $fragment) {
+        $fragmentWordCounts[] = (int)preg_match_all('/[\p{L}\p{N}]{2,}/u', $fragment, $fragMatches);
+    }
+
+    $shortFragments = array_filter($fragmentWordCounts, static fn ($c) => $c <= 2);
+    if ($wordCount > 0 && $wordCount < 6) {
+        $issues[] = 'too_short';
+        $score   -= 25;
+    } elseif ($wordCount > 20) {
+        $score   += 5;
+    }
+
+    if (count($fragments) >= 3 && count($shortFragments) >= 2) {
+        $issues[] = 'fragmented';
+        $score   -= 15;
+    } elseif (count($fragments) > 1 && count($shortFragments) === 0) {
+        $score   += 5;
+    }
+
+    $brokenTokens = preg_match_all('/[\p{L}]{3,}[\p{N}]{2,}|[,]{2,}|[\p{L}]{4,}[^\s\p{L}\p{N}]{1,2}[\p{L}]{3,}/u', $promptText, $garbled);
+    if ($brokenTokens > 0) {
+        $issues[] = 'gibberish_like';
+        $score   -= 20;
+    }
+
+    $hasSubject = false;
+    foreach ($fragments as $fragment) {
+        if (mb_strlen($fragment) >= 6) {
+            $hasSubject = true;
+            break;
         }
     }
-
-    $brokenCommaSpacing = preg_match('/\s,\s*/', $prompt) === 1;
-    $garbledTokens      = preg_match_all('/[\p{L}]{4,}(?:[^\s\p{L}]+|\d+)/u', $prompt, $garbledMatches);
-    $tagSubstance       = min(count($tags), SV_FORGE_MAX_TAGS_PROMPT);
-
-    $score   = 0;
-    $reasons = [];
-
-    if ($wordCount >= 12) {
-        $score += 2;
-    } elseif ($wordCount >= 8) {
-        $score += 1;
-    } elseif ($wordCount < 6) {
-        $score -= 2;
-        $reasons[] = 'zu kurz';
+    if (!$hasSubject) {
+        $issues[] = 'missing_subject';
+        $score   -= 15;
     }
 
-    if ($emptyFragments > 0) {
-        $score   -= 2;
-        $reasons[] = 'leere Fragmente';
-    }
-    if ($brokenCommaSpacing) {
-        $score   -= 1;
-        $reasons[] = 'unsaubere Kommastruktur';
-    }
-    if ($shortFragments >= max(1, (int)floor(count($fragments) / 2))) {
-        $score   -= 1;
-        $reasons[] = 'kurze Fragmente';
-    }
-    if ($garbledTokens > 0) {
-        $score   -= 2;
-        $reasons[] = 'zerhackte Tokens';
-    }
-    if ($tagSubstance > $wordCount) {
-        $score   -= 1;
-        $reasons[] = 'Tags haben mehr Substanz als Prompt';
+    if ($width === null || $height === null || $width <= 0 || $height <= 0) {
+        $issues[] = 'missing_resolution';
+        $score   -= 5;
     }
 
-    $category = 'B';
-    if ($score >= 2) {
-        $category = 'A';
-    } elseif ($score <= -1) {
-        $category = 'C';
+    $tagConfidence = 0.0;
+    foreach ($tags as $tag) {
+        $tagConfidence += (float)($tag['confidence'] ?? 0.0);
+    }
+    if ($tagConfidence >= 3.0 && $wordCount > 0 && $tagConfidence > ($wordCount / 2)) {
+        $issues[] = 'tags_stronger_than_prompt';
+        $score   -= 10;
+    }
+
+    $issues = array_values(array_unique($issues));
+
+    $score = max(0, min(100, $score));
+    if ($score >= 75) {
+        $quality = 'A';
+    } elseif ($score >= 55) {
+        $quality = 'B';
+    } else {
+        $quality = 'C';
+    }
+
+    if ($promptText !== '' && $tagPrompt !== null) {
+        $sanitized = rtrim($promptText, ', ');
+        $hybridSuggestion = $sanitized . ', ' . $tagPrompt;
     }
 
     return [
-        'category'        => $category,
-        'score'           => $score,
-        'word_count'      => $wordCount,
-        'fragment_count'  => count($fragments),
-        'broken_commas'   => $brokenCommaSpacing,
-        'garbled_tokens'  => $garbledTokens,
-        'empty_fragments' => $emptyFragments,
-        'short_fragments' => $shortFragments,
-        'tag_substance'   => $tagSubstance,
-        'reasons'         => $reasons,
+        'quality_class'      => $quality,
+        'score'              => $score,
+        'issues'             => $issues,
+        'tag_based_suggestion' => $tagPrompt,
+        'hybrid_suggestion'    => $hybridSuggestion,
     ];
+}
+
+function sv_prompt_quality_from_text(?string $promptText, ?int $width = null, ?int $height = null, array $tags = []): array
+{
+    $row = [
+        'prompt' => $promptText,
+        'width'  => $width,
+        'height' => $height,
+    ];
+
+    return sv_analyze_prompt_quality($row, $tags);
 }
 
 function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $logger): array
@@ -807,41 +865,31 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
         throw new RuntimeException('Kein Prompt vorhanden.');
     }
 
-    $tagNames = [];
-    foreach ($tags as $tag) {
-        if (isset($tag['name']) && is_string($tag['name'])) {
-            $tagNames[] = trim((string)$tag['name']);
-        }
-    }
-
-    $assessment = sv_assess_prompt_quality($originalPrompt, $tagNames);
-    $category   = $assessment['category'];
-    $finalPrompt = $originalPrompt;
-    $fallbackUsed = false;
+    $assessment    = sv_analyze_prompt_quality($mediaRow, $tags);
+    $quality       = $assessment['quality_class'];
+    $finalPrompt   = $originalPrompt;
+    $fallbackUsed  = false;
     $tagPromptUsed = false;
-    $tagFragment = '';
+    $tagFragment   = $assessment['tag_based_suggestion'] ?? '';
 
-    if ($category === 'B' && $tagNames !== []) {
-        $tagFragment = implode(', ', array_slice($tagNames, 0, 4));
-        $finalPrompt = rtrim($originalPrompt, ', ');
-        $finalPrompt .= $tagFragment !== '' ? ', ' . $tagFragment : '';
+    if ($quality === 'B' && $assessment['hybrid_suggestion'] !== null) {
+        $finalPrompt = (string)$assessment['hybrid_suggestion'];
         $fallbackUsed = true;
-    } elseif ($category === 'C') {
-        if ($tagNames === []) {
+    } elseif ($quality === 'C') {
+        if ($assessment['tag_based_suggestion'] === null) {
             throw new RuntimeException('Prompt zu schwach und keine Tags verfügbar.');
         }
-        $tagFragment = implode(', ', array_slice($tagNames, 0, SV_FORGE_MAX_TAGS_PROMPT));
-        $finalPrompt = 'Detailed reconstruction, ' . $tagFragment;
-        $fallbackUsed = true;
+        $finalPrompt   = 'Detailed reconstruction, ' . (string)$assessment['tag_based_suggestion'];
+        $fallbackUsed  = true;
         $tagPromptUsed = true;
     }
 
     if ($fallbackUsed && $tagFragment !== '') {
-        $logger('Prompt-Fallback aktiv (' . $category . '): Tags genutzt -> ' . $tagFragment);
+        $logger('Prompt-Fallback aktiv (' . $quality . '): Tags genutzt -> ' . $tagFragment);
     }
 
     return [
-        'category'        => $category,
+        'category'        => $quality,
         'final_prompt'    => $finalPrompt,
         'original_prompt' => $originalPrompt,
         'fallback_used'   => $fallbackUsed,

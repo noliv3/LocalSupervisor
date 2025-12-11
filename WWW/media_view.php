@@ -300,6 +300,8 @@ if ($promptExists) {
         $promptParams['Scheduler'] = (string)$prompt['scheduler'];
     }
 }
+$promptQuality = sv_analyze_prompt_quality($prompt, $tags);
+$promptQualityIssues = array_slice($promptQuality['issues'] ?? [], 0, 3);
 
 $type = (string)$media['type'];
 $canForgeRegen = $type === 'image' && $consistencyStatus['prompt_complete'];
@@ -467,6 +469,28 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
         .issues-block li {
             margin: 4px 0;
         }
+        .quality-panel {
+            margin-top: 10px;
+            padding: 8px;
+            border: 1px solid #cfdffa;
+            border-radius: 4px;
+            background: #f5f8ff;
+        }
+        .quality-panel h3 {
+            margin: 0 0 6px;
+        }
+        .quality-badge {
+            display: inline-block;
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+        }
+        .quality-badge.A { background: #c8e6c9; color: #1b5e20; }
+        .quality-badge.B { background: #fff3e0; color: #e65100; }
+        .quality-badge.C { background: #ffebee; color: #c62828; }
+        .quality-issues { margin: 6px 0; font-size: 13px; }
+        .quality-issues span { display: inline-block; margin-right: 6px; padding: 2px 6px; background: #e0e0e0; border-radius: 3px; }
+        .quality-suggestion { font-size: 12px; color: #444; margin-top: 6px; }
         .versions { margin-top: 12px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9; }
         .version-card { border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px; margin-bottom: 8px; background: #fff; }
         .version-card:last-child { margin-bottom: 0; }
@@ -576,6 +600,35 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
         <h3>Negativer Prompt</h3>
         <textarea readonly><?= htmlspecialchars($negativePrompt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
     <?php endif; ?>
+    <div class="quality-panel">
+        <h3>Prompt-Qualität</h3>
+        <div>
+            <span class="quality-badge <?= htmlspecialchars($promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                <?= htmlspecialchars($promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            </span>
+            <strong>Score:</strong> <?= (int)$promptQuality['score'] ?>
+        </div>
+        <?php if ($promptQualityIssues !== []): ?>
+            <div class="quality-issues">
+                <?php foreach ($promptQualityIssues as $issue): ?>
+                    <span><?= htmlspecialchars((string)$issue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+        <?php if (!empty($promptQuality['tag_based_suggestion']) || !empty($promptQuality['hybrid_suggestion'])): ?>
+            <details class="quality-suggestion">
+                <summary>Prompt-Vorschläge anzeigen</summary>
+                <?php if (!empty($promptQuality['hybrid_suggestion'])): ?>
+                    <div><strong>Hybrid:</strong> <?= htmlspecialchars((string)$promptQuality['hybrid_suggestion'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
+                <?php if (!empty($promptQuality['tag_based_suggestion'])): ?>
+                    <div><strong>Tag-basiert:</strong> <?= htmlspecialchars((string)$promptQuality['tag_based_suggestion'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
+            </details>
+        <?php else: ?>
+            <div class="quality-suggestion">Keine alternativen Vorschläge verfügbar.</div>
+        <?php endif; ?>
+    </div>
     <?php if ($promptParams !== []): ?>
         <h3>Parameter</h3>
         <table class="meta">

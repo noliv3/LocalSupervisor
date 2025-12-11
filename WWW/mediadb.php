@@ -105,23 +105,28 @@ $pathFilter       = sv_limit_string((string)($_GET['q'] ?? ''), 200);
 $statusFilter     = $_GET['status'] ?? 'all';
 $minRating        = (int)($_GET['min_rating'] ?? 0);
 $incompleteFilter = $_GET['incomplete'] ?? 'none';
+$promptQualityFilter = $_GET['prompt_quality'] ?? 'all';
 
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
 $allowedMeta      = ['all', 'with', 'without'];
 $allowedStatus    = ['all', 'active', 'archived', 'deleted'];
 $allowedIncomplete= ['none', 'prompt', 'tags', 'meta', 'any'];
+$allowedQuality   = ['all', 'A', 'B', 'C', 'critical'];
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
 $hasPromptFilter  = sv_normalize_enum($hasPromptFilter, $allowedPrompt, 'all');
 $hasMetaFilter    = sv_normalize_enum($hasMetaFilter, $allowedMeta, 'all');
 $statusFilter     = sv_normalize_enum($statusFilter, $allowedStatus, 'all');
 $minRating        = sv_clamp_int($minRating, 0, 3, 0);
 $incompleteFilter = sv_normalize_enum($incompleteFilter, $allowedIncomplete, 'none');
+$promptQualityFilter = sv_normalize_enum($promptQualityFilter, $allowedQuality, 'all');
+$promptQualityFilter = $promptQualityFilter === 'critical' ? 'C' : $promptQualityFilter;
 
 $where  = [];
 $params = [];
 
 $promptCompleteClause = sv_prompt_core_complete_condition('p');
+$latestPromptJoin = 'LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1)';
 
 if (!$showAdult) {
     $where[] = '(m.has_nsfw IS NULL OR m.has_nsfw = 0)';
@@ -173,11 +178,19 @@ if ($incompleteFilter === 'prompt') {
         . ' OR NOT EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id))';
 }
 
+if ($promptQualityFilter === 'A') {
+    $where[] = '(p.prompt IS NOT NULL AND LENGTH(TRIM(p.prompt)) >= 80)';
+} elseif ($promptQualityFilter === 'B') {
+    $where[] = '(p.prompt IS NOT NULL AND LENGTH(TRIM(p.prompt)) BETWEEN 40 AND 90)';
+} elseif ($promptQualityFilter === 'C') {
+    $where[] = '(p.prompt IS NULL OR LENGTH(TRIM(p.prompt)) < 50)';
+}
+
 $whereSql = $where === [] ? '1=1' : implode(' AND ', $where);
 $issueReport = [];
 
 if ($issueFilter) {
-    $idSql = 'SELECT m.id FROM media m WHERE ' . $whereSql . ' ORDER BY m.id DESC';
+    $idSql = 'SELECT m.id FROM media m ' . $latestPromptJoin . ' WHERE ' . $whereSql . ' ORDER BY m.id DESC';
     $idStmt = $pdo->prepare($idSql);
     $idStmt->execute($params);
     $candidateIds = array_map('intval', $idStmt->fetchAll(PDO::FETCH_COLUMN));
@@ -201,11 +214,13 @@ if ($issueFilter) {
     } else {
         $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
         $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
-           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
-           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
+           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
+           EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
+LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1)
 WHERE m.id IN (' . $placeholders . ')
 ORDER BY m.id DESC';
         $listStmt = $pdo->prepare($listSql);
@@ -222,18 +237,56 @@ ORDER BY m.id DESC';
             }
         }
     }
+} elseif ($promptQualityFilter !== 'all') {
+    $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
+           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
+           EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
+FROM media m
+' . $latestPromptJoin . '
+WHERE ' . $whereSql . '
+ORDER BY m.id DESC';
+
+    $qualityStmt = $pdo->prepare($qualitySql);
+    foreach ($params as $k => $v) {
+        $qualityStmt->bindValue($k, $v);
+    }
+    $qualityStmt->execute();
+    $candidateRows = $qualityStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $filteredRows = [];
+    foreach ($candidateRows as $row) {
+        $quality = sv_prompt_quality_from_text(
+            $row['prompt_text'] ?? null,
+            isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
+            isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
+        );
+        if ($quality['quality_class'] === $promptQualityFilter) {
+            $row['quality'] = $quality;
+            $filteredRows[] = $row;
+        }
+    }
+
+    $total = count($filteredRows);
+    $pages = max(1, (int)ceil($total / $perPage));
+    $rows = array_slice($filteredRows, $offset, $perPage);
+    $issueReport = sv_collect_integrity_issues($pdo, array_map(static fn ($r) => (int)$r['id'], $rows));
 } else {
-    $countSql = 'SELECT COUNT(*) FROM media m WHERE ' . $whereSql;
+    $countSql = 'SELECT COUNT(*) FROM media m ' . $latestPromptJoin . ' WHERE ' . $whereSql; 
     $countStmt = $pdo->prepare($countSql);
     $countStmt->execute($params);
     $total = (int)$countStmt->fetchColumn();
 
     $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
-           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id) AS has_prompt,
-           EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
+           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
+           EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
+' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
 ORDER BY m.id DESC
 LIMIT :limit OFFSET :offset';
@@ -260,6 +313,7 @@ $queryParams = [
     'min_rating' => $minRating,
     'incomplete' => $incompleteFilter,
     'issues'     => $issueFilter ? '1' : '0',
+    'prompt_quality' => $promptQualityFilter,
     'adult'      => $showAdult ? '1' : '0',
 ];
 
@@ -375,6 +429,13 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
             background: #5c6bc0;
             color: #fff;
         }
+        .badge.quality {
+            background: #e0f2f1;
+            color: #00695c;
+        }
+        .badge.quality-A { background: #c8e6c9; color: #1b5e20; }
+        .badge.quality-B { background: #fff3e0; color: #e65100; }
+        .badge.quality-C { background: #ffebee; color: #c62828; }
         .badge.issue {
             background: #f57f17;
             color: #fff;
@@ -420,6 +481,15 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
             <option value="all"     <?= $hasPromptFilter === 'all' ? 'selected' : '' ?>>alle</option>
             <option value="with"    <?= $hasPromptFilter === 'with' ? 'selected' : '' ?>>nur mit Prompt</option>
             <option value="without" <?= $hasPromptFilter === 'without' ? 'selected' : '' ?>>ohne Prompt</option>
+        </select>
+    </label>
+    <label>
+        Prompt-Qualität:
+        <select name="prompt_quality">
+            <option value="all" <?= $promptQualityFilter === 'all' ? 'selected' : '' ?>>alle</option>
+            <option value="A"   <?= $promptQualityFilter === 'A' ? 'selected' : '' ?>>A (gut)</option>
+            <option value="B"   <?= $promptQualityFilter === 'B' ? 'selected' : '' ?>>B (mittel)</option>
+            <option value="C"   <?= $promptQualityFilter === 'C' ? 'selected' : '' ?>>C (kritisch)</option>
         </select>
     </label>
     <label>
@@ -499,6 +569,15 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
         $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
         $hasIssues = isset($issuesByMedia[$id]);
 
+        $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
+            $row['prompt_text'] ?? null,
+            isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
+            isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
+        );
+        $qualityClass = $qualityData['quality_class'];
+        $qualityScore = (int)$qualityData['score'];
+        $qualityIssues = array_slice($qualityData['issues'] ?? [], 0, 2);
+
         $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
         $detailParams = array_merge($queryParams, ['id' => $id, 'p' => $page]);
         $streamUrl = sv_media_stream_url($id, $showAdult, false);
@@ -531,6 +610,7 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
                 <?php else: ?>
                     <span class="badge prompt missing" title="Kein Prompt hinterlegt">P?</span>
                 <?php endif; ?>
+                <span class="badge quality quality-<?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?>)<?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>">PQ:<?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <?php if ($hasMeta): ?>
                     <span class="badge meta" title="Metadaten vorhanden">M</span>
                 <?php else: ?>
