@@ -12,6 +12,8 @@ const SV_FORGE_JOB_TYPE           = 'forge_regen';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
 const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
 const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors';
+const SV_FORGE_MAX_TAGS_PROMPT    = 8;
+const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 
 function sv_load_config(?string $baseDir = null): array
 {
@@ -489,6 +491,527 @@ function sv_forge_job_overview(PDO $pdo): array
         'done'      => $byStatus['done'] ?? 0,
         'error'     => $byStatus['error'] ?? 0,
     ];
+}
+
+function sv_fetch_media_tags_for_regen(PDO $pdo, int $mediaId, int $limit = 8): array
+{
+    $limit = max(1, $limit);
+    $stmt = $pdo->prepare(
+        'SELECT t.name, t.type, t.locked, mt.confidence '
+        . 'FROM media_tags mt '
+        . 'JOIN tags t ON t.id = mt.tag_id '
+        . 'WHERE mt.media_id = :media_id AND mt.confidence IS NOT NULL AND mt.confidence > 0 '
+        . 'ORDER BY t.locked DESC, mt.confidence DESC, t.name ASC '
+        . 'LIMIT :limit'
+    );
+    $stmt->bindValue(':media_id', $mediaId, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function sv_assess_prompt_quality(string $prompt, array $tags): array
+{
+    $normalized   = trim($prompt);
+    $wordCount    = preg_match_all('/[\p{L}\p{N}]{2,}/u', $normalized, $wordMatches);
+    $fragmentsRaw = explode(',', $normalized);
+    $fragments    = array_map('trim', $fragmentsRaw);
+    $emptyFragments = 0;
+    $shortFragments = 0;
+    foreach ($fragments as $fragment) {
+        if ($fragment === '') {
+            $emptyFragments++;
+            continue;
+        }
+        $fragmentWords = preg_match_all('/[\p{L}\p{N}]{2,}/u', $fragment, $fragMatches);
+        if ($fragmentWords <= 1 || strlen($fragment) < 8) {
+            $shortFragments++;
+        }
+    }
+
+    $brokenCommaSpacing = preg_match('/\s,\s*/', $prompt) === 1;
+    $garbledTokens      = preg_match_all('/[\p{L}]{4,}(?:[^\s\p{L}]+|\d+)/u', $prompt, $garbledMatches);
+    $tagSubstance       = min(count($tags), SV_FORGE_MAX_TAGS_PROMPT);
+
+    $score   = 0;
+    $reasons = [];
+
+    if ($wordCount >= 12) {
+        $score += 2;
+    } elseif ($wordCount >= 8) {
+        $score += 1;
+    } elseif ($wordCount < 6) {
+        $score -= 2;
+        $reasons[] = 'zu kurz';
+    }
+
+    if ($emptyFragments > 0) {
+        $score   -= 2;
+        $reasons[] = 'leere Fragmente';
+    }
+    if ($brokenCommaSpacing) {
+        $score   -= 1;
+        $reasons[] = 'unsaubere Kommastruktur';
+    }
+    if ($shortFragments >= max(1, (int)floor(count($fragments) / 2))) {
+        $score   -= 1;
+        $reasons[] = 'kurze Fragmente';
+    }
+    if ($garbledTokens > 0) {
+        $score   -= 2;
+        $reasons[] = 'zerhackte Tokens';
+    }
+    if ($tagSubstance > $wordCount) {
+        $score   -= 1;
+        $reasons[] = 'Tags haben mehr Substanz als Prompt';
+    }
+
+    $category = 'B';
+    if ($score >= 2) {
+        $category = 'A';
+    } elseif ($score <= -1) {
+        $category = 'C';
+    }
+
+    return [
+        'category'        => $category,
+        'score'           => $score,
+        'word_count'      => $wordCount,
+        'fragment_count'  => count($fragments),
+        'broken_commas'   => $brokenCommaSpacing,
+        'garbled_tokens'  => $garbledTokens,
+        'empty_fragments' => $emptyFragments,
+        'short_fragments' => $shortFragments,
+        'tag_substance'   => $tagSubstance,
+        'reasons'         => $reasons,
+    ];
+}
+
+function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $logger): array
+{
+    $originalPrompt = trim((string)($mediaRow['prompt'] ?? ''));
+    if ($originalPrompt === '') {
+        throw new RuntimeException('Kein Prompt vorhanden.');
+    }
+
+    $tagNames = [];
+    foreach ($tags as $tag) {
+        if (isset($tag['name']) && is_string($tag['name'])) {
+            $tagNames[] = trim((string)$tag['name']);
+        }
+    }
+
+    $assessment = sv_assess_prompt_quality($originalPrompt, $tagNames);
+    $category   = $assessment['category'];
+    $finalPrompt = $originalPrompt;
+    $fallbackUsed = false;
+    $tagPromptUsed = false;
+    $tagFragment = '';
+
+    if ($category === 'B' && $tagNames !== []) {
+        $tagFragment = implode(', ', array_slice($tagNames, 0, 4));
+        $finalPrompt = rtrim($originalPrompt, ', ');
+        $finalPrompt .= $tagFragment !== '' ? ', ' . $tagFragment : '';
+        $fallbackUsed = true;
+    } elseif ($category === 'C') {
+        if ($tagNames === []) {
+            throw new RuntimeException('Prompt zu schwach und keine Tags verfügbar.');
+        }
+        $tagFragment = implode(', ', array_slice($tagNames, 0, SV_FORGE_MAX_TAGS_PROMPT));
+        $finalPrompt = 'Detailed reconstruction, ' . $tagFragment;
+        $fallbackUsed = true;
+        $tagPromptUsed = true;
+    }
+
+    if ($fallbackUsed && $tagFragment !== '') {
+        $logger('Prompt-Fallback aktiv (' . $category . '): Tags genutzt -> ' . $tagFragment);
+    }
+
+    return [
+        'category'        => $category,
+        'final_prompt'    => $finalPrompt,
+        'original_prompt' => $originalPrompt,
+        'fallback_used'   => $fallbackUsed,
+        'tag_prompt_used' => $tagPromptUsed,
+        'assessment'      => $assessment,
+        'tag_fragment'    => $tagFragment,
+    ];
+}
+
+function sv_store_forge_regen_meta(PDO $pdo, int $mediaId, array $info): void
+{
+    $insert = $pdo->prepare(
+        'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
+    );
+    $now = date('c');
+    foreach ($info as $key => $value) {
+        $insert->execute([
+            $mediaId,
+            SV_FORGE_SCAN_SOURCE_LABEL,
+            $key,
+            $value,
+            $now,
+        ]);
+    }
+}
+
+function sv_backup_media_file(array $config, string $path, callable $logger): string
+{
+    $baseDir   = sv_base_dir();
+    $backupDir = (string)($config['paths']['backups'] ?? ($baseDir . '/BACKUPS'));
+    $backupDir = rtrim(str_replace('\\', '/', $backupDir), '/');
+    if (!is_dir($backupDir)) {
+        if (!mkdir($backupDir, 0777, true) && !is_dir($backupDir)) {
+            throw new RuntimeException('Backup-Verzeichnis kann nicht angelegt werden: ' . $backupDir);
+        }
+    }
+
+    $timestamp  = date('Ymd_His');
+    $fileName   = basename($path);
+    $backupPath = $backupDir . '/forge_regen_' . $timestamp . '_' . $fileName;
+
+    if (!copy($path, $backupPath)) {
+        throw new RuntimeException('Backup fehlgeschlagen: ' . $backupPath);
+    }
+
+    $logger('Backup erstellt: ' . $backupPath);
+
+    return $backupPath;
+}
+
+function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger): array
+{
+    $pathsCfg = $config['paths'] ?? [];
+    sv_assert_media_path_allowed($targetPath, $pathsCfg, 'forge_regen_replace');
+
+    $tmpDir = isset($pathsCfg['tmp']) && is_string($pathsCfg['tmp']) && trim($pathsCfg['tmp']) !== ''
+        ? rtrim(str_replace('\\', '/', (string)$pathsCfg['tmp']), '/')
+        : (sv_base_dir() . '/TMP');
+    if (!is_dir($tmpDir)) {
+        mkdir($tmpDir, 0777, true);
+    }
+
+    $tmpFile = tempnam($tmpDir, 'forge_regen_');
+    if ($tmpFile === false) {
+        throw new RuntimeException('Temporäre Datei konnte nicht angelegt werden.');
+    }
+
+    if (file_put_contents($tmpFile, $binary) === false) {
+        @unlink($tmpFile);
+        throw new RuntimeException('Schreiben der neuen Bilddatei fehlgeschlagen.');
+    }
+
+    $imageInfo = @getimagesize($tmpFile);
+    if ($imageInfo === false) {
+        @unlink($tmpFile);
+        throw new RuntimeException('Forge lieferte keine gültige Bilddatei.');
+    }
+
+    if (!rename($tmpFile, $targetPath)) {
+        @unlink($tmpFile);
+        throw new RuntimeException('Ersetzen der Zieldatei fehlgeschlagen.');
+    }
+
+    $hash     = @hash_file('md5', $targetPath) ?: null;
+    $filesize = @filesize($targetPath) ?: null;
+
+    return [
+        'width'    => (int)$imageInfo[0],
+        'height'   => (int)$imageInfo[1],
+        'hash'     => $hash,
+        'filesize' => $filesize === false ? null : (int)$filesize,
+    ];
+}
+
+function sv_call_forge_sync(array $config, array $payload, callable $logger): array
+{
+    $endpoint = sv_forge_endpoint_config($config);
+    if ($endpoint === null) {
+        throw new RuntimeException('Forge-Konfiguration fehlt oder ist unvollständig.');
+    }
+
+    $url     = rtrim($endpoint['base_url'], '/');
+    $timeout = $endpoint['timeout'];
+    $headers = [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $endpoint['token'],
+    ];
+
+    $logger('Sende Forge-Request (synchron) an ' . $url);
+
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'POST',
+            'header'  => implode("\r\n", $headers),
+            'content' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            'timeout' => $timeout,
+        ],
+    ]);
+
+    $responseBody = @file_get_contents($url, false, $context);
+    $httpCode     = null;
+    if (isset($http_response_header) && is_array($http_response_header)) {
+        foreach ($http_response_header as $headerLine) {
+            if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
+                $httpCode = (int)$matches[1];
+                break;
+            }
+        }
+    }
+
+    if ($responseBody === false || $httpCode === null || $httpCode < 200 || $httpCode >= 300) {
+        throw new RuntimeException('Forge-Request fehlgeschlagen' . ($httpCode !== null ? ' (HTTP ' . $httpCode . ')' : ''));
+    }
+
+    $decoded = json_decode($responseBody, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('Forge-Antwort ungültig oder leer.');
+    }
+
+    $imageBinary = null;
+    if (isset($decoded['images']) && is_array($decoded['images']) && isset($decoded['images'][0])) {
+        $rawImage = (string)$decoded['images'][0];
+        if (str_starts_with($rawImage, 'data:')) {
+            $rawImage = preg_replace('~^data:image/[^;]+;base64,~', '', $rawImage) ?? $rawImage;
+        }
+        $imageBinary = base64_decode($rawImage, true);
+    }
+
+    if ($imageBinary === null || $imageBinary === false) {
+        throw new RuntimeException('Forge lieferte keine decodierbare Bildantwort.');
+    }
+
+    return [
+        'binary'         => $imageBinary,
+        'response_array' => $decoded,
+        'response_json'  => $responseBody,
+        'http_code'      => $httpCode,
+    ];
+}
+
+function sv_refresh_media_after_regen(
+    PDO $pdo,
+    array $config,
+    int $mediaId,
+    string $path,
+    array $regenPlan,
+    array $payload,
+    callable $logger
+): array {
+    $scannerCfg    = $config['scanner'] ?? [];
+    $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
+    $result        = [
+        'scan_updated'   => false,
+        'meta_updated'   => false,
+        'prompt_created' => false,
+    ];
+
+    $scanData  = sv_scan_with_local_scanner($path, $scannerCfg, $logger);
+    $hasNsfw   = (int)($config['default_nsfw'] ?? 0);
+    $rating    = 0;
+    $scanTags  = [];
+    $scanFlags = [];
+    $nsfwScore = null;
+
+    if ($scanData !== null) {
+        $nsfwScore = isset($scanData['nsfw_score']) ? (float)$scanData['nsfw_score'] : null;
+        $scanTags  = is_array($scanData['tags'] ?? null) ? $scanData['tags'] : [];
+        $scanFlags = is_array($scanData['flags'] ?? null) ? $scanData['flags'] : [];
+
+        if ($nsfwScore !== null && $nsfwScore >= $nsfwThreshold) {
+            $hasNsfw = 1;
+            $rating  = 3;
+        } else {
+            $hasNsfw = 0;
+            $rating  = 1;
+        }
+
+        $delTags = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ?');
+        $delTags->execute([$mediaId]);
+        sv_store_tags($pdo, $mediaId, $scanTags);
+        sv_store_scan_result($pdo, $mediaId, 'pixai_sensible', $nsfwScore, $scanFlags, $scanData['raw'] ?? []);
+
+        $stmt = $pdo->prepare('UPDATE media SET has_nsfw = ?, rating = ?, status = "active" WHERE id = ?');
+        $stmt->execute([$hasNsfw, $rating, $mediaId]);
+        $result['scan_updated'] = true;
+    } else {
+        $logger('Scanner lieferte keine verwertbaren Daten, Tags unverändert.');
+    }
+
+    try {
+        $metadata = sv_extract_metadata($path, 'image', SV_FORGE_SCAN_SOURCE_LABEL, $logger);
+        sv_store_extracted_metadata($pdo, $mediaId, 'image', $metadata, SV_FORGE_SCAN_SOURCE_LABEL, $logger);
+        $result['meta_updated'] = true;
+    } catch (Throwable $e) {
+        $logger('Metadaten konnten nicht aktualisiert werden: ' . $e->getMessage());
+    }
+
+    $insertPrompt = $pdo->prepare(
+        'INSERT INTO prompts (media_id, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata) '
+        . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+
+    $insertPrompt->execute([
+        $mediaId,
+        $regenPlan['final_prompt'],
+        (string)($payload['negative_prompt'] ?? ''),
+        (string)($payload['model'] ?? ''),
+        (string)($payload['sampler'] ?? ''),
+        isset($payload['cfg_scale']) ? (float)$payload['cfg_scale'] : null,
+        isset($payload['steps']) ? (int)$payload['steps'] : null,
+        isset($payload['seed']) ? (string)$payload['seed'] : null,
+        isset($payload['width']) ? (int)$payload['width'] : null,
+        isset($payload['height']) ? (int)$payload['height'] : null,
+        isset($payload['scheduler']) ? (string)$payload['scheduler'] : null,
+        isset($payload['sampler_settings']) ? (is_string($payload['sampler_settings']) ? $payload['sampler_settings'] : json_encode($payload['sampler_settings'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) : null,
+        isset($payload['loras']) ? (is_string($payload['loras']) ? $payload['loras'] : json_encode($payload['loras'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) : null,
+        isset($payload['controlnet']) ? (is_string($payload['controlnet']) ? $payload['controlnet'] : json_encode($payload['controlnet'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) : null,
+        json_encode([
+            'source'          => SV_FORGE_SCAN_SOURCE_LABEL,
+            'prompt_category' => $regenPlan['category'] ?? null,
+            'fallback_used'   => $regenPlan['fallback_used'] ?? null,
+            'tag_prompt_used' => $regenPlan['tag_prompt_used'] ?? null,
+            'original_prompt' => $regenPlan['original_prompt'] ?? null,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+    ]);
+
+    $result['prompt_created'] = true;
+
+    return $result;
+}
+
+function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $responseJson = null, ?string $error = null): void
+{
+    $stmt = $pdo->prepare(
+        'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at WHERE id = :id'
+    );
+    $stmt->execute([
+        ':status'     => $status,
+        ':response'   => $responseJson,
+        ':error'      => $error,
+        ':updated_at' => date('c'),
+        ':id'         => $jobId,
+    ]);
+}
+
+function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
+    $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
+    $type     = (string)($mediaRow['type'] ?? '');
+    $status   = (string)($mediaRow['status'] ?? '');
+    if ($type !== 'image') {
+        throw new InvalidArgumentException('Nur Bildmedien können regeneriert werden.');
+    }
+    if ($status === 'missing') {
+        throw new RuntimeException('Regeneration für fehlende Dateien nicht möglich.');
+    }
+
+    $path = (string)($mediaRow['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Dateipfad nicht vorhanden.');
+    }
+
+    $pathsCfg = $config['paths'] ?? [];
+    sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
+
+    $tags       = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
+    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger);
+    $validation = sv_validate_forge_prompt_payload($mediaRow);
+    $payload    = $validation['payload'];
+    $promptId   = $validation['prompt_id'];
+
+    $payload['prompt'] = $regenPlan['final_prompt'];
+    $requestedModel    = (string)($payload['model'] ?? '');
+    $resolvedModel     = sv_resolve_forge_model($config, $requestedModel, $logger);
+    $payload['model']  = $resolvedModel;
+    $payload['_sv_prompt_category'] = $regenPlan['category'];
+    $payload['_sv_prompt_fallback'] = $regenPlan['fallback_used'];
+    $payload['_sv_prompt_tags_used'] = $regenPlan['tag_prompt_used'];
+
+    $jobId = sv_create_forge_job($pdo, $mediaId, $payload, $promptId, $logger);
+    sv_update_job_status($pdo, $jobId, 'running');
+
+    $backupPath    = null;
+    $newFileInfo   = null;
+    $forgeResponse = null;
+
+    try {
+        $forgeResponse = sv_call_forge_sync($config, $payload, $logger);
+        $backupPath    = sv_backup_media_file($config, $path, $logger);
+        $newFileInfo   = sv_replace_media_file_with_image($config, $path, $forgeResponse['binary'], $logger);
+
+        $update = $pdo->prepare(
+            'UPDATE media SET hash = ?, width = ?, height = ?, filesize = ?, status = "active" WHERE id = ?'
+        );
+        $update->execute([
+            $newFileInfo['hash'],
+            $newFileInfo['width'],
+            $newFileInfo['height'],
+            $newFileInfo['filesize'],
+            $mediaId,
+        ]);
+
+        $refreshResult = sv_refresh_media_after_regen($pdo, $config, $mediaId, $path, $regenPlan, $payload, $logger);
+
+        sv_store_forge_regen_meta($pdo, $mediaId, [
+            'prompt_category' => $regenPlan['category'],
+            'prompt_fallback' => $regenPlan['fallback_used'] ? '1' : '0',
+            'tag_prompt_used' => $regenPlan['tag_prompt_used'] ? '1' : '0',
+            'prompt_original' => $regenPlan['original_prompt'],
+            'prompt_effective'=> $regenPlan['final_prompt'],
+            'backup_path'     => $backupPath,
+        ]);
+
+        $responseJson = $forgeResponse['response_json'] ?? null;
+        sv_update_job_status($pdo, $jobId, 'done', $responseJson, null);
+
+        sv_audit_log($pdo, 'forge_regen_replace', 'media', $mediaId, [
+            'job_id'            => $jobId,
+            'requested_model'   => $requestedModel,
+            'resolved_model'    => $resolvedModel,
+            'fallback_used'     => $regenPlan['fallback_used'],
+            'tag_prompt_used'   => $regenPlan['tag_prompt_used'],
+            'old_hash'          => $mediaRow['hash'] ?? null,
+            'new_hash'          => $newFileInfo['hash'] ?? null,
+            'scan_updated'      => $refreshResult['scan_updated'] ?? false,
+            'meta_updated'      => $refreshResult['meta_updated'] ?? false,
+            'prompt_created'    => $refreshResult['prompt_created'] ?? false,
+            'prompt_category'   => $regenPlan['category'],
+            'backup_path'       => $backupPath,
+        ]);
+
+        return [
+            'job_id'            => $jobId,
+            'prompt_category'   => $regenPlan['category'],
+            'fallback_used'     => $regenPlan['fallback_used'],
+            'tag_prompt_used'   => $regenPlan['tag_prompt_used'],
+            'backup_path'       => $backupPath,
+            'new_hash'          => $newFileInfo['hash'],
+            'old_hash'          => $mediaRow['hash'] ?? null,
+            'resolved_model'    => $resolvedModel,
+            'requested_model'   => $requestedModel,
+            'scan_updated'      => $refreshResult['scan_updated'],
+            'meta_updated'      => $refreshResult['meta_updated'],
+            'prompt_created'    => $refreshResult['prompt_created'],
+        ];
+    } catch (Throwable $e) {
+        if ($forgeResponse !== null) {
+            sv_update_job_status($pdo, $jobId, 'error', $forgeResponse['response_json'] ?? null, $e->getMessage());
+        } else {
+            sv_update_job_status($pdo, $jobId, 'error', null, $e->getMessage());
+        }
+
+        if ($backupPath !== null && $newFileInfo !== null && is_file($backupPath)) {
+            try {
+                copy($backupPath, $path);
+            } catch (Throwable $restoreError) {
+                $logger('Restore nach Fehler fehlgeschlagen: ' . $restoreError->getMessage());
+            }
+        }
+
+        throw $e;
+    }
 }
 
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array
