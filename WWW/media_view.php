@@ -91,6 +91,19 @@ if ($id <= 0) {
     exit;
 }
 
+$ajaxAction = isset($_GET['ajax']) && is_string($_GET['ajax']) ? trim((string)$_GET['ajax']) : null;
+if ($ajaxAction === 'forge_jobs') {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $jobs = sv_fetch_forge_jobs_for_media($pdo, $id, 10);
+        echo json_encode(['jobs' => $jobs], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         sv_require_internal_access($config, 'media_action');
@@ -121,13 +134,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $result = sv_run_forge_regen_replace($pdo, $config, $id, $logger);
                 $actionSuccess = true;
-                $actionMessage = 'Forge-Regeneration abgeschlossen und Datei ersetzt. Neuer Hash: '
-                    . htmlspecialchars((string)($result['new_hash'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
-                    . ' (Job #' . (int)($result['job_id'] ?? 0) . ').';
-                if (!empty($result['fallback_used'])) {
+                $jobId = (int)($result['job_id'] ?? 0);
+                $actionMessage = 'Forge-Regenerations-Job #' . $jobId . ' wurde in die Warteschlange gestellt.';
+                if (!empty($result['resolved_model'])) {
+                    $actionMessage .= ' Modell: ' . htmlspecialchars((string)$result['resolved_model'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+                }
+                if (!empty($result['regen_plan']['fallback_used'])) {
                     $actionMessage .= ' Hinweis: Prompt-Fallback angewendet.';
                 }
-                if (!empty($result['tag_prompt_used'])) {
+                if (!empty($result['regen_plan']['tag_prompt_used'])) {
                     $actionMessage .= ' Tag-basierte Rekonstruktion aktiv.';
                 }
             } catch (Throwable $e) {
@@ -428,6 +443,22 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
             color: #555;
             margin-top: 6px;
         }
+        .layout-grid { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+        .forge-jobs { flex: 1 1 260px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9; min-width: 260px; }
+        .forge-jobs h2 { margin-top: 0; }
+        .job-list { display: flex; flex-direction: column; gap: 8px; }
+        .job-card { border: 1px solid #ddd; border-radius: 4px; padding: 8px; background: #fff; cursor: pointer; }
+        .job-card:hover { background: #f4f7ff; }
+        .job-header { display: flex; justify-content: space-between; align-items: center; }
+        .job-status { padding: 2px 6px; border-radius: 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .job-status.status-queued { background: #fff8e1; color: #f57f17; border: 1px solid #ffecb3; }
+        .job-status.status-running { background: #e3f2fd; color: #1565c0; border: 1px solid #bbdefb; }
+        .job-status.status-done { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+        .job-status.status-error { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
+        .job-meta { margin-top: 6px; font-size: 12px; color: #444; }
+        .job-meta div { margin-bottom: 2px; }
+        .job-hint { font-size: 12px; color: #555; margin-top: 8px; }
+        .job-thumb img { max-width: 100%; height: auto; border-radius: 4px; margin-top: 6px; }
         .issues-block ul {
             margin: 0 0 8px 16px;
             padding: 0;
@@ -573,47 +604,56 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
     <?php endif; ?>
 </div>
 
-<div class="actions">
-    <h2>Aktionen</h2>
-    <?php if ($actionMessage !== null): ?>
-        <div style="padding:8px; border:1px solid <?= $actionSuccess ? '#4caf50' : '#e53935' ?>; background: <?= $actionSuccess ? '#e8f5e9' : '#ffebee' ?>; margin-bottom:10px;">
-            <strong><?= $actionSuccess ? 'OK' : 'Fehler' ?>:</strong>
-            <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-            <?php if ($actionLogFile): ?>
-                <div>Logdatei: <?= htmlspecialchars((string)$actionLogFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-            <?php endif; ?>
-            <?php if ($actionLogs !== []): ?>
-                <details style="margin-top:6px;">
-                    <summary>Details</summary>
-                    <pre style="white-space:pre-wrap; background:#f6f8fa; padding:6px;"><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
-                </details>
-            <?php endif; ?>
+<div class="layout-grid">
+    <div class="actions">
+        <h2>Aktionen</h2>
+        <?php if ($actionMessage !== null): ?>
+            <div style="padding:8px; border:1px solid <?= $actionSuccess ? '#4caf50' : '#e53935' ?>; background: <?= $actionSuccess ? '#e8f5e9' : '#ffebee' ?>; margin-bottom:10px;">
+                <strong><?= $actionSuccess ? 'OK' : 'Fehler' ?>:</strong>
+                <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                <?php if ($actionLogFile): ?>
+                    <div>Logdatei: <?= htmlspecialchars((string)$actionLogFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
+                <?php if ($actionLogs !== []): ?>
+                    <details style="margin-top:6px;">
+                        <summary>Details</summary>
+                        <pre style="white-space:pre-wrap; background:#f6f8fa; padding:6px;"><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                    </details>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($showRebuildButton): ?>
+            <form method="post" style="display:inline-block; margin-right:8px;">
+                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                <input type="hidden" name="action" value="rebuild_prompt">
+                <button type="submit">Prompt neu aufbauen</button>
+            </form>
+        <?php endif; ?>
+
+        <?php if ($canForgeRegen): ?>
+            <form method="post" style="display:inline-block; margin-right:8px;">
+                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                <input type="hidden" name="action" value="forge_regen">
+                <button type="submit">Regen über Forge</button>
+            </form>
+        <?php endif; ?>
+
+        <form method="post" style="display:inline-block; margin-right:8px;" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
+            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+            <input type="hidden" name="action" value="logical_delete">
+            <button type="submit">Medium logisch löschen</button>
+        </form>
+
+        <div class="action-note">Aktionen erfordern Internal-Key und IP-Whitelist. Löschfunktion setzt nur den Status auf missing.</div>
+    </div>
+    <div class="forge-jobs">
+        <h2>Forge-Jobs</h2>
+        <div id="forge-jobs" class="job-list">
+            <div class="job-hint">Jobs werden geladen …</div>
         </div>
-    <?php endif; ?>
-
-    <?php if ($showRebuildButton): ?>
-        <form method="post" style="display:inline-block; margin-right:8px;">
-            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-            <input type="hidden" name="action" value="rebuild_prompt">
-            <button type="submit">Prompt neu aufbauen</button>
-        </form>
-    <?php endif; ?>
-
-    <?php if ($canForgeRegen): ?>
-        <form method="post" style="display:inline-block; margin-right:8px;">
-            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-            <input type="hidden" name="action" value="forge_regen">
-            <button type="submit">Regen über Forge</button>
-        </form>
-    <?php endif; ?>
-
-    <form method="post" style="display:inline-block; margin-right:8px;" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
-        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-        <input type="hidden" name="action" value="logical_delete">
-        <button type="submit">Medium logisch löschen</button>
-    </form>
-
-    <div class="action-note">Aktionen erfordern Internal-Key und IP-Whitelist. Löschfunktion setzt nur den Status auf missing.</div>
+        <div class="job-hint">Status wird automatisch aktualisiert.</div>
+    </div>
 </div>
 
 <div class="media-block">
@@ -654,6 +694,51 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
         <?php endforeach; ?>
     <?php endif; ?>
 </div>
+
+<script>
+(function() {
+    const container = document.getElementById('forge-jobs');
+    if (!container) return;
+    const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'forge_jobs'])) ?>';
+    const targetUrl = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id])) ?>';
+    const thumbUrl = <?= json_encode($thumbUrl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+
+    function statusClass(status) {
+        if (!status) return 'status-queued';
+        const normalized = status.toLowerCase();
+        if (['queued', 'running', 'done', 'error'].includes(normalized)) {
+            return 'status-' + normalized;
+        }
+        return 'status-queued';
+    }
+
+    function renderJobs(jobs) {
+        if (!jobs || jobs.length === 0) {
+            container.innerHTML = '<div class="job-hint">Keine Forge-Jobs vorhanden.</div>';
+            return;
+        }
+        container.innerHTML = '';
+        jobs.forEach((job) => {
+            const card = document.createElement('div');
+            card.className = 'job-card';
+            const thumbMarkup = job.replaced ? '<div class="job-thumb"><img src="' + thumbUrl + '" alt="Thumbnail"></div>' : '';
+            card.innerHTML = '\n                <div class="job-header">\n                    <div class="job-title">Job #' + job.id + '</div>\n                    <div class="job-status ' + statusClass(job.status) + '\">' + (job.status || '') + '</div>\n                </div>\n                <div class="job-meta">\n                    <div>Modell: ' + (job.model || '–') + '</div>\n                    <div>Aktualisiert: ' + (job.updated_at || job.created_at || '–') + '</div>\n                    <div>' + (job.replaced ? 'Medium ersetzt' : 'Noch in Bearbeitung') + '</div>\n                    ' + (job.error ? ('<div style="color:#c62828;">Fehler: ' + job.error + '</div>') : '') + '\n                </div>\n                ' + thumbMarkup + '\n            ';
+            card.addEventListener('click', function () { window.location.href = targetUrl; });
+            container.appendChild(card);
+        });
+    }
+
+    function loadJobs() {
+        fetch(endpoint, { headers: { 'Accept': 'application/json' } })
+            .then((resp) => resp.json())
+            .then((data) => renderJobs(data.jobs || []))
+            .catch(() => { container.innerHTML = '<div class="job-hint">Job-Status konnte nicht geladen werden.</div>'; });
+    }
+
+    loadJobs();
+    setInterval(loadJobs, 8000);
+})();
+</script>
 
 </body>
 </html>

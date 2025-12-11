@@ -425,46 +425,87 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
     ];
 }
 
-function sv_queue_forge_regeneration(
-    PDO $pdo,
-    array $config,
-    int $mediaId,
-    bool $dispatchNow,
-    callable $logger
-): array {
+function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
     $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
+    $type     = (string)($mediaRow['type'] ?? '');
+    $status   = (string)($mediaRow['status'] ?? '');
+
+    if ($type !== 'image') {
+        throw new InvalidArgumentException('Nur Bildmedien können regeneriert werden.');
+    }
+    if ($status === 'missing') {
+        throw new RuntimeException('Regeneration für fehlende Dateien nicht möglich.');
+    }
+
+    $path = (string)($mediaRow['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Dateipfad nicht vorhanden.');
+    }
+
+    $pathsCfg = $config['paths'] ?? [];
+    sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
+
+    $tags       = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
+    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger);
     $validation = sv_validate_forge_prompt_payload($mediaRow);
 
-    $payload  = $validation['payload'];
-    $promptId = $validation['prompt_id'];
+    $payload    = $validation['payload'];
+    $promptId   = $validation['prompt_id'];
+    $payload['prompt'] = $regenPlan['final_prompt'];
 
     $requestedModel = (string)($payload['model'] ?? '');
     $resolvedModel  = sv_resolve_forge_model($config, $requestedModel, $logger);
     $payload['model'] = $resolvedModel;
+    $payload['_sv_requested_model'] = $requestedModel;
 
-    $jobId = sv_create_forge_job($pdo, $mediaId, $payload, $promptId, $logger);
+    $payload['_sv_regen_plan'] = [
+        'category'       => $regenPlan['category'],
+        'final_prompt'   => $regenPlan['final_prompt'],
+        'fallback_used'  => $regenPlan['fallback_used'],
+        'tag_prompt_used'=> $regenPlan['tag_prompt_used'],
+        'original_prompt'=> $regenPlan['original_prompt'] ?? null,
+    ];
 
-    if ($resolvedModel !== $requestedModel) {
-        $logger('Forge-Modell in Job #' . $jobId . ' angepasst: requested=' . $requestedModel . ', used=' . $resolvedModel . '.');
+    return [
+        'payload'         => $payload,
+        'prompt_id'       => $promptId,
+        'regen_plan'      => $regenPlan,
+        'requested_model' => $requestedModel,
+        'resolved_model'  => $resolvedModel,
+        'media_row'       => $mediaRow,
+        'path'            => $path,
+    ];
+}
+
+function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
+    $jobData = sv_prepare_forge_regen_job($pdo, $config, $mediaId, $logger);
+
+    $jobId = sv_create_forge_job(
+        $pdo,
+        $mediaId,
+        $jobData['payload'],
+        $jobData['prompt_id'],
+        $logger
+    );
+
+    if ($jobData['resolved_model'] !== $jobData['requested_model']) {
+        $logger('Forge-Modell in Job #' . $jobId . ' angepasst: requested=' . $jobData['requested_model'] . ', used=' . $jobData['resolved_model'] . '.');
         sv_audit_log($pdo, 'forge_model_resolved', 'jobs', $jobId, [
-            'requested_model' => $requestedModel,
-            'resolved_model'  => $resolvedModel,
-            'fallback_used'   => $resolvedModel === SV_FORGE_FALLBACK_MODEL,
+            'requested_model' => $jobData['requested_model'],
+            'resolved_model'  => $jobData['resolved_model'],
+            'fallback_used'   => $jobData['resolved_model'] === SV_FORGE_FALLBACK_MODEL,
         ]);
     }
 
-    $result = [
-        'job_id'     => $jobId,
-        'status'     => 'queued',
-        'dispatched' => false,
+    return [
+        'job_id'          => $jobId,
+        'status'          => 'queued',
+        'resolved_model'  => $jobData['resolved_model'],
+        'requested_model' => $jobData['requested_model'],
+        'regen_plan'      => $jobData['regen_plan'],
     ];
-
-    if ($dispatchNow) {
-        $dispatchResult = sv_dispatch_forge_job($pdo, $config, $jobId, $payload, $logger);
-        $result = array_merge($result, $dispatchResult);
-    }
-
-    return $result;
 }
 
 function sv_forge_job_overview(PDO $pdo): array
@@ -897,39 +938,79 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
 
 function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, callable $logger): array
 {
+    $logger('Forge-Regeneration wird in V3 asynchron über die Job-Queue abgewickelt.');
+
+    return sv_queue_forge_regeneration($pdo, $config, $mediaId, $logger);
+}
+
+function sv_extract_regen_plan_from_payload(array $payload): array
+{
+    $regenPlan = is_array($payload['_sv_regen_plan'] ?? null) ? $payload['_sv_regen_plan'] : [];
+
+    if (!isset($regenPlan['final_prompt']) && isset($payload['prompt'])) {
+        $regenPlan['final_prompt'] = (string)$payload['prompt'];
+    }
+    if (!isset($regenPlan['category']) && isset($payload['_sv_prompt_category'])) {
+        $regenPlan['category'] = $payload['_sv_prompt_category'];
+    }
+    if (!isset($regenPlan['fallback_used']) && isset($payload['_sv_prompt_fallback'])) {
+        $regenPlan['fallback_used'] = (bool)$payload['_sv_prompt_fallback'];
+    }
+    if (!isset($regenPlan['tag_prompt_used']) && isset($payload['_sv_prompt_tags_used'])) {
+        $regenPlan['tag_prompt_used'] = (bool)$payload['_sv_prompt_tags_used'];
+    }
+
+    return [
+        'category'        => $regenPlan['category'] ?? null,
+        'final_prompt'    => (string)($regenPlan['final_prompt'] ?? ''),
+        'fallback_used'   => (bool)($regenPlan['fallback_used'] ?? false),
+        'tag_prompt_used' => (bool)($regenPlan['tag_prompt_used'] ?? false),
+        'original_prompt' => $regenPlan['original_prompt'] ?? null,
+    ];
+}
+
+function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
+{
+    $jobId   = (int)($jobRow['id'] ?? 0);
+    $mediaId = (int)($jobRow['media_id'] ?? 0);
+
+    $payloadRaw = (string)($jobRow['forge_request_json'] ?? '');
+    $payload    = json_decode($payloadRaw, true);
+    if (!is_array($payload)) {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job hat keine gültige Payload.');
+        throw new RuntimeException('Forge-Job #' . $jobId . ' hat keine gültige Payload.');
+    }
+
+    $regenPlan = sv_extract_regen_plan_from_payload($payload);
+    $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
+    if (trim((string)$regenPlan['final_prompt']) === '') {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job ohne finalen Prompt.');
+        throw new RuntimeException('Forge-Job #' . $jobId . ' hat keinen finalen Prompt.');
+    }
+
+    $payload['prompt'] = $regenPlan['final_prompt'];
+
     $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
     $type     = (string)($mediaRow['type'] ?? '');
     $status   = (string)($mediaRow['status'] ?? '');
     if ($type !== 'image') {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Nur Bildmedien können regeneriert werden.');
         throw new InvalidArgumentException('Nur Bildmedien können regeneriert werden.');
     }
     if ($status === 'missing') {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Regeneration für fehlende Dateien nicht möglich.');
         throw new RuntimeException('Regeneration für fehlende Dateien nicht möglich.');
     }
 
     $path = (string)($mediaRow['path'] ?? '');
     if ($path === '' || !is_file($path)) {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Dateipfad nicht vorhanden.');
         throw new RuntimeException('Dateipfad nicht vorhanden.');
     }
 
     $pathsCfg = $config['paths'] ?? [];
     sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
 
-    $tags       = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
-    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger);
-    $validation = sv_validate_forge_prompt_payload($mediaRow);
-    $payload    = $validation['payload'];
-    $promptId   = $validation['prompt_id'];
-
-    $payload['prompt'] = $regenPlan['final_prompt'];
-    $requestedModel    = (string)($payload['model'] ?? '');
-    $resolvedModel     = sv_resolve_forge_model($config, $requestedModel, $logger);
-    $payload['model']  = $resolvedModel;
-    $payload['_sv_prompt_category'] = $regenPlan['category'];
-    $payload['_sv_prompt_fallback'] = $regenPlan['fallback_used'];
-    $payload['_sv_prompt_tags_used'] = $regenPlan['tag_prompt_used'];
-
-    $jobId = sv_create_forge_job($pdo, $mediaId, $payload, $promptId, $logger);
     sv_update_job_status($pdo, $jobId, 'running');
 
     $backupPath    = null;
@@ -963,13 +1044,28 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
             'backup_path'     => $backupPath,
         ]);
 
-        $responseJson = $forgeResponse['response_json'] ?? null;
+        $responsePayload = [
+            'forge_response' => $forgeResponse['response_array'] ?? null,
+            'result' => [
+                'replaced'        => true,
+                'backup_path'     => $backupPath,
+                'new_hash'        => $newFileInfo['hash'] ?? null,
+                'old_hash'        => $mediaRow['hash'] ?? null,
+                'prompt_category' => $regenPlan['category'],
+                'fallback_used'   => $regenPlan['fallback_used'],
+                'tag_prompt_used' => $regenPlan['tag_prompt_used'],
+                'model'           => $payload['model'] ?? null,
+                'requested_model' => $requestedModel,
+            ],
+        ];
+
+        $responseJson = json_encode($responsePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         sv_update_job_status($pdo, $jobId, 'done', $responseJson, null);
 
         sv_audit_log($pdo, 'forge_regen_replace', 'media', $mediaId, [
             'job_id'            => $jobId,
             'requested_model'   => $requestedModel,
-            'resolved_model'    => $resolvedModel,
+            'resolved_model'    => $payload['model'] ?? null,
             'fallback_used'     => $regenPlan['fallback_used'],
             'tag_prompt_used'   => $regenPlan['tag_prompt_used'],
             'old_hash'          => $mediaRow['hash'] ?? null,
@@ -983,17 +1079,19 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
 
         return [
             'job_id'            => $jobId,
+            'media_id'          => $mediaId,
             'prompt_category'   => $regenPlan['category'],
             'fallback_used'     => $regenPlan['fallback_used'],
             'tag_prompt_used'   => $regenPlan['tag_prompt_used'],
             'backup_path'       => $backupPath,
-            'new_hash'          => $newFileInfo['hash'],
+            'new_hash'          => $newFileInfo['hash'] ?? null,
             'old_hash'          => $mediaRow['hash'] ?? null,
-            'resolved_model'    => $resolvedModel,
+            'resolved_model'    => $payload['model'] ?? null,
             'requested_model'   => $requestedModel,
-            'scan_updated'      => $refreshResult['scan_updated'],
-            'meta_updated'      => $refreshResult['meta_updated'],
-            'prompt_created'    => $refreshResult['prompt_created'],
+            'scan_updated'      => $refreshResult['scan_updated'] ?? false,
+            'meta_updated'      => $refreshResult['meta_updated'] ?? false,
+            'prompt_created'    => $refreshResult['prompt_created'] ?? false,
+            'status'            => 'done',
         ];
     } catch (Throwable $e) {
         if ($forgeResponse !== null) {
@@ -1010,8 +1108,91 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
             }
         }
 
-        throw $e;
+        return [
+            'job_id'   => $jobId,
+            'media_id' => $mediaId,
+            'status'   => 'error',
+            'error'    => $e->getMessage(),
+        ];
     }
+}
+
+function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger): array
+{
+    $effectiveLimit = $limit === null ? 1 : max(1, min(10, (int)$limit));
+
+    $stmt = $pdo->prepare(
+        'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC LIMIT :limit'
+    );
+    $stmt->bindValue(':type', SV_FORGE_JOB_TYPE, PDO::PARAM_STR);
+    $stmt->bindValue(':limit', $effectiveLimit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $summary = [
+        'total'   => count($jobs),
+        'done'    => 0,
+        'error'   => 0,
+        'results' => [],
+    ];
+
+    foreach ($jobs as $jobRow) {
+        $jobId = (int)($jobRow['id'] ?? 0);
+        try {
+            $logger('Verarbeite Forge-Job #' . $jobId . ' (Media ' . (int)($jobRow['media_id'] ?? 0) . ')');
+            $result = sv_process_single_forge_job($pdo, $config, $jobRow, $logger);
+            if (($result['status'] ?? '') === 'done') {
+                $summary['done']++;
+            } else {
+                $summary['error']++;
+            }
+            $summary['results'][] = $result;
+        } catch (Throwable $e) {
+            $summary['error']++;
+            $summary['results'][] = [
+                'job_id' => $jobId,
+                'status' => 'error',
+                'error'  => $e->getMessage(),
+            ];
+            $logger('Fehler bei Forge-Job #' . $jobId . ': ' . $e->getMessage());
+        }
+    }
+
+    return $summary;
+}
+
+function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10): array
+{
+    $limit = max(1, $limit);
+    $stmt = $pdo->prepare(
+        'SELECT id, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+        . 'FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT :limit'
+    );
+    $stmt->bindValue(':type', SV_FORGE_JOB_TYPE, PDO::PARAM_STR);
+    $stmt->bindValue(':media_id', $mediaId, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $jobs = [];
+    foreach ($rows as $row) {
+        $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
+        $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+
+        $jobs[] = [
+            'id'         => (int)$row['id'],
+            'status'     => (string)$row['status'],
+            'created_at' => (string)($row['created_at'] ?? ''),
+            'updated_at' => (string)($row['updated_at'] ?? ''),
+            'model'      => $payload['model'] ?? null,
+            'replaced'   => $response['result']['replaced'] ?? ($row['status'] === 'done'),
+            'error'      => $row['error_message'] ?? null,
+        ];
+    }
+
+    return $jobs;
 }
 
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array

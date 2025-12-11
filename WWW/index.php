@@ -359,6 +359,12 @@ $cliEntries = [
         'example'     => 'php SCRIPTS\\migrate.php',
     ],
     [
+        'name'        => 'forge_worker_cli.php',
+        'category'    => 'Forge',
+        'description' => 'Abarbeitung der queued Forge-Regenerations-Jobs (Replace-in-place) ohne Web-Wartezeiten.',
+        'example'     => 'php SCRIPTS\\forge_worker_cli.php --limit=1',
+    ],
+    [
         'name'        => 'consistency_check.php',
         'category'    => 'Wartung',
         'description' => 'Prüft die DB-Konsistenz; optional mit --repair=simple für einfache Fixes.',
@@ -662,7 +668,7 @@ $cliEntries = [
         <?php else: ?>
             <p>Keine Forge-Jobs vorhanden.</p>
         <?php endif; ?>
-        <p>Details können aktuell über Datenbank-Tools eingesehen werden.</p>
+        <p>Verarbeitung erfolgt ausschließlich über den Forge-Worker (z. B. <code>php SCRIPTS/forge_worker_cli.php --limit=1</code>) und wird von der Web-Oberfläche nur als Queue verwaltet.</p>
     <?php endif; ?>
 
     <h2>CLI-Übersicht</h2>
