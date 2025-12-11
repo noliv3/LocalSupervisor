@@ -15,6 +15,8 @@ const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetenso
 const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 
+const SV_JOB_STATUS_CANCELED      = 'canceled';
+
 function sv_load_config(?string $baseDir = null): array
 {
     $baseDir = $baseDir ?? sv_base_dir();
@@ -531,6 +533,175 @@ function sv_forge_job_overview(PDO $pdo): array
         'open'      => $openCount,
         'done'      => $byStatus['done'] ?? 0,
         'error'     => $byStatus['error'] ?? 0,
+    ];
+}
+
+function sv_job_summary_from_row(array $row): string
+{
+    $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
+    $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+
+    $parts = [];
+    if (is_array($payload) && isset($payload['model'])) {
+        $parts[] = 'Modell: ' . (string)$payload['model'];
+    }
+    if (is_array($response) && isset($response['error'])) {
+        $parts[] = 'Response-Error: ' . trim((string)$response['error']);
+    }
+    if (isset($row['error_message']) && trim((string)$row['error_message']) !== '') {
+        $parts[] = 'Fehler: ' . trim((string)$row['error_message']);
+    }
+
+    return $parts === [] ? '' : implode(' | ', $parts);
+}
+
+function sv_load_job(PDO $pdo, int $jobId): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT id, media_id, prompt_id, type, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+        . 'FROM jobs WHERE id = :id'
+    );
+    $stmt->execute([':id' => $jobId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$row) {
+        throw new InvalidArgumentException('Job nicht gefunden.');
+    }
+
+    return $row;
+}
+
+function sv_list_jobs(PDO $pdo, array $filters = [], int $limit = 100): array
+{
+    $limit = max(1, min(250, $limit));
+
+    $where  = [];
+    $params = [];
+
+    if (isset($filters['job_type']) && is_string($filters['job_type']) && $filters['job_type'] !== '') {
+        $where[]          = 'type = :type';
+        $params[':type']  = trim($filters['job_type']);
+    }
+    if (isset($filters['status']) && is_string($filters['status']) && $filters['status'] !== '') {
+        $where[]            = 'status = :status';
+        $params[':status']  = trim($filters['status']);
+    }
+    if (isset($filters['media_id']) && (int)$filters['media_id'] > 0) {
+        $where[]              = 'media_id = :media_id';
+        $params[':media_id']  = (int)$filters['media_id'];
+    }
+    if (isset($filters['since']) && $filters['since'] !== null) {
+        $since = $filters['since'];
+        if (is_numeric($since)) {
+            $since = date('c', (int)$since);
+        }
+        if (is_string($since) && trim($since) !== '') {
+            $where[]             = 'created_at >= :since';
+            $params[':since']    = $since;
+        }
+    }
+
+    $sql = 'SELECT id, media_id, prompt_id, type, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+         . 'FROM jobs';
+    if ($where !== []) {
+        $sql .= ' WHERE ' . implode(' AND ', $where);
+    }
+    $sql .= ' ORDER BY id DESC LIMIT :limit';
+
+    $stmt = $pdo->prepare($sql);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+    }
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $jobs = [];
+
+    foreach ($rows as $row) {
+        $jobs[] = [
+            'id'         => (int)$row['id'],
+            'media_id'   => (int)$row['media_id'],
+            'prompt_id'  => isset($row['prompt_id']) ? (int)$row['prompt_id'] : null,
+            'type'       => (string)$row['type'],
+            'status'     => (string)$row['status'],
+            'created_at' => (string)($row['created_at'] ?? ''),
+            'updated_at' => (string)($row['updated_at'] ?? ''),
+            'summary'    => sv_job_summary_from_row($row),
+        ];
+    }
+
+    return $jobs;
+}
+
+function sv_requeue_job(PDO $pdo, int $jobId, callable $logger): array
+{
+    $job = sv_load_job($pdo, $jobId);
+    $type   = (string)($job['type'] ?? '');
+    $status = (string)($job['status'] ?? '');
+
+    if ($type !== SV_FORGE_JOB_TYPE) {
+        throw new InvalidArgumentException('Requeue wird für diesen Job-Typ nicht unterstützt.');
+    }
+    if (!in_array($status, ['error', 'done', SV_JOB_STATUS_CANCELED], true)) {
+        throw new InvalidArgumentException('Requeue nur für abgeschlossene oder fehlerhafte Jobs möglich.');
+    }
+
+    $stmt = $pdo->prepare(
+        'UPDATE jobs SET status = :status, updated_at = :updated_at, error_message = NULL, forge_response_json = NULL WHERE id = :id'
+    );
+    $stmt->execute([
+        ':status'     => 'queued',
+        ':updated_at' => date('c'),
+        ':id'         => $jobId,
+    ]);
+
+    $logger('Job #' . $jobId . ' erneut eingereiht.');
+    sv_audit_log($pdo, 'job_requeue', 'jobs', $jobId, [
+        'previous_status' => $status,
+        'job_type'        => $type,
+    ]);
+
+    return [
+        'job_id'  => $jobId,
+        'status'  => 'queued',
+        'message' => 'Job wurde erneut eingereiht.',
+    ];
+}
+
+function sv_cancel_job(PDO $pdo, int $jobId, callable $logger): array
+{
+    $job = sv_load_job($pdo, $jobId);
+    $type   = (string)($job['type'] ?? '');
+    $status = (string)($job['status'] ?? '');
+
+    if ($type !== SV_FORGE_JOB_TYPE) {
+        throw new InvalidArgumentException('Abbruch wird für diesen Job-Typ nicht unterstützt.');
+    }
+    if (!in_array($status, ['queued', 'running'], true)) {
+        throw new InvalidArgumentException('Nur queued/running-Jobs können abgebrochen werden.');
+    }
+
+    $stmt = $pdo->prepare(
+        'UPDATE jobs SET status = :status, updated_at = :updated_at, error_message = :error WHERE id = :id'
+    );
+    $stmt->execute([
+        ':status'     => SV_JOB_STATUS_CANCELED,
+        ':updated_at' => date('c'),
+        ':error'      => 'Canceled by operator',
+        ':id'         => $jobId,
+    ]);
+
+    $logger('Job #' . $jobId . ' abgebrochen.');
+    sv_audit_log($pdo, 'job_cancel', 'jobs', $jobId, [
+        'previous_status' => $status,
+        'job_type'        => $type,
+    ]);
+
+    return [
+        'job_id'  => $jobId,
+        'status'  => SV_JOB_STATUS_CANCELED,
+        'message' => 'Job wurde abgebrochen.',
     ];
 }
 
