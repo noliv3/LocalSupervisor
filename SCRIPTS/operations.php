@@ -1333,6 +1333,138 @@ function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callab
     return $summary;
 }
 
+function sv_get_media_versions(PDO $pdo, int $mediaId): array
+{
+    $mediaStmt = $pdo->prepare('SELECT id, path, hash, created_at, imported_at FROM media WHERE id = :id');
+    $mediaStmt->execute([':id' => $mediaId]);
+    $mediaRow = $mediaStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$mediaRow) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    $metaStmt = $pdo->prepare(
+        'SELECT source, meta_key, meta_value, created_at FROM media_meta WHERE media_id = :id ORDER BY id ASC'
+    );
+    $metaStmt->execute([':id' => $mediaId]);
+    $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $backupMeta = [];
+    foreach ($metaRows as $metaRow) {
+        if (
+            (string)($metaRow['source'] ?? '') === SV_FORGE_SCAN_SOURCE_LABEL
+            && (string)($metaRow['meta_key'] ?? '') === 'backup_path'
+            && isset($metaRow['meta_value'])
+        ) {
+            $backupMeta[] = [
+                'path'      => (string)$metaRow['meta_value'],
+                'created_at'=> (string)($metaRow['created_at'] ?? ''),
+            ];
+        }
+    }
+
+    $versions = [[
+        'version_index'   => 0,
+        'is_current'      => true,
+        'source'          => 'import',
+        'status'          => 'baseline',
+        'timestamp'       => (string)($mediaRow['created_at'] ?? ($mediaRow['imported_at'] ?? '')),
+        'model_requested' => null,
+        'model_used'      => null,
+        'prompt_category' => null,
+        'fallback_used'   => false,
+        'backup_path'     => null,
+        'backup_exists'   => false,
+        'hash_old'        => null,
+        'hash_new'        => $mediaRow['hash'] ?? null,
+        'job_id'          => null,
+    ]];
+
+    $jobsStmt = $pdo->prepare(
+        'SELECT id, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+        . 'FROM jobs WHERE type = :type AND media_id = :media_id AND status IN ("done", "error") ORDER BY id ASC'
+    );
+    $jobsStmt->execute([
+        ':type'     => SV_FORGE_JOB_TYPE,
+        ':media_id' => $mediaId,
+    ]);
+
+    $rows = $jobsStmt->fetchAll(PDO::FETCH_ASSOC);
+    $currentIndex = 0;
+
+    foreach ($rows as $row) {
+        $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
+        $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+
+        $regenPlan = is_array($payload) ? sv_extract_regen_plan_from_payload($payload) : [
+            'category'        => null,
+            'fallback_used'   => null,
+            'tag_prompt_used' => null,
+        ];
+
+        $requestedModel = is_array($payload)
+            ? ($payload['_sv_requested_model'] ?? ($payload['model'] ?? null))
+            : null;
+        $resolvedModel = is_array($response) && isset($response['result']['model'])
+            ? $response['result']['model']
+            : (is_array($payload) ? ($payload['model'] ?? null) : null);
+
+        $promptCategory = $response['result']['prompt_category']
+            ?? $regenPlan['category']
+            ?? null;
+        $fallbackUsed = (bool)($response['result']['fallback_used'] ?? $regenPlan['fallback_used'] ?? false);
+
+        $jobCreatedAt = (string)($row['created_at'] ?? '');
+        $backupPath = $response['result']['backup_path'] ?? null;
+        if ($backupPath === null && $backupMeta !== []) {
+            $jobCreatedTs = strtotime($jobCreatedAt) ?: null;
+            foreach ($backupMeta as $candidate) {
+                $metaTs = isset($candidate['created_at']) ? strtotime((string)$candidate['created_at']) : false;
+                if ($jobCreatedTs !== null && $metaTs !== false && $metaTs >= $jobCreatedTs) {
+                    $backupPath = $candidate['path'];
+                    break;
+                }
+            }
+            if ($backupPath === null) {
+                $lastCandidate = end($backupMeta);
+                $backupPath    = $lastCandidate['path'] ?? null;
+                reset($backupMeta);
+            }
+        }
+
+        $hashOld = $response['result']['old_hash'] ?? null;
+        $hashNew = $response['result']['new_hash'] ?? null;
+
+        $versionIndex = count($versions);
+        $versions[] = [
+            'version_index'   => $versionIndex,
+            'is_current'      => false,
+            'source'          => 'forge_regen',
+            'status'          => ((string)($row['status'] ?? '') === 'done') ? 'ok' : 'error',
+            'timestamp'       => (string)($row['updated_at'] ?? $jobCreatedAt),
+            'model_requested' => $requestedModel,
+            'model_used'      => $resolvedModel,
+            'prompt_category' => $promptCategory,
+            'fallback_used'   => $fallbackUsed,
+            'backup_path'     => $backupPath,
+            'backup_exists'   => $backupPath !== null && is_file((string)$backupPath),
+            'hash_old'        => $hashOld,
+            'hash_new'        => $hashNew,
+            'job_id'          => (int)($row['id'] ?? 0),
+        ];
+
+        if ((string)($row['status'] ?? '') === 'done') {
+            $currentIndex = $versionIndex;
+        }
+    }
+
+    foreach ($versions as $idx => $version) {
+        $versions[$idx]['is_current'] = $idx === $currentIndex;
+    }
+
+    return $versions;
+}
+
 function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10): array
 {
     $limit = max(1, $limit);
