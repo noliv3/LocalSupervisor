@@ -806,16 +806,81 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
 
     $tags       = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
     $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger);
-    $validation = sv_validate_forge_prompt_payload($mediaRow);
+    $promptId   = isset($mediaRow['prompt_id']) ? (int)$mediaRow['prompt_id'] : null;
 
-    $payload    = $validation['payload'];
-    $promptId   = $validation['prompt_id'];
-    $payload['prompt'] = $regenPlan['final_prompt'];
+    $payload = [
+        'prompt'          => $regenPlan['final_prompt'],
+        'negative_prompt' => (string)($mediaRow['negative_prompt'] ?? ''),
+        'model'           => (string)($mediaRow['model'] ?? ''),
+        'sampler'         => (string)($mediaRow['sampler'] ?? ''),
+        'cfg_scale'       => isset($mediaRow['cfg_scale']) ? (float)$mediaRow['cfg_scale'] : 7.0,
+        'steps'           => isset($mediaRow['steps']) ? (int)$mediaRow['steps'] : 30,
+        'seed'            => (string)($mediaRow['seed'] ?? ''),
+        'width'           => (int)($mediaRow['width'] ?? 0),
+        'height'          => (int)($mediaRow['height'] ?? 0),
+    ];
+
+    if (!empty($mediaRow['scheduler'])) {
+        $payload['scheduler'] = (string)$mediaRow['scheduler'];
+    }
+    if (!empty($mediaRow['sampler_settings'])) {
+        $payload['sampler_settings'] = json_decode((string)$mediaRow['sampler_settings'], true) ?? (string)$mediaRow['sampler_settings'];
+    }
+    if (!empty($mediaRow['loras'])) {
+        $payload['loras'] = json_decode((string)$mediaRow['loras'], true) ?? (string)$mediaRow['loras'];
+    }
+    if (!empty($mediaRow['controlnet'])) {
+        $payload['controlnet'] = json_decode((string)$mediaRow['controlnet'], true) ?? (string)$mediaRow['controlnet'];
+    }
+    if (!empty($mediaRow['source_metadata'])) {
+        $payload['source_metadata'] = (string)$mediaRow['source_metadata'];
+    }
+
+    if ($payload['width'] <= 0 || $payload['height'] <= 0) {
+        $imageInfo = @getimagesize($path);
+        if ($imageInfo !== false) {
+            $payload['width']  = (int)$imageInfo[0];
+            $payload['height'] = (int)$imageInfo[1];
+        }
+    }
+
+    if ($payload['steps'] <= 0) {
+        $payload['steps'] = 30;
+    }
+    if (!isset($payload['cfg_scale']) || (float)$payload['cfg_scale'] <= 0) {
+        $payload['cfg_scale'] = 7.0;
+    }
+
+    $seedInfo        = sv_ensure_media_seed($pdo, (int)$mediaRow['id'], $payload['seed'], $logger);
+    $payload['seed'] = $seedInfo['seed'];
 
     $requestedModel = (string)($payload['model'] ?? '');
     $resolvedModel  = sv_resolve_forge_model($config, $requestedModel, $logger);
     $payload['model'] = $resolvedModel;
     $payload['_sv_requested_model'] = $requestedModel;
+
+    $missingCritical = [];
+    foreach (['model', 'sampler', 'scheduler', 'cfg_scale', 'steps', 'seed', 'width', 'height'] as $field) {
+        $value = $payload[$field] ?? null;
+        $isEmpty = is_string($value) ? trim($value) === '' : ($value === null || (is_numeric($value) && (float)$value <= 0));
+        if ($isEmpty) {
+            $missingCritical[] = $field;
+        }
+    }
+
+    $forceImg2Img = $regenPlan['prompt_missing']
+        || $regenPlan['category'] === 'C'
+        || $missingCritical !== [];
+
+    if ($forceImg2Img) {
+        $payload['init_images'] = [sv_encode_init_image($path)];
+        if (!isset($payload['denoising_strength']) || (float)$payload['denoising_strength'] <= 0) {
+            $payload['denoising_strength'] = 0.25;
+        }
+        $payload['_sv_mode'] = 'img2img';
+    } else {
+        $payload['_sv_mode'] = 'txt2img';
+    }
 
     $payload['_sv_regen_plan'] = [
         'category'        => $regenPlan['category'],
@@ -826,6 +891,8 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         'quality_score'   => $regenPlan['assessment']['score'] ?? null,
         'quality_issues'  => $regenPlan['assessment']['issues'] ?? null,
         'tag_fragment'    => $regenPlan['tag_fragment'] ?? null,
+        'seed_generated'  => $seedInfo['created'],
+        'prompt_missing'  => $regenPlan['prompt_missing'],
     ];
 
     return [
@@ -1855,30 +1922,138 @@ function sv_prompt_quality_from_text(?string $promptText, ?int $width = null, ?i
     return sv_analyze_prompt_quality($row, $tags);
 }
 
+function sv_tag_has_no_humans_flag(array $tags): bool
+{
+    foreach ($tags as $tag) {
+        $name = strtolower(trim((string)($tag['name'] ?? '')));
+        if ($name === 'no_humans' || $name === 'no humans') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function sv_strip_human_tokens(string $prompt): string
+{
+    if ($prompt === '') {
+        return $prompt;
+    }
+
+    $humanTokens = [
+        'human', 'people', 'person', 'man', 'woman', 'male', 'female', 'boy', 'girl',
+        'guy', 'lady', 'gentleman', 'person', 'portrait', 'face', 'body', 'adult', 'kid',
+    ];
+
+    $pattern = '~\b(' . implode('|', array_map('preg_quote', $humanTokens)) . ')s?\b~i';
+    $cleaned = preg_replace($pattern, '', $prompt) ?? $prompt;
+    $cleaned = preg_replace('~[,]{2,}~', ',', $cleaned) ?? $cleaned;
+
+    return trim(preg_replace('~\s{2,}~', ' ', $cleaned) ?? $cleaned, " ,");
+}
+
+function sv_build_grouped_tag_prompt(array $tags, bool $noHumans): ?string
+{
+    $subject = [];
+    $background = [];
+    $style = [];
+
+    foreach ($tags as $tag) {
+        $name = isset($tag['name']) ? trim((string)$tag['name']) : '';
+        if ($name === '') {
+            continue;
+        }
+
+        $type = strtolower((string)($tag['type'] ?? 'content'));
+        if ($type === 'style') {
+            $style[] = $name;
+            continue;
+        }
+
+        if (in_array($type, ['content', 'character'], true)) {
+            $subject[] = $name;
+            continue;
+        }
+
+        $background[] = $name;
+    }
+
+    if ($noHumans) {
+        $subject = array_values(array_filter($subject, static function (string $name): bool {
+            return trim(sv_strip_human_tokens($name)) !== '';
+        }));
+    }
+
+    $parts = [];
+    if ($subject !== []) {
+        $parts[] = implode(', ', $subject);
+    }
+    if ($background !== []) {
+        $parts[] = implode(', ', $background);
+    }
+    if ($style !== []) {
+        $parts[] = implode(', ', $style);
+    }
+
+    if ($parts === []) {
+        return null;
+    }
+
+    $prompt = implode(', ', $parts);
+    return $prompt === '' ? null : $prompt;
+}
+
 function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $logger): array
 {
     $originalPrompt = trim((string)($mediaRow['prompt'] ?? ''));
-    if ($originalPrompt === '') {
-        throw new RuntimeException('Kein Prompt vorhanden.');
+    $noHumans       = sv_tag_has_no_humans_flag($tags);
+    $tagPrompt      = sv_build_grouped_tag_prompt($tags, $noHumans);
+
+    $effectivePrompt = $originalPrompt;
+    $tagPromptUsed   = false;
+    $fallbackUsed    = false;
+    $assessment      = null;
+
+    if ($effectivePrompt === '' && $tagPrompt !== null) {
+        $effectivePrompt = $tagPrompt;
+        $tagPromptUsed   = true;
+        $fallbackUsed    = true;
     }
 
-    $assessment    = sv_analyze_prompt_quality($mediaRow, $tags);
-    $quality       = $assessment['quality_class'];
-    $finalPrompt   = $originalPrompt;
-    $fallbackUsed  = false;
-    $tagPromptUsed = false;
-    $tagFragment   = $assessment['tag_based_suggestion'] ?? '';
+    if ($effectivePrompt === '') {
+        throw new RuntimeException('Kein Prompt vorhanden und keine Tags verfügbar.');
+    }
+
+    $assessment = sv_analyze_prompt_quality(
+        [
+            'prompt' => $effectivePrompt,
+            'width'  => $mediaRow['width'] ?? null,
+            'height' => $mediaRow['height'] ?? null,
+        ],
+        $tags
+    );
+    $quality     = $assessment['quality_class'];
+    $tagFragment = $assessment['tag_based_suggestion'] ?? '';
 
     if ($quality === 'B' && $assessment['hybrid_suggestion'] !== null) {
-        $finalPrompt = (string)$assessment['hybrid_suggestion'];
-        $fallbackUsed = true;
+        $effectivePrompt = (string)$assessment['hybrid_suggestion'];
+        $fallbackUsed    = true;
     } elseif ($quality === 'C') {
-        if ($assessment['tag_based_suggestion'] === null) {
+        if ($tagPrompt === null && $assessment['tag_based_suggestion'] === null) {
             throw new RuntimeException('Prompt zu schwach und keine Tags verfügbar.');
         }
-        $finalPrompt   = 'Detailed reconstruction, ' . (string)$assessment['tag_based_suggestion'];
-        $fallbackUsed  = true;
-        $tagPromptUsed = true;
+        $baseSuggestion = $assessment['tag_based_suggestion'] ?? $tagPrompt ?? $effectivePrompt;
+        $effectivePrompt = 'Detailed reconstruction, ' . $baseSuggestion;
+        $fallbackUsed    = true;
+        $tagPromptUsed   = true;
+    }
+
+    if ($noHumans) {
+        $cleaned = sv_strip_human_tokens($effectivePrompt);
+        if ($cleaned === '') {
+            throw new RuntimeException('Prompt kollidiert mit no_humans-Tag.');
+        }
+        $effectivePrompt = $cleaned;
     }
 
     if ($fallbackUsed && $tagFragment !== '') {
@@ -1887,13 +2062,60 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
 
     return [
         'category'        => $quality,
-        'final_prompt'    => $finalPrompt,
+        'final_prompt'    => $effectivePrompt,
         'original_prompt' => $originalPrompt,
         'fallback_used'   => $fallbackUsed,
         'tag_prompt_used' => $tagPromptUsed,
         'assessment'      => $assessment,
         'tag_fragment'    => $tagFragment,
+        'no_humans'       => $noHumans,
+        'prompt_missing'  => $originalPrompt === '',
     ];
+}
+
+function sv_ensure_media_seed(PDO $pdo, int $mediaId, ?string $existingSeed, callable $logger): array
+{
+    if (is_string($existingSeed) && trim($existingSeed) !== '') {
+        return ['seed' => trim($existingSeed), 'created' => false];
+    }
+
+    $stmt = $pdo->prepare(
+        'SELECT meta_value FROM media_meta WHERE media_id = :media_id AND meta_key = :meta_key ORDER BY id DESC LIMIT 1'
+    );
+    $stmt->execute([
+        ':media_id' => $mediaId,
+        ':meta_key' => 'seed',
+    ]);
+    $storedSeed = $stmt->fetchColumn();
+    if (is_string($storedSeed) && trim($storedSeed) !== '') {
+        return ['seed' => trim((string)$storedSeed), 'created' => false];
+    }
+
+    $seed = (string)random_int(1_000_000, 9_999_999_999);
+    $now  = date('c');
+    $insert = $pdo->prepare(
+        'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
+    );
+    $insert->execute([
+        $mediaId,
+        SV_FORGE_SCAN_SOURCE_LABEL,
+        'seed',
+        $seed,
+        $now,
+    ]);
+    $logger('Seed generiert und gespeichert: ' . $seed);
+
+    return ['seed' => $seed, 'created' => true];
+}
+
+function sv_encode_init_image(string $path): string
+{
+    $binary = @file_get_contents($path);
+    if ($binary === false || $binary === '') {
+        throw new RuntimeException('Init-Bild konnte nicht gelesen werden.');
+    }
+
+    return base64_encode($binary);
 }
 
 function sv_store_forge_regen_meta(PDO $pdo, int $mediaId, array $info): void
@@ -1982,25 +2204,94 @@ function sv_replace_media_file_with_image(array $config, string $targetPath, str
     ];
 }
 
-function sv_call_forge_sync(array $config, array $payload, callable $logger): array
+function sv_forge_fetch_options(array $endpoint, callable $logger): ?array
 {
-    if (!sv_is_forge_dispatch_enabled($config)) {
-        throw new RuntimeException('Forge-Dispatch ist deaktiviert.');
+    $url      = sv_forge_build_url($endpoint['base_url'], SV_FORGE_OPTIONS_PATH);
+    $headers  = ['Accept: application/json'];
+    $auth     = sv_forge_basic_auth_header($endpoint);
+    if ($auth !== null) {
+        $headers[] = $auth;
     }
 
-    $endpoint = sv_forge_endpoint_config($config, true);
-    if ($endpoint === null) {
-        throw new RuntimeException('Forge-Konfiguration fehlt oder ist unvollständig.');
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'GET',
+            'header'  => implode("\r\n", $headers),
+            'timeout' => $endpoint['timeout'],
+        ],
+    ]);
+
+    $responseBody = @file_get_contents($url, false, $context);
+    if ($responseBody === false) {
+        $logger('Forge-Options konnten nicht gelesen werden.');
+        return null;
     }
 
-    $health = sv_forge_healthcheck($endpoint, $logger);
-    if (!$health['ok']) {
-        throw new SvForgeHttpException(
-            'Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : ''),
-            $health['log_payload'] ?? []
-        );
+    $decoded = json_decode($responseBody, true);
+    return is_array($decoded) ? $decoded : null;
+}
+
+function sv_forge_set_options(array $endpoint, array $options, callable $logger): bool
+{
+    $url      = sv_forge_build_url($endpoint['base_url'], SV_FORGE_OPTIONS_PATH);
+    $headers  = ['Content-Type: application/json'];
+    $auth     = sv_forge_basic_auth_header($endpoint);
+    if ($auth !== null) {
+        $headers[] = $auth;
     }
 
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'POST',
+            'header'  => implode("\r\n", $headers),
+            'content' => json_encode($options, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'timeout' => $endpoint['timeout'],
+        ],
+    ]);
+
+    $responseBody = @file_get_contents($url, false, $context);
+    if ($responseBody === false) {
+        $logger('Forge-Options konnten nicht gesetzt werden.');
+        return false;
+    }
+
+    return true;
+}
+
+function sv_build_sampler_attempt_chain(array $payload): array
+{
+    $chain = [];
+
+    $baseSampler   = isset($payload['sampler']) ? trim((string)$payload['sampler']) : '';
+    $baseScheduler = isset($payload['scheduler']) ? trim((string)$payload['scheduler']) : '';
+    if ($baseSampler !== '' || $baseScheduler !== '') {
+        $chain[] = ['sampler' => $baseSampler ?: null, 'scheduler' => $baseScheduler ?: null];
+    }
+
+    $fallbacks = [
+        ['sampler' => 'DPM++ 2M', 'scheduler' => 'Karras'],
+        ['sampler' => 'Euler a', 'scheduler' => 'Normal'],
+        ['sampler' => 'DPM++ SDE', 'scheduler' => 'Karras'],
+    ];
+
+    foreach ($fallbacks as $fallback) {
+        $exists = false;
+        foreach ($chain as $entry) {
+            if ($entry['sampler'] === $fallback['sampler'] && $entry['scheduler'] === $fallback['scheduler']) {
+                $exists = true;
+                break;
+            }
+        }
+        if (!$exists) {
+            $chain[] = $fallback;
+        }
+    }
+
+    return array_slice($chain, 0, 4);
+}
+
+function sv_execute_forge_payload(array $endpoint, array $payload, callable $logger): array
+{
     $url     = sv_forge_build_url($endpoint['base_url'], sv_forge_target_path($payload));
     $timeout = $endpoint['timeout'];
     $headers = [
@@ -2066,7 +2357,111 @@ function sv_call_forge_sync(array $config, array $payload, callable $logger): ar
         'response_array' => $decoded,
         'response_json'  => json_encode($logPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
         'http_code'      => $httpCode,
+        'log_payload'    => $logPayload,
     ];
+}
+
+function sv_call_forge_sync(array $config, array $payload, callable $logger): array
+{
+    if (!sv_is_forge_dispatch_enabled($config)) {
+        throw new RuntimeException('Forge-Dispatch ist deaktiviert.');
+    }
+
+    $endpoint = sv_forge_endpoint_config($config, true);
+    if ($endpoint === null) {
+        throw new RuntimeException('Forge-Konfiguration fehlt oder ist unvollständig.');
+    }
+
+    $health = sv_forge_healthcheck($endpoint, $logger);
+    if (!$health['ok']) {
+        throw new SvForgeHttpException(
+            'Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : ''),
+            $health['log_payload'] ?? []
+        );
+    }
+
+    $options        = sv_forge_fetch_options($endpoint, $logger);
+    $activeModel    = is_array($options) ? (string)($options['sd_model_checkpoint'] ?? '') : '';
+    $requestedModel = (string)($payload['model'] ?? '');
+    $fallbackModel  = sv_forge_fallback_model($config);
+    $targetModel    = $requestedModel !== '' ? $requestedModel : $fallbackModel;
+
+    if ($activeModel === '' || strtolower($activeModel) !== strtolower($targetModel)) {
+        sv_forge_set_options($endpoint, ['sd_model_checkpoint' => $targetModel], $logger);
+        $options     = sv_forge_fetch_options($endpoint, $logger);
+        $activeModel = is_array($options) ? (string)($options['sd_model_checkpoint'] ?? '') : '';
+    }
+
+    if (strtolower($activeModel) !== strtolower($targetModel)) {
+        sv_forge_set_options($endpoint, ['sd_model_checkpoint' => $fallbackModel], $logger);
+        $options     = sv_forge_fetch_options($endpoint, $logger);
+        $activeModel = is_array($options) ? (string)($options['sd_model_checkpoint'] ?? '') : '';
+        $targetModel = $fallbackModel;
+    }
+
+    if ($activeModel === '' || strtolower($activeModel) !== strtolower($targetModel)) {
+        throw new SvForgeHttpException('model resolve failed', [
+            'requested_model' => $requestedModel,
+            'fallback_model'  => $fallbackModel,
+            'active_model'    => $activeModel,
+        ]);
+    }
+
+    $payload['model'] = $activeModel;
+
+    $attemptChain = sv_build_sampler_attempt_chain($payload);
+    $attemptErrors = [];
+    $usedAttempt   = null;
+    $result        = null;
+
+    foreach ($attemptChain as $index => $attempt) {
+        $attemptPayload = $payload;
+        if ($attempt['sampler'] !== null) {
+            $attemptPayload['sampler'] = $attempt['sampler'];
+        }
+        if ($attempt['scheduler'] !== null) {
+            $attemptPayload['scheduler'] = $attempt['scheduler'];
+        } else {
+            unset($attemptPayload['scheduler']);
+        }
+
+        try {
+            $tryResult = sv_execute_forge_payload($endpoint, $attemptPayload, $logger);
+            $imageInfo = @getimagesizefromstring($tryResult['binary']);
+            $sizeOk    = $imageInfo !== false && (int)$imageInfo[0] > 16 && (int)$imageInfo[1] > 16 && strlen($tryResult['binary']) > 1024;
+            if (!$sizeOk) {
+                throw new SvForgeHttpException('Forge lieferte eine fehlerhafte Bildantwort.', $tryResult['log_payload']);
+            }
+
+            $usedAttempt = $index + 1;
+            $result      = array_merge($tryResult, [
+                'used_sampler'    => $attempt['sampler'],
+                'used_scheduler'  => $attempt['scheduler'],
+                'attempt_index'   => $usedAttempt,
+                'attempt_chain'   => $attemptChain,
+            ]);
+            break;
+        } catch (Throwable $e) {
+            $attemptErrors[] = [
+                'attempt' => $index + 1,
+                'error'   => $e->getMessage(),
+                'log'     => $e instanceof SvForgeHttpException ? $e->getLogData() : null,
+            ];
+
+            if ($index >= 3) {
+                break;
+            }
+        }
+    }
+
+    if ($result === null) {
+        throw new SvForgeHttpException('Forge-Request fehlgeschlagen', [
+            'attempt_chain'  => $attemptChain,
+            'attempt_errors' => $attemptErrors,
+        ]);
+    }
+
+    return $result;
 }
 
 function sv_refresh_media_after_regen(
@@ -2309,6 +2704,10 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             '_sv_worker_pid'        => $workerPid,
             '_sv_worker_started_at' => $workerStart,
             'forge_response'        => $forgeResponse['response_array'] ?? null,
+            'used_sampler'          => $forgeResponse['used_sampler'] ?? ($payload['sampler'] ?? null),
+            'used_scheduler'        => $forgeResponse['used_scheduler'] ?? ($payload['scheduler'] ?? null),
+            'attempt_index'         => $forgeResponse['attempt_index'] ?? null,
+            'attempt_chain'         => $forgeResponse['attempt_chain'] ?? null,
             'result' => [
                 'replaced'        => true,
                 'backup_path'     => $backupPath,
@@ -2359,7 +2758,12 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     } catch (Throwable $e) {
         $responseJson = null;
         if ($forgeResponse !== null) {
-            $responseJson = $forgeResponse['response_json'] ?? null;
+            $errorData = [
+                'attempt_chain' => $forgeResponse['attempt_chain'] ?? null,
+                'attempt_index' => $forgeResponse['attempt_index'] ?? null,
+                'log_payload'   => $forgeResponse['log_payload'] ?? null,
+            ];
+            $responseJson = json_encode($errorData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         } elseif ($e instanceof SvForgeHttpException) {
             $responseJson = json_encode($e->getLogData(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         }
@@ -2625,7 +3029,7 @@ function sv_fetch_worker_meta_for_media_list(PDO $pdo, array $mediaIds): array
     return $meta;
 }
 
-function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10): array
+function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, ?array $config = null): array
 {
     $limit = max(1, $limit);
     $stmt = $pdo->prepare(
@@ -2641,6 +3045,8 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10):
     $workerMeta = sv_fetch_worker_meta_for_media($pdo, $mediaId);
 
     $jobs = [];
+    $fallbackModel = $config !== null ? sv_forge_fallback_model($config) : SV_FORGE_FALLBACK_MODEL;
+
     foreach ($rows as $row) {
         $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
@@ -2650,12 +3056,28 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10):
         $pidInfo      = is_numeric($workerPid) ? sv_is_pid_running((int)$workerPid) : ['running' => false, 'unknown' => $workerPid !== null];
         $promptInfo   = $response['result']['prompt_category'] ?? ($payload['_sv_regen_plan']['category'] ?? null);
 
+        $mode = $payload['_sv_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
+        $usedSampler   = $response['used_sampler'] ?? ($payload['sampler'] ?? null);
+        $usedScheduler = $response['used_scheduler'] ?? ($payload['scheduler'] ?? null);
+        $attemptIndex  = $response['attempt_index'] ?? null;
+        $attemptChain  = $response['attempt_chain'] ?? null;
+        $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
+        $resolvedModel  = $payload['model'] ?? null;
+        $fallbackUsed   = $resolvedModel === $fallbackModel && $requestedModel !== null && $requestedModel !== $resolvedModel;
+
         $jobs[] = [
             'id'                 => (int)$row['id'],
             'status'             => (string)$row['status'],
             'created_at'         => (string)($row['created_at'] ?? ''),
             'updated_at'         => (string)($row['updated_at'] ?? ''),
-            'model'              => $payload['model'] ?? null,
+            'model'              => $resolvedModel,
+            'mode'               => $mode,
+            'seed'               => $payload['seed'] ?? null,
+            'used_sampler'       => $usedSampler,
+            'used_scheduler'     => $usedScheduler,
+            'attempt_index'      => $attemptIndex,
+            'attempt_chain'      => $attemptChain,
+            'fallback_model'     => $fallbackUsed,
             'replaced'           => $response['result']['replaced'] ?? ($row['status'] === 'done'),
             'error'              => $row['error_message'] ?? null,
             'worker_pid'         => $workerPid !== null ? (int)$workerPid : null,

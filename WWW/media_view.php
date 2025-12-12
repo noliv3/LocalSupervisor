@@ -96,7 +96,7 @@ $ajaxAction = isset($_GET['ajax']) && is_string($_GET['ajax']) ? trim((string)$_
 if ($ajaxAction === 'forge_jobs') {
     header('Content-Type: application/json; charset=utf-8');
     try {
-        $jobs = sv_fetch_forge_jobs_for_media($pdo, $id, 10);
+        $jobs = sv_fetch_forge_jobs_for_media($pdo, $id, 10, $config);
         echo json_encode(['jobs' => $jobs], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     } catch (Throwable $e) {
         http_response_code(500);
@@ -838,7 +838,9 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
             const card = document.createElement('div');
             card.className = 'job-card';
             const thumbMarkup = job.replaced ? '<div class="job-thumb"><img src="' + thumbUrl + '" alt="Thumbnail"></div>' : '';
-            card.innerHTML = '\n                <div class="job-header">\n                    <div class="job-title">Job #' + job.id + '</div>\n                    <div class="job-status ' + statusClass(job.status) + '\">' + (job.status || '') + '</div>\n                </div>\n                <div class="job-meta">\n                    <div>Modell: ' + (job.model || '–') + '</div>\n                    <div>Aktualisiert: ' + (job.updated_at || job.created_at || '–') + '</div>\n                    <div>' + (job.replaced ? 'Medium ersetzt' : 'Noch in Bearbeitung') + '</div>\n                    ' + (job.error ? ('<div style="color:#c62828;">Fehler: ' + job.error + '</div>') : '') + '\n                </div>\n                ' + thumbMarkup + '\n            ';
+            const attemptLabel = job.attempt_index ? ('Attempt ' + job.attempt_index + '/' + (job.attempt_chain ? job.attempt_chain.length : 3)) : 'Attempt –';
+            const samplerLabel = (job.used_sampler || '–') + ' / ' + (job.used_scheduler || '–');
+            card.innerHTML = '\n                <div class="job-header">\n                    <div class="job-title">Job #' + job.id + '</div>\n                    <div class="job-status ' + statusClass(job.status) + '\">' + (job.status || '') + '</div>\n                </div>\n                <div class="job-meta">\n                    <div>Modell: ' + (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '') + '</div>\n                    <div>Mode: ' + (job.mode || 'txt2img') + ' | Seed: ' + (job.seed || '–') + '</div>\n                    <div>Sampler/Scheduler: ' + samplerLabel + '</div>\n                    <div>' + attemptLabel + '</div>\n                    <div>Aktualisiert: ' + (job.updated_at || job.created_at || '–') + '</div>\n                    <div>' + (job.replaced ? 'Medium ersetzt' : 'Noch in Bearbeitung') + '</div>\n                    ' + (job.error ? ('<div style="color:#c62828;">Fehler: ' + job.error + '</div>') : '') + '\n                </div>\n                ' + thumbMarkup + '\n            ';
             card.addEventListener('click', function () { window.location.href = targetUrl; });
             container.appendChild(card);
         });
