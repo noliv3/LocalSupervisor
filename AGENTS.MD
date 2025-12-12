@@ -55,6 +55,11 @@
 - Web-Schicht führt keine direkten SQL-Manipulationen auf Jobs aus, sondern ruft die Operations-Helper auf.
 - Neue Job-Typen müssen ihre Steuerlogik an die Job-API in `operations.php` anbinden.
 
+## Asynchrone Scans
+- Scans laufen ausschließlich als Jobs (`scan_path`) über die Job-Queue und werden von dedizierten CLI-Workern abgearbeitet.
+- Web-Einstiege (Dashboard/Media-Ansichten) dürfen Scans nur einreihen und ggf. einen Worker starten, niemals direkt scannen.
+- Scanner/Import-Logik bleibt in `scan_core.php`; Worker/Queue-Handling gehört nach `operations.php` und `SCRIPTS/scan_worker_cli.php`.
+
 ## Integritäts- und Reparaturfunktionen
 - Integritätsprüfungen und Reparaturen müssen vollständig über `SCRIPTS/operations.php` laufen.
 - Webcode darf keine Reparaturlogik inline ausführen; er ruft ausschließlich die zentralen Operationen auf.

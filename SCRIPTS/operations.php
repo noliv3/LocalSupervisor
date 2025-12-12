@@ -9,6 +9,7 @@ require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
 
 const SV_FORGE_JOB_TYPE           = 'forge_regen';
+const SV_JOB_TYPE_SCAN_PATH       = 'scan_path';
 const SV_JOB_TYPE_LIBRARY_RENAME  = 'library_rename';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
 const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
@@ -749,10 +750,25 @@ function sv_job_summary_from_row(array $row): string
 {
     $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
     $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+    $type     = (string)($row['type'] ?? '');
+    $status   = (string)($row['status'] ?? '');
 
     $parts = [];
     if (is_array($payload) && isset($payload['model'])) {
         $parts[] = 'Modell: ' . (string)$payload['model'];
+    }
+    if ($type === SV_JOB_TYPE_SCAN_PATH) {
+        $path  = is_string($payload['path'] ?? null) ? (string)$payload['path'] : '';
+        $limit = isset($payload['limit']) ? (int)$payload['limit'] : null;
+        if ($path !== '') {
+            $parts[] = 'Pfad: ' . $path;
+        }
+        if ($limit !== null && $limit > 0) {
+            $parts[] = 'Limit: ' . $limit;
+        }
+    }
+    if ($status !== '') {
+        $parts[] = 'Status: ' . $status;
     }
     if (is_array($response) && isset($response['error'])) {
         $parts[] = 'Response-Error: ' . trim((string)$response['error']);
@@ -837,6 +853,265 @@ function sv_list_jobs(PDO $pdo, array $filters = [], int $limit = 100): array
             'created_at' => (string)($row['created_at'] ?? ''),
             'updated_at' => (string)($row['updated_at'] ?? ''),
             'summary'    => sv_job_summary_from_row($row),
+        ];
+    }
+
+    return $jobs;
+}
+
+function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array
+{
+    $scanPath = trim($scanPath);
+    if ($scanPath === '') {
+        throw new InvalidArgumentException('Scan-Pfad fehlt.');
+    }
+    if (mb_strlen($scanPath) > 500) {
+        throw new InvalidArgumentException('Scan-Pfad zu lang (max. 500 Zeichen).');
+    }
+
+    $real = realpath($scanPath);
+    if ($real === false || !is_dir($real)) {
+        throw new RuntimeException('Pfad nicht gefunden oder kein Verzeichnis: ' . $scanPath);
+    }
+
+    $limit = $limit !== null && $limit > 0 ? $limit : null;
+    $now   = date('c');
+    $payload = [
+        'path'            => rtrim(str_replace('\\', '/', $real), '/'),
+        'requested_path'  => $scanPath,
+        'limit'           => $limit,
+        'nsfw_threshold'  => (float)(($config['scanner']['nsfw_threshold'] ?? 0.7)),
+        'created_at'      => $now,
+    ];
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
+        . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
+    );
+    $stmt->execute([
+        ':media_id'   => 0,
+        ':type'       => SV_JOB_TYPE_SCAN_PATH,
+        ':status'     => 'queued',
+        ':created_at' => $now,
+        ':updated_at' => $now,
+        ':payload'    => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+    ]);
+
+    $jobId = (int)$pdo->lastInsertId();
+    $logger('Scan-Job angelegt: ID=' . $jobId . ' (' . $payload['path'] . ')');
+
+    sv_audit_log($pdo, 'scan_job_created', 'jobs', $jobId, [
+        'path'   => $payload['path'],
+        'limit'  => $limit,
+        'job_id' => $jobId,
+    ]);
+
+    return [
+        'job_id'  => $jobId,
+        'payload' => $payload,
+    ];
+}
+
+function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, callable $logger): array
+{
+    if (!sv_is_cli() && !sv_has_valid_internal_key()) {
+        throw new RuntimeException('Internal-Key erforderlich, um Scan-Worker zu starten.');
+    }
+
+    $baseDir   = sv_base_dir();
+    $script    = $baseDir . '/SCRIPTS/scan_worker_cli.php';
+    $startedAt = date('c');
+    $pid       = null;
+    $unknown   = false;
+
+    $parts = ['php', escapeshellarg($script)];
+    if ($limit !== null && $limit > 0) {
+        $parts[] = '--limit=' . (int)$limit;
+    }
+    if ($pathFilter !== null && trim($pathFilter) !== '') {
+        $parts[] = '--path=' . escapeshellarg($pathFilter);
+    }
+    $cmd = implode(' ', $parts);
+
+    $logger('Starte Scan-Worker: ' . $cmd);
+
+    if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
+        $winCmd = 'start /B "" ' . $cmd;
+        $proc   = @popen($winCmd, 'r');
+        if ($proc !== false) {
+            pclose($proc);
+        }
+        $unknown = true;
+    } else {
+        $fullCmd = $cmd . ' > /dev/null 2>&1 & echo $!';
+        $output  = @shell_exec($fullCmd);
+        if ($output !== null && trim($output) !== '') {
+            $pid = (int)trim($output);
+            if ($pid <= 0) {
+                $pid = null;
+            }
+        } else {
+            $unknown = true;
+        }
+    }
+
+    return [
+        'pid'     => $pid,
+        'started' => $startedAt,
+        'unknown' => $unknown,
+    ];
+}
+
+function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
+{
+    $jobId   = (int)($jobRow['id'] ?? 0);
+    $payload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true) ?: [];
+
+    $path = is_string($payload['path'] ?? null) ? trim((string)$payload['path']) : '';
+    $limit = isset($payload['limit']) ? (int)$payload['limit'] : null;
+    if ($limit !== null && $limit <= 0) {
+        $limit = null;
+    }
+
+    if ($path === '') {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Scan-Job ohne Pfad.');
+        throw new RuntimeException('Scan-Job #' . $jobId . ' hat keinen Pfad.');
+    }
+
+    $jobLogger = function (string $msg) use ($logger, $jobId): void {
+        $logger('[Job ' . $jobId . '] ' . $msg);
+    };
+
+    sv_update_job_status($pdo, $jobId, 'running');
+    $jobLogger('Beginne Scan für ' . $path . ($limit !== null ? ' (limit=' . $limit . ')' : ''));
+
+    $result = sv_run_scan_operation($pdo, $config, $path, $limit, $jobLogger);
+
+    $response = [
+        'path'         => $path,
+        'limit'        => $limit,
+        'result'       => $result,
+        'completed_at' => date('c'),
+    ];
+
+    sv_update_job_status(
+        $pdo,
+        $jobId,
+        'done',
+        json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        null
+    );
+
+    sv_audit_log($pdo, 'scan_job_done', 'jobs', $jobId, [
+        'path'     => $path,
+        'limit'    => $limit,
+        'result'   => $result,
+        'job_id'   => $jobId,
+    ]);
+
+    return [
+        'job_id' => $jobId,
+        'status' => 'done',
+        'result' => $result,
+    ];
+}
+
+function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?string $pathFilter = null): array
+{
+    $sql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
+    if ($limit !== null && $limit > 0) {
+        $sql .= ' LIMIT :limit';
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue(':type', SV_JOB_TYPE_SCAN_PATH, PDO::PARAM_STR);
+    if ($limit !== null && $limit > 0) {
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    }
+    $stmt->execute();
+
+    $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $processed = 0;
+    $done      = 0;
+    $errors    = 0;
+
+    $filter = null;
+    if ($pathFilter !== null && trim($pathFilter) !== '') {
+        $normalized = realpath($pathFilter);
+        $filter = $normalized !== false ? rtrim(str_replace('\\', '/', $normalized), '/') : trim($pathFilter);
+    }
+
+    foreach ($jobs as $jobRow) {
+        $jobId = (int)($jobRow['id'] ?? 0);
+        $payload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true) ?: [];
+        $jobPath = is_string($payload['path'] ?? null) ? rtrim(str_replace('\\', '/', (string)$payload['path']), '/') : '';
+
+        if ($filter !== null && $jobPath !== '' && strpos($jobPath, $filter) !== 0) {
+            continue;
+        }
+
+        try {
+            $processed++;
+            $logger('Verarbeite Scan-Job #' . $jobId . ' (' . $jobPath . ')');
+            sv_process_single_scan_job($pdo, $config, $jobRow, $logger);
+            $done++;
+        } catch (Throwable $e) {
+            $errors++;
+            sv_update_job_status($pdo, $jobId, 'error', null, $e->getMessage());
+            sv_audit_log($pdo, 'scan_job_failed', 'jobs', $jobId, [
+                'error'  => $e->getMessage(),
+                'job_id' => $jobId,
+            ]);
+            $logger('Fehler bei Scan-Job #' . $jobId . ': ' . $e->getMessage());
+        }
+    }
+
+    return [
+        'total' => $processed,
+        'done'  => $done,
+        'error' => $errors,
+    ];
+}
+
+function sv_fetch_scan_jobs(PDO $pdo, ?string $pathFilter = null, int $limit = 20): array
+{
+    $limit = max(1, min(100, $limit));
+
+    $stmt = $pdo->prepare('SELECT * FROM jobs WHERE type = :type ORDER BY id DESC LIMIT :limit');
+    $stmt->bindValue(':type', SV_JOB_TYPE_SCAN_PATH, PDO::PARAM_STR);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $jobs = [];
+
+    $filter = null;
+    if ($pathFilter !== null && trim($pathFilter) !== '') {
+        $normalized = realpath($pathFilter);
+        $filter = $normalized !== false ? rtrim(str_replace('\\', '/', $normalized), '/') : trim($pathFilter);
+    }
+
+    foreach ($rows as $row) {
+        $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
+        $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
+        $path     = is_string($payload['path'] ?? null) ? rtrim((string)$payload['path'], '/') : '';
+
+        if ($filter !== null && $path !== '' && strpos($path, $filter) !== 0) {
+            continue;
+        }
+
+        $jobs[] = [
+            'id'          => (int)($row['id'] ?? 0),
+            'status'      => (string)($row['status'] ?? ''),
+            'path'        => $path,
+            'limit'       => isset($payload['limit']) ? (int)$payload['limit'] : null,
+            'created_at'  => (string)($row['created_at'] ?? ''),
+            'updated_at'  => (string)($row['updated_at'] ?? ''),
+            'result'      => $response['result'] ?? null,
+            'error'       => $row['error_message'] ?? null,
+            'worker_pid'  => $response['_sv_worker_pid'] ?? null,
+            'worker_started_at' => $response['_sv_worker_started_at'] ?? null,
         ];
     }
 

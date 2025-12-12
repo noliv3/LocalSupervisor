@@ -24,7 +24,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | audit_log | Security-relevante Aktionen (IP/Key/Action) | Indizes auf created_at |
 
 ## Funktionen und Workflows
-- **Scan**: `scan_core` identifiziert Typ (Bild/Video), berechnet Hash, extrahiert Basis-Metadaten, ruft den konfigurierten Scanner via HTTP, verschiebt Dateien in die gültigen SFW/NSFW-Zielpfade und schreibt `media`, `scan_results`, `tags/media_tags`, `import_log` sowie `media_meta`/`prompts`.
+- **Scan**: `scan_core` identifiziert Typ (Bild/Video), berechnet Hash, extrahiert Basis-Metadaten, ruft den konfigurierten Scanner via HTTP, verschiebt Dateien in die gültigen SFW/NSFW-Zielpfade und schreibt `media`, `scan_results`, `tags/media_tags`, `import_log` sowie `media_meta`/`prompts`. Bekannte System-/Trash-Ordner (`$RECYCLE.BIN`, `System Volume Information`, `.Trash` u. a.) werden rekursiv übersprungen; Berechtigungsfehler erhöhen nur den Error-Zähler und brechen den Lauf nicht ab.
 - **Rescan**: Sendet vorhandene Medien erneut an den Scanner, aktualisiert Status/Ratings/NSFW und füllt fehlende Metadaten nach.
 - **Filesync**: Prüft die Existenz der `media.path`-Einträge und setzt Status `active`/`missing`; optional in Batches.
 - **Prompt-Extraktion & -Normalisierung**: Kandidaten aus EXIF-Kommentaren, PNG-Text, Parameter-Strings und JSON-Blöcken werden gesammelt, gewichtet und in `prompts` strukturiert; Raw-Blöcke landen parallel in `media_meta`.
@@ -39,6 +39,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Konfiguration**: `CONFIG/config.php` definiert DB-DSN, Pfade für SFW/NSFW-Bild/Video, Logs/Temp/Backups, optionale Tool-Pfade (ffmpeg/exiftool), Scanner-Endpunkte (Base-URL, Token, Timeouts, NSFW-Schwelle), Sicherheitsparameter (internal_api_key, ip_whitelist).
 - **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
+
+## Asynchrone Scans
+
+- Web-Trigger für Scans legen ausschließlich Jobs vom Typ `scan_path` in der Queue an und starten automatisch einen dedizierten Worker im Hintergrund.
+- Der Worker läuft rein im CLI-Kontext (`SCRIPTS/scan_worker_cli.php`) und zieht queued/running-Scans ohne Web-Timeouts ab, Status landet in `jobs.status/forge_response_json`.
+- Beispiel: `php SCRIPTS/scan_worker_cli.php --path="/data/import" --limit=5` verarbeitet maximal fünf anstehende Scans für den angegebenen Wurzelpfad.
 
 ## CLI- und Web-Operations
 > Hinweis: Alle CLI-Kommandos laufen ausschließlich über `SCRIPTS/`; im `WWW/`-Verzeichnis existieren keine parallelen CLI-Dateien mehr (Legacy-Wrapper wurden entfernt). Deployments sollten sicherstellen, dass nur das bereinigte `WWW/`-Set auf dem Webserver liegt.
