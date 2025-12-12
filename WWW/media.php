@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+$hasInternalAccess = sv_validate_internal_access($config, 'media_grid', false);
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -58,6 +59,7 @@ $showAdult =
 
 $actionMessage = null;
 $actionSuccess = null;
+$hiddenForgeReasons = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
@@ -133,6 +135,7 @@ if ($statusFilter === 'active') {
 }
 
 $whereSql = implode(' AND ', $where);
+$promptCompleteClause = sv_prompt_core_complete_condition('p4');
 
 /* Gesamtanzahl für Pagination */
 $countSql = 'SELECT COUNT(*) AS cnt FROM media m WHERE ' . $whereSql;
@@ -141,7 +144,9 @@ $countStmt->execute($params);
 $total = (int)$countStmt->fetchColumn();
 
 /* Daten holen */
-$listSql = 'SELECT m.id, m.path, m.type, m.is_missing, m.has_nsfw, m.rating, m.created_at, m.imported_at, m.updated_at
+$listSql = 'SELECT m.id, m.path, m.type, m.status, m.is_missing, m.has_nsfw, m.rating, m.created_at, m.imported_at, m.updated_at,
+            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id) AS prompt_present
             FROM media m
             WHERE ' . $whereSql . '
             ORDER BY m.id DESC
@@ -160,7 +165,6 @@ $rows = $listStmt->fetchAll(PDO::FETCH_ASSOC);
 $pages      = max(1, (int)ceil($total / $perPage));
 $mediaIds   = array_map('intval', array_column($rows, 'id'));
 $jobsData   = sv_fetch_forge_jobs_grouped($pdo, $mediaIds, 6);
-$prefillKey = htmlspecialchars((string)($_GET['internal_key'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 ?>
 <!doctype html>
 <html lang="de">
@@ -372,12 +376,36 @@ $prefillKey = htmlspecialchars((string)($_GET['internal_key'] ?? ''), ENT_QUOTES
             <?php foreach ($rows as $row):
                 $id        = (int)$row['id'];
                 $path      = (string)$row['path'];
+                $status    = (string)($row['status'] ?? '');
                 $isMissing = (int)($row['is_missing'] ?? 0) === 1;
                 $hasNsfw   = (int)($row['has_nsfw'] ?? 0) === 1;
                 $rating    = (int)($row['rating'] ?? 0);
+                $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
 
                 $thumbUrl  = 'thumb.php?id=' . $id;
                 $detailUrl = sv_media_view_url($id, $showAdult);
+                $forgeAllowed = true;
+                $forgeReason  = '';
+                if (!$hasInternalAccess) {
+                    $forgeAllowed = false;
+                    $forgeReason  = 'Internal-Key fehlt/ungültig.';
+                } elseif ($row['type'] !== 'image') {
+                    $forgeAllowed = false;
+                    $forgeReason  = 'Nur Bildmedien werden unterstützt.';
+                } elseif ($isMissing || $status === 'missing') {
+                    $forgeAllowed = false;
+                    $forgeReason  = 'Medium als fehlend markiert.';
+                } elseif (!$promptComplete) {
+                    $forgeAllowed = false;
+                    $forgeReason  = 'Prompt unvollständig.';
+                } elseif ($path === '') {
+                    $forgeAllowed = false;
+                    $forgeReason  = 'Pfad fehlt.';
+                }
+
+                if (!$forgeAllowed) {
+                    $hiddenForgeReasons[$forgeReason] = ($hiddenForgeReasons[$forgeReason] ?? 0) + 1;
+                }
                 ?>
                 <div class="item<?= $isMissing ? ' missing' : '' ?>" data-media-id="<?= $id ?>">
                     <div class="thumb-wrap">
@@ -409,15 +437,22 @@ $prefillKey = htmlspecialchars((string)($_GET['internal_key'] ?? ''), ENT_QUOTES
                             <span class="badge">missing</span>
                         <?php endif; ?>
                     </div>
-                    <form method="post" class="forge-form">
-                        <input type="hidden" name="action" value="forge_regen">
-                        <input type="hidden" name="media_id" value="<?= $id ?>">
-                        <input type="hidden" name="internal_key" value="<?= $prefillKey ?>">
-                        <button type="submit">Forge Regen</button>
-                    </form>
+                    <?php if ($forgeAllowed): ?>
+                        <form method="post" class="forge-form">
+                            <input type="hidden" name="action" value="forge_regen">
+                            <input type="hidden" name="media_id" value="<?= $id ?>">
+                            <button type="submit">Forge Regen</button>
+                        </form>
+                    <?php else: ?>
+                        <div class="help-text">Forge-Regen ausgeblendet: <?= htmlspecialchars($forgeReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <?php endif; ?>
                 </div>
             <?php endforeach; ?>
         </div>
+
+        <?php if ($hiddenForgeReasons !== []): ?>
+            <?php error_log('Forge Regen hidden in media.php: ' . json_encode($hiddenForgeReasons)); ?>
+        <?php endif; ?>
 
         <div class="pager">
             Seite <?= (int)$page ?> / <?= (int)$pages ?> |

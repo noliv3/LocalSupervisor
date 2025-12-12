@@ -4,6 +4,7 @@ declare(strict_types=1);
 $config = require __DIR__ . '/../CONFIG/config.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+$hasInternalAccess = sv_validate_internal_access($config, 'media_view', false);
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -304,8 +305,28 @@ $promptQuality = sv_analyze_prompt_quality($prompt, $tags);
 $promptQualityIssues = array_slice($promptQuality['issues'] ?? [], 0, 3);
 
 $type = (string)$media['type'];
-$canForgeRegen = $type === 'image' && $consistencyStatus['prompt_complete'];
+$isMissing = (int)($media['is_missing'] ?? 0) === 1 || (string)($media['status'] ?? '') === 'missing';
+$hasFileIssue = array_reduce($mediaIssues, static function (bool $carry, array $issue): bool {
+    return $carry || ((string)($issue['type'] ?? '') === 'file');
+}, false);
+$forgeEligible = $type === 'image' && !$isMissing && $consistencyStatus['prompt_complete'] && !$hasFileIssue;
+$forgeHiddenReason = '';
+if (!$hasInternalAccess) {
+    $forgeHiddenReason = 'Internal-Key fehlt oder ist ungültig.';
+} elseif ($type !== 'image') {
+    $forgeHiddenReason = 'Forge-Regen nur für Bildmedien verfügbar.';
+} elseif ($isMissing) {
+    $forgeHiddenReason = 'Medium als missing markiert.';
+} elseif ($hasFileIssue) {
+    $forgeHiddenReason = 'Dateipfad oder Konsistenzproblem blockiert Forge-Regen.';
+} elseif (!$consistencyStatus['prompt_complete']) {
+    $forgeHiddenReason = 'Prompt unvollständig – Forge-Regen nicht möglich.';
+}
+$canForgeRegen = $forgeEligible && $hasInternalAccess;
 $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
+if (!$canForgeRegen && $forgeHiddenReason !== '') {
+    error_log('Forge regen hidden in media_view.php for #' . $id . ': ' . $forgeHiddenReason);
+}
 ?>
 <!doctype html>
 <html lang="de">
@@ -702,6 +723,8 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
                 <input type="hidden" name="action" value="forge_regen">
                 <button type="submit">Regen über Forge</button>
             </form>
+        <?php elseif ($forgeHiddenReason !== ''): ?>
+            <div class="action-note">Forge-Regen nicht möglich: <?= htmlspecialchars($forgeHiddenReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
         <?php endif; ?>
 
         <form method="post" style="display:inline-block; margin-right:8px;" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
