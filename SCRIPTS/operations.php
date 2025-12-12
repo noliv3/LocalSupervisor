@@ -79,7 +79,8 @@ function sv_forge_response_snippet(?string $body, int $limit = 200): ?string
         return null;
     }
 
-    $snippet = mb_substr($body, 0, $limit);
+    $substr  = function_exists('mb_substr') ? 'mb_substr' : 'substr';
+    $snippet = $substr($body, 0, $limit);
     return $snippet === '' ? null : $snippet;
 }
 
