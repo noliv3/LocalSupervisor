@@ -28,6 +28,8 @@
 - README und AGENTS müssen aktuelle Abläufe, Schnittstellen und Sicherheitsregeln widerspiegeln, sobald sie geändert werden.
 - Prompt-Qualität wird zentral in `SCRIPTS/operations.php` bewertet; Web-Views und Forge-Fallbacks nutzen ausschließlich diese
   Funktionen (keine eigenen Heuristiken in den PHP-Views).
+- Internal-Key kann einmalig per `?internal_key=` gesetzt werden; bei gültigem Key (IP-Whitelist vorausgesetzt) wird er für die Session/als HttpOnly-Cookie gemerkt, ohne den Wert in Klartext zu loggen.
+- Forge-Regen-Buttons bleiben nur bei Bildmedien mit vollständigem Prompt und konsistentem Pfad sichtbar; ansonsten UI-Hinweis und Logging des Grundes.
 
 ## Hashbasierte Library / Dupes
 - Importiert wird nur noch in das Schema `<hh>/<hash>.<ext>` innerhalb der konfigurierten Roots (`sv_resolve_library_path`).

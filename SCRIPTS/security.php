@@ -8,6 +8,17 @@ require_once __DIR__ . '/logging.php';
 
 $GLOBALS['sv_last_internal_key_valid'] = false;
 
+function sv_ensure_session_started(): void
+{
+    if (sv_is_cli()) {
+        return;
+    }
+
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+}
+
 function sv_is_cli(): bool
 {
     return PHP_SAPI === 'cli';
@@ -42,62 +53,104 @@ function sv_get_client_ip(): string
     return '';
 }
 
-function sv_get_internal_key_from_request(): string
-{
-    if (!empty($_SERVER['HTTP_X_INTERNAL_KEY'])) {
-        return (string)$_SERVER['HTTP_X_INTERNAL_KEY'];
-    }
-    if (isset($_COOKIE['internal_key'])) {
-        return (string)$_COOKIE['internal_key'];
-    }
-    if (isset($_GET['internal_key'])) {
-        return (string)$_GET['internal_key'];
-    }
-    if (isset($_POST['internal_key'])) {
-        return (string)$_POST['internal_key'];
-    }
-
-    return '';
-}
-
-function sv_require_internal_access(array $config, string $action): void
+function sv_validate_internal_access(array $config, string $action, bool $hardFail = true): bool
 {
     $GLOBALS['sv_last_internal_key_valid'] = false;
 
     if (sv_is_cli()) {
         $GLOBALS['sv_last_internal_key_valid'] = true;
-        return;
+        return true;
     }
 
-    $security = $config['security'] ?? [];
+    $security    = $config['security'] ?? [];
     $expectedKey = trim((string)($security['internal_api_key'] ?? ''));
     $clientIp    = sv_get_client_ip();
     $whitelist   = $security['ip_whitelist'] ?? [];
 
     if ($expectedKey === '') {
         sv_security_log($config, 'Security misconfigured: internal key missing', ['action' => $action, 'ip' => $clientIp]);
-        sv_security_error(500, 'Security misconfigured: internal_api_key missing.');
+        if ($hardFail) {
+            sv_security_error(500, 'Security misconfigured: internal_api_key missing.');
+        }
+        return false;
     }
 
     if (is_array($whitelist) && $whitelist !== []) {
         if (!in_array($clientIp, $whitelist, true)) {
             sv_security_log($config, 'IP not whitelisted', ['action' => $action, 'ip' => $clientIp]);
-            sv_security_error(403, 'Forbidden: IP not whitelisted.');
+            if ($hardFail) {
+                sv_security_error(403, 'Forbidden: IP not whitelisted.');
+            }
+            return false;
         }
     }
 
-    $providedKey = sv_get_internal_key_from_request();
+    sv_ensure_session_started();
+
+    $candidates = [
+        'header'  => $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '',
+        'get'     => $_GET['internal_key']          ?? '',
+        'post'    => $_POST['internal_key']         ?? '',
+        'session' => $_SESSION['sv_internal_key']   ?? '',
+        'cookie'  => $_COOKIE['internal_key']       ?? '',
+    ];
+
+    $providedKey    = '';
+    $providedSource = '';
+    foreach (['header', 'get', 'post', 'session', 'cookie'] as $src) {
+        $value = $candidates[$src] ?? '';
+        if (is_string($value)) {
+            $value = trim($value);
+        }
+        if ($value !== '') {
+            $providedKey    = (string)$value;
+            $providedSource = $src;
+            break;
+        }
+    }
+
     if ($providedKey === '') {
-        sv_security_log($config, 'Missing internal key', ['action' => $action, 'ip' => $clientIp]);
-        sv_security_error(403, 'Forbidden: internal key required.');
+        if ($hardFail) {
+            sv_security_log($config, 'Missing internal key', ['action' => $action, 'ip' => $clientIp]);
+            sv_security_error(403, 'Forbidden: internal key required.');
+        }
+        return false;
     }
 
     if (!hash_equals($expectedKey, $providedKey)) {
-        sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp]);
-        sv_security_error(403, 'Forbidden: invalid internal key.');
+        if ($hardFail) {
+            sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp, 'source' => $providedSource]);
+            sv_security_error(403, 'Forbidden: invalid internal key.');
+        }
+        return false;
+    }
+
+    if (in_array($providedSource, ['header', 'get', 'post'], true)) {
+        $_SESSION['sv_internal_key'] = $expectedKey;
+        if (!headers_sent()) {
+            $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+            setcookie('internal_key', $expectedKey, [
+                'expires'  => time() + 7 * 24 * 60 * 60,
+                'path'     => '/',
+                'samesite' => 'Lax',
+                'secure'   => $secureCookie,
+                'httponly' => true,
+            ]);
+        }
+        sv_security_log($config, 'Internal key stored for session', [
+            'action' => $action,
+            'ip'     => $clientIp,
+            'source' => $providedSource,
+        ]);
     }
 
     $GLOBALS['sv_last_internal_key_valid'] = true;
+    return true;
+}
+
+function sv_require_internal_access(array $config, string $action): void
+{
+    sv_validate_internal_access($config, $action, true);
 }
 
 function sv_has_valid_internal_key(): bool

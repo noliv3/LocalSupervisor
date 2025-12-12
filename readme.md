@@ -34,6 +34,11 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Einzel-Rebuild / logisches Löschen**: In `media_view.php` können einzelne Medien erneut durch die Prompt-Pipeline geschickt oder als `missing` markiert werden (keine Dateilöschung, Status-Umschaltung über `operations.php`).
 - **Sicherheitsmodell**: Schreibende Webaktionen verlangen Internal-Key + IP-Whitelist; Pfadvalidierung verhindert Symlinks/Webroot-Bypass; Audit-Log dokumentiert kritische Operationen.
 
+## Internal Access
+- Internal-Key bleibt in `CONFIG/config.php` definiert und wird nicht in Klartext-Logs geschrieben.
+- Einmalig `?internal_key=<key>` (GET oder POST) aufrufen reicht: Bei gültigem Key und Whitelist-IP wird der Wert für die Dauer der PHP-Session und in einem HttpOnly-Cookie hinterlegt; Folge-Requests brauchen den Parameter nicht mehr.
+- IP-Whitelist bleibt bestehen; bei nicht erlaubter Quell-IP schlägt der Zugriff weiterhin fehl.
+
 ## Installation / Setup
 - **Voraussetzungen**: PHP 8.1+ mit PDO (SQLite/MySQL), JSON, mbstring, fileinfo, gd/imagick; optional ffmpeg (Video/Thumbnails), exiftool (Metadaten). Datenbank per SQLite-File oder MySQL/MariaDB.
 - **Konfiguration**: `CONFIG/config.php` definiert DB-DSN, Pfade für SFW/NSFW-Bild/Video, Logs/Temp/Backups, optionale Tool-Pfade (ffmpeg/exiftool), Scanner-Endpunkte (Base-URL, Token, Timeouts, NSFW-Schwelle), Sicherheitsparameter (internal_api_key, ip_whitelist).
@@ -89,6 +94,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Replace in place**: Der Worker ersetzt die Datei auf demselben Pfad (inkl. Hash/Größe/Auflösung-Update), legt Backups an und führt danach Re-Scan/Metadaten-/Prompt-Aktualisierung durch, damit Tags/Prompts/Meta zum neuen Bild passen.
 - **Job-Verfolgung**: Die Job-Request/Response-Daten werden in `jobs.forge_request_json`/`jobs.forge_response_json` abgelegt; Statusübergänge (queued/running/done/error) bleiben auditierbar. Media-Details zeigen die letzten Jobs mit Status/Modell, das Dashboard fasst Zählungen zusammen.
 - **Versionen (read-only)**: `media_view.php` zeigt eine Versionsliste pro Medium. Version 0 entspricht dem Import, weitere Versionen stammen aus `forge_regen`-Jobs (Status ok/error). Sichtbar sind Zeitstempel, Quelle, gewünschtes/benutztes Modell, Prompt-Kategorie/Fallback, Hash-Wechsel sowie Backuppfad (falls vorhanden); keine Restore-Funktion.
+- **Button-Sichtbarkeit**: Forge-Regen-Buttons erscheinen nur bei Bildmedien mit vollständigem Prompt und konsistentem Pfad. `media_view.php` blendet den Button aus und begründet dies (Prompt unvollständig, Medium missing, kein Internal-Key). `media.php` zeigt den Button pro Bild an, sofern keine Missing-/Konsistenzmarkierung vorliegt und Internal-Key-Zugriff besteht.
 
 ### Job-Center (Dashboard)
 - `WWW/index.php` bietet einen Job-Center-Block mit Filtern für `job_type`, `status`, `media_id` und Zeitfenster (24h/7d/30d).
