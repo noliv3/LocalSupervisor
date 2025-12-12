@@ -20,6 +20,14 @@ try {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'scan_jobs') {
+    $pathFilter = isset($_GET['path']) && is_string($_GET['path']) ? trim($_GET['path']) : null;
+    $jobs       = sv_fetch_scan_jobs($pdo, $pathFilter, 25);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['jobs' => $jobs], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 $lastPath    = '';
 $jobMessage  = null;
 $logFile     = null;
@@ -91,13 +99,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             [$logFile, $logger] = sv_create_operation_log($config, 'scan', $logLines, 50);
 
             try {
-                sv_run_scan_operation($pdo, $config, $lastPath, $limit, $logger);
-                $jobMessage = 'Scan abgeschlossen.';
+                $job     = sv_create_scan_job($pdo, $config, $lastPath, $limit, $logger);
+                $worker  = sv_spawn_scan_worker($config, $job['payload']['path'] ?? $lastPath, null, $logger);
+                $jobId   = (int)($job['job_id'] ?? 0);
+
+                if ($jobId > 0) {
+                    sv_merge_job_response_metadata($pdo, $jobId, [
+                        '_sv_worker_pid'        => $worker['pid'],
+                        '_sv_worker_started_at' => $worker['started'],
+                    ]);
+                }
+
+                $jobMessage = 'Scan-Job eingereiht (#' . $jobId . ').';
+                if (!empty($worker['pid'])) {
+                    $jobMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
+                }
+                if (!empty($worker['unknown'])) {
+                    $jobMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
+                }
+
                 sv_audit_log($pdo, 'scan_start', 'fs', null, [
-                    'path'       => $lastPath,
-                    'limit'      => $limit,
-                    'log_file'   => $logFile,
-                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                    'path'        => $lastPath,
+                    'limit'       => $limit,
+                    'log_file'    => $logFile,
+                    'user_agent'  => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                    'job_id'      => $jobId,
+                    'worker_pid'  => $worker['pid'] ?? null,
+                    'worker_note' => $worker['unknown'] ? 'pid_unknown' : 'pid_recorded',
                 ]);
             } catch (Throwable $e) {
                 $jobMessage = 'Scan-Fehler: ' . $e->getMessage();
@@ -428,6 +456,12 @@ $cliEntries = [
         'example'     => 'php SCRIPTS\\scan_path_cli.php "D:\\Import" --limit=250',
     ],
     [
+        'name'        => 'scan_worker_cli.php',
+        'category'    => 'Import/Scan',
+        'description' => 'Abarbeitung der scan_path-Queue im Hintergrund (keine Web-Timeouts).',
+        'example'     => 'php SCRIPTS\\scan_worker_cli.php --limit=5',
+    ],
+    [
         'name'        => 'rescan_cli.php',
         'category'    => 'Import/Scan',
         'description' => 'Erneuert fehlende Scan-Ergebnisse für bestehende Medien.',
@@ -541,6 +575,12 @@ $cliEntries = [
         </label>
         <button type="submit">Scan starten</button>
     </form>
+
+    <div id="scan-job-status">
+        <h3>Scan-Queue (asynchron)</h3>
+        <p>Scans laufen jetzt ausschließlich als Jobs über den Scan-Worker.</p>
+        <div id="scan-jobs-list">Lade Scan-Status ...</div>
+    </div>
 
     <h2>Bestehende Medien neu scannen (nur ohne Scan-Ergebnis)</h2>
     <form method="post">
@@ -920,5 +960,55 @@ $cliEntries = [
             </ul>
         <?php endif; ?>
     <?php endif; ?>
+
+    <script>
+    (function () {
+        const target = document.getElementById('scan-jobs-list');
+        if (!target) {
+            return;
+        }
+
+        const escapeHtml = (str) => (str || '').toString()
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+
+        async function loadScanJobs() {
+            try {
+                const pathInput = document.querySelector('input[name="scan_path"]');
+                const path = pathInput && pathInput.value ? pathInput.value.trim() : '';
+                const url = 'index.php?ajax=scan_jobs' + (path !== '' ? '&path=' + encodeURIComponent(path) : '');
+                const response = await fetch(url);
+                const data = await response.json();
+                const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+                if (jobs.length === 0) {
+                    target.innerHTML = '<p>Keine Scan-Jobs vorhanden.</p>';
+                    return;
+                }
+
+                const items = jobs.map((job) => {
+                    const status = escapeHtml(job.status || 'unbekannt');
+                    const pathText = escapeHtml(job.path || '(Pfad fehlt)');
+                    const limitText = job.limit ? ' | Limit ' + escapeHtml(job.limit) : '';
+                    const worker = job.worker_pid ? ' | Worker PID ' + escapeHtml(job.worker_pid) : '';
+                    const result = job.result || {};
+                    const stats = typeof result === 'object'
+                        ? ` | processed=${escapeHtml(result.processed ?? 0)}, skipped=${escapeHtml(result.skipped ?? 0)}, errors=${escapeHtml(result.errors ?? 0)}`
+                        : '';
+                    return `<li><strong>#${escapeHtml(job.id)}</strong> ${status} – ${pathText}${limitText}${worker}${stats}</li>`;
+                });
+
+                target.innerHTML = '<ul>' + items.join('') + '</ul>';
+            } catch (err) {
+                target.innerHTML = '<p>Scan-Status konnte nicht geladen werden.</p>';
+            }
+        }
+
+        loadScanJobs();
+        setInterval(loadScanJobs, 5000);
+    })();
+    </script>
 </body>
 </html>

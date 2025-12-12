@@ -43,6 +43,14 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'forge_jobs') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'scan_jobs') {
+    $pathFilter = isset($_GET['path']) && is_string($_GET['path']) ? trim($_GET['path']) : null;
+    $jobs       = sv_fetch_scan_jobs($pdo, $pathFilter, 25);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['jobs' => $jobs], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 /* FSK18-Flag: nur sichtbar, wenn adult=1 oder 18=true in der URL */
 $showAdult =
     (isset($_GET['adult']) && $_GET['adult'] === '1')
@@ -336,6 +344,12 @@ $prefillKey = htmlspecialchars((string)($_GET['internal_key'] ?? ''), ENT_QUOTES
     FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code>
 </div>
 
+<div class="jobs-panel" id="scan-jobs-panel">
+    <h3>Scan-Jobs (asynchron)</h3>
+    <div class="help-text">Status der scan_path-Queue für aktuelle Filter.</div>
+    <div id="scan-jobs-list">Lade Scan-Jobs ...</div>
+</div>
+
 <?php if ($actionMessage !== null): ?>
     <div class="action-message <?= $actionSuccess ? 'success' : 'error' ?>">
         <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
@@ -422,6 +436,55 @@ $prefillKey = htmlspecialchars((string)($_GET['internal_key'] ?? ''), ENT_QUOTES
     </div>
 </div>
 
+<script>
+(function () {
+    const target = document.getElementById('scan-jobs-list');
+    if (!target) {
+        return;
+    }
+
+    const escapeHtml = (str) => (str || '').toString()
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+
+    const filterPath = <?= json_encode($pathFilter, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+
+    async function loadScanJobs() {
+        try {
+            const url = 'media.php?ajax=scan_jobs' + (filterPath ? '&path=' + encodeURIComponent(filterPath) : '');
+            const response = await fetch(url, { cache: 'no-store' });
+            const data = await response.json();
+            const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+            if (jobs.length === 0) {
+                target.innerHTML = '<p>Keine Scan-Jobs gefunden.</p>';
+                return;
+            }
+
+            const items = jobs.map((job) => {
+                const status = escapeHtml(job.status || 'unbekannt');
+                const pathText = escapeHtml(job.path || '(Pfad fehlt)');
+                const limitText = job.limit ? ' | Limit ' + escapeHtml(job.limit) : '';
+                const worker = job.worker_pid ? ' | Worker PID ' + escapeHtml(job.worker_pid) : '';
+                const result = job.result || {};
+                const stats = typeof result === 'object'
+                    ? ` | processed=${escapeHtml(result.processed ?? 0)}, skipped=${escapeHtml(result.skipped ?? 0)}, errors=${escapeHtml(result.errors ?? 0)}`
+                    : '';
+                return `<div class="job-entry"><div class="job-header"><span>#${escapeHtml(job.id)} – ${status}</span><span>${escapeHtml(job.updated_at || '')}</span></div><div class="job-meta">${pathText}${limitText}${worker}${stats}</div></div>`;
+            });
+
+            target.innerHTML = items.join('');
+        } catch (err) {
+            target.innerHTML = '<p>Scan-Jobs konnten nicht geladen werden.</p>';
+        }
+    }
+
+    loadScanJobs();
+    setInterval(loadScanJobs, 5000);
+})();
+</script>
 <script>
     const visibleIds = <?= json_encode($mediaIds) ?>;
     let jobState = <?= json_encode($jobsData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;

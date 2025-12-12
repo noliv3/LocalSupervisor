@@ -993,37 +993,86 @@ function sv_run_scan_path(
     $handledTotal = 0;
     $limitReached = false;
 
-    $dirIt = new RecursiveDirectoryIterator($inputReal, FilesystemIterator::SKIP_DOTS);
-    $it    = new RecursiveIteratorIterator($dirIt);
+    $skipNames = [
+        '$RECYCLE.BIN',
+        'System Volume Information',
+        '.Trash',
+        '.Trash-1000',
+        '.fseventsd',
+        '.Spotlight-V100',
+        '@eaDir',
+    ];
+    $skipLog = [];
 
-    foreach ($it as $fileInfo) {
-        if (!$fileInfo->isFile()) {
+    $stack = [$inputReal];
+    while ($stack) {
+        $dir = array_pop($stack);
+
+        $entries = @scandir($dir);
+        if ($entries === false) {
+            $errors++;
+            if ($logger) {
+                $logger('Keine Berechtigung oder Fehler beim Lesen von ' . $dir);
+            }
             continue;
         }
-        $path = $fileInfo->getPathname();
 
-        if ($logger) {
-            $logger("Verarbeite: {$path}");
-        }
-
-        if ($limit !== null && $handledTotal >= $limit) {
-            $limitReached = true;
-            break;
-        }
-
-        try {
-            $ok = sv_import_file($pdo, $path, $inputReal, $pathsCfg, $scannerCfg, $nsfwThreshold, $logger);
-            if ($ok) {
-                $processed++;
-            } else {
-                $skipped++;
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
             }
-            $handledTotal++;
-        } catch (Throwable $e) {
-            $errors++;
-            $handledTotal++;
+
+            $fullPath = $dir . '/' . $entry;
+            $nameLc   = strtolower($entry);
+
+            if (is_dir($fullPath)) {
+                $skipMatch = false;
+                foreach ($skipNames as $skip) {
+                    if ($nameLc === strtolower($skip)) {
+                        $skipMatch = true;
+                        break;
+                    }
+                }
+
+                if ($skipMatch) {
+                    if (!isset($skipLog[$fullPath]) && $logger) {
+                        $logger('Überspringe System-/Trash-Ordner: ' . $fullPath);
+                    }
+                    $skipLog[$fullPath] = true;
+                    continue;
+                }
+
+                $stack[] = $fullPath;
+                continue;
+            }
+
+            if (!is_file($fullPath)) {
+                continue;
+            }
+
+            if ($limit !== null && $handledTotal >= $limit) {
+                $limitReached = true;
+                break 2;
+            }
+
             if ($logger) {
-                $logger("Fehler bei Datei {$path}: " . $e->getMessage());
+                $logger('Verarbeite: ' . $fullPath);
+            }
+
+            try {
+                $ok = sv_import_file($pdo, $fullPath, $inputReal, $pathsCfg, $scannerCfg, $nsfwThreshold, $logger);
+                if ($ok) {
+                    $processed++;
+                } else {
+                    $skipped++;
+                }
+                $handledTotal++;
+            } catch (Throwable $e) {
+                $errors++;
+                $handledTotal++;
+                if ($logger) {
+                    $logger('Fehler bei Datei ' . $fullPath . ': ' . $e->getMessage());
+                }
             }
         }
     }
