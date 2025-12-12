@@ -3,6 +3,27 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/common.php';
 
+function sv_resolve_library_path(string $hash, string $ext, string $mediaRoot): string
+{
+    $hash = strtolower(trim($hash));
+    if ($hash === '' || !preg_match('~^[a-f0-9]+$~', $hash)) {
+        throw new InvalidArgumentException('Ungültiger Hash für Zielpfad.');
+    }
+
+    $mediaRoot = sv_normalize_directory($mediaRoot);
+    if ($mediaRoot === '') {
+        throw new InvalidArgumentException('Media-Root fehlt für Zielpfad.');
+    }
+
+    $extSanitized = strtolower(trim($ext));
+    $extSanitized = preg_replace('~[^a-z0-9]+~', '', $extSanitized ?? '');
+    $extPart      = $extSanitized !== '' ? '.' . $extSanitized : '';
+
+    $subdir = substr($hash, 0, 2);
+
+    return $mediaRoot . DIRECTORY_SEPARATOR . $subdir . DIRECTORY_SEPARATOR . $hash . $extPart;
+}
+
 function sv_media_roots(array $pathsCfg): array
 {
     $map = [

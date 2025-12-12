@@ -29,6 +29,12 @@
 - Prompt-Qualität wird zentral in `SCRIPTS/operations.php` bewertet; Web-Views und Forge-Fallbacks nutzen ausschließlich diese
   Funktionen (keine eigenen Heuristiken in den PHP-Views).
 
+## Hashbasierte Library / Dupes
+- Importiert wird nur noch in das Schema `<hh>/<hash>.<ext>` innerhalb der konfigurierten Roots (`sv_resolve_library_path`).
+- Ursprüngliche Pfade landen als `media_meta` (`original_path`, `original_name`), ext-Mismatches als Meta-Eintrag.
+- Library-Rename-Jobs (`library_rename`) laufen ausschließlich per CLI-Worker und müssen Pfadvalidierung/Auditlog nutzen.
+- Dupe-Gruppen basieren auf identischem Hash und sind in `mediadb.php` filter- und sichtbar.
+
 ## Versions-/Historienanzeige
 - Versionen werden rein aus bestehenden Jobs/Metadaten/Backups abgeleitet (keine neuen Tabellen oder Schreibpfade).
 - Die UI zeigt eine lesende Liste der Versionen; Restore-/Rollback-Flows gehören zentral nach `SCRIPTS/operations.php` und sind separat zu designen.

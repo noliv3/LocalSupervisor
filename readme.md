@@ -90,6 +90,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - Steuerung: „Requeue“ für `error`/`done`/`canceled`, „Cancel“ für `queued`/`running`; Schreibaktionen erfordern Internal-Key/IP-Whitelist und rufen ausschließlich `SCRIPTS/operations.php`.
 - Verarbeitung der Jobs bleibt beim CLI-Worker (`forge_worker_cli.php`), die Weboberfläche erzeugt oder manipuliert keine Forge-Aufrufe direkt.
 
+## Hashbasierte Library, Dupes und Rename-Backfill
+- **Dateiablage**: Neu importierte Medien landen hashbasiert unter `<hh>/<hash>.<ext>` (erste zwei Hex-Zeichen als Ordner). Pfade werden zentral über `sv_resolve_library_path` erzeugt.
+- **Originalreferenzen**: Der ursprüngliche Importpfad/Dateiname wird als `media_meta` (`source=import`, Keys `original_path`/`original_name`) gesichert.
+- **Nachpflege**: Abweichende Altbestände können im Dashboard als `library_rename`-Jobs eingeplant und via `php SCRIPTS/library_rename_worker_cli.php --limit=N` abgearbeitet werden. Der Worker verschiebt Dateien in das neue Schema, aktualisiert `media.path` und protokolliert `rename_at`.
+- **Dupes**: Strikte Duplikate basieren auf identischem Hash. `mediadb.php` unterstützt die Filter `dupes=1` und `dupe_hash=...` und zeigt Dupe-Badges je Hash-Gruppe.
+
 ## Bekannte Einschränkungen / Offene Baustellen
 - Prompt-Historie fehlt; Raw-Blöcke werden zwar gespeichert, aber Historisierung/Versionierung der Prompts ist nicht vorhanden.
 - Automatische Regeneration aus bestehenden `media_meta`-Snapshots existiert nicht; Rebuild liest immer von der Quelldatei.

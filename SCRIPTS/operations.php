@@ -9,6 +9,7 @@ require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
 
 const SV_FORGE_JOB_TYPE           = 'forge_regen';
+const SV_JOB_TYPE_LIBRARY_RENAME  = 'library_rename';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
 const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
 const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors';
@@ -99,6 +100,41 @@ function sv_collect_media_roots(array $pathsCfg): array
     }
 
     return $roots;
+}
+
+function sv_resolve_media_target(array $mediaRow, array $pathsCfg): ?array
+{
+    $hash = isset($mediaRow['hash']) ? strtolower((string)$mediaRow['hash']) : '';
+    if ($hash === '') {
+        return null;
+    }
+
+    $type    = (string)($mediaRow['type'] ?? '');
+    $hasNsfw = (int)($mediaRow['has_nsfw'] ?? 0) === 1;
+
+    if ($type === 'image') {
+        $base = $hasNsfw ? ($pathsCfg['images_nsfw'] ?? null) : ($pathsCfg['images_sfw'] ?? null);
+    } elseif ($type === 'video') {
+        $base = $hasNsfw ? ($pathsCfg['videos_nsfw'] ?? null) : ($pathsCfg['videos_sfw'] ?? null);
+    } else {
+        return null;
+    }
+
+    if (!is_string($base) || trim($base) === '') {
+        return null;
+    }
+
+    $ext = strtolower((string)pathinfo((string)($mediaRow['path'] ?? ''), PATHINFO_EXTENSION));
+    if ($ext === '') {
+        $ext = strtolower((string)($mediaRow['ext'] ?? ''));
+    }
+
+    $targetPath = sv_resolve_library_path($hash, $ext, $base);
+
+    return [
+        'root' => sv_normalize_directory($base),
+        'path' => str_replace('\\', '/', $targetPath),
+    ];
 }
 
 function sv_assert_backup_outside_media_roots(array $config, string $backupDir): void
@@ -805,6 +841,268 @@ function sv_list_jobs(PDO $pdo, array $filters = [], int $limit = 100): array
     }
 
     return $jobs;
+}
+
+function sv_find_strict_dupes(PDO $pdo, ?string $hashFilter = null, int $limit = 500): array
+{
+    $limit = max(1, min(2000, $limit));
+    $params = [];
+    $sql = 'SELECT hash, COUNT(*) AS cnt FROM media WHERE hash IS NOT NULL';
+    if ($hashFilter !== null && trim($hashFilter) !== '') {
+        $sql           .= ' AND hash = :hash';
+        $params[':hash'] = trim($hashFilter);
+    }
+    $sql .= ' GROUP BY hash HAVING COUNT(*) > 1 ORDER BY cnt DESC, hash ASC LIMIT :limit';
+
+    $stmt = $pdo->prepare($sql);
+    foreach ($params as $key => $val) {
+        $stmt->bindValue($key, $val, PDO::PARAM_STR);
+    }
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $groups = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    if ($groups === []) {
+        return [];
+    }
+
+    $hashes       = array_column($groups, 'hash');
+    $placeholder  = implode(',', array_fill(0, count($hashes), '?'));
+    $detailStmt   = $pdo->prepare(
+        'SELECT id, path, status, rating, has_nsfw, type, hash FROM media WHERE hash IN (' . $placeholder . ') ORDER BY id ASC'
+    );
+    $detailStmt->execute($hashes);
+    $rows = $detailStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $byHash = [];
+    foreach ($rows as $row) {
+        $h = (string)$row['hash'];
+        if (!isset($byHash[$h])) {
+            $byHash[$h] = [];
+        }
+        $byHash[$h][] = $row;
+    }
+
+    $result = [];
+    foreach ($groups as $group) {
+        $hash  = (string)$group['hash'];
+        $items = $byHash[$hash] ?? [];
+        $masterId = null;
+        foreach ($items as $item) {
+            $preferred = ($item['status'] ?? '') !== 'missing';
+            if ($masterId === null) {
+                $masterId = (int)$item['id'];
+                continue;
+            }
+            if ($preferred && $masterId > (int)$item['id']) {
+                $masterId = (int)$item['id'];
+            }
+        }
+        if ($masterId === null && $items) {
+            $masterId = (int)$items[0]['id'];
+        }
+        $result[] = [
+            'hash'      => $hash,
+            'count'     => (int)$group['cnt'],
+            'media'     => $items,
+            'master_id' => $masterId,
+        ];
+    }
+
+    return $result;
+}
+
+function sv_enqueue_library_rename_jobs(PDO $pdo, array $config, int $limit, int $offset, callable $logger): array
+{
+    $limit  = max(1, min(1000, $limit));
+    $offset = max(0, $offset);
+    $pathsCfg = $config['paths'] ?? [];
+
+    $stmt = $pdo->prepare(
+        'SELECT id, path, type, has_nsfw, hash FROM media WHERE hash IS NOT NULL ORDER BY id ASC LIMIT :limit OFFSET :offset'
+    );
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $rows           = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $enqueued       = 0;
+    $alreadyPresent = 0;
+    $skipped        = 0;
+
+    $checkJob = $pdo->prepare(
+        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued", "running") LIMIT 1'
+    );
+
+    $insertJob = $pdo->prepare(
+        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
+        . 'VALUES (:media_id, NULL, :type, :status, :created_at, NULL, :payload)'
+    );
+
+    foreach ($rows as $row) {
+        $target = sv_resolve_media_target($row, $pathsCfg);
+        if ($target === null) {
+            $skipped++;
+            continue;
+        }
+
+        $currentPath = str_replace('\\', '/', (string)$row['path']);
+        if ($currentPath === $target['path']) {
+            $skipped++;
+            continue;
+        }
+
+        try {
+            sv_assert_media_path_allowed($currentPath, $pathsCfg, 'library_rename_source');
+            sv_assert_media_path_allowed($target['path'], $pathsCfg, 'library_rename_target');
+        } catch (Throwable $e) {
+            $logger('Pfadvalidierung fehlgeschlagen für Media #' . (int)$row['id'] . ': ' . $e->getMessage());
+            $skipped++;
+            continue;
+        }
+
+        $checkJob->execute([
+            ':media_id' => (int)$row['id'],
+            ':type'     => SV_JOB_TYPE_LIBRARY_RENAME,
+        ]);
+        if ($checkJob->fetchColumn()) {
+            $alreadyPresent++;
+            continue;
+        }
+
+        $payload = [
+            'media_id' => (int)$row['id'],
+            'from_path'=> $currentPath,
+            'to_path'  => $target['path'],
+            'hash'     => (string)$row['hash'],
+            'ext'      => strtolower((string)pathinfo($currentPath, PATHINFO_EXTENSION)),
+        ];
+
+        $insertJob->execute([
+            ':media_id'   => (int)$row['id'],
+            ':type'       => SV_JOB_TYPE_LIBRARY_RENAME,
+            ':status'     => 'queued',
+            ':created_at' => date('c'),
+            ':payload'    => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        ]);
+        $enqueued++;
+    }
+
+    if ($enqueued > 0) {
+        $logger('Library-Rename Jobs angelegt: ' . $enqueued);
+    }
+
+    return [
+        'enqueued'        => $enqueued,
+        'already_present' => $alreadyPresent,
+        'skipped'         => $skipped,
+    ];
+}
+
+function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, callable $logger): array
+{
+    $limit = max(1, min(200, $limit));
+    $pathsCfg = $config['paths'] ?? [];
+
+    $stmt = $pdo->prepare(
+        'SELECT * FROM jobs WHERE type = :type AND status = "queued" ORDER BY id ASC LIMIT :limit'
+    );
+    $stmt->bindValue(':type', SV_JOB_TYPE_LIBRARY_RENAME, PDO::PARAM_STR);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $done = 0;
+    $error = 0;
+
+    foreach ($jobs as $job) {
+        $jobId = (int)$job['id'];
+        $payload = json_decode((string)($job['forge_request_json'] ?? ''), true) ?: [];
+        $mediaId = (int)($payload['media_id'] ?? $job['media_id']);
+        $from    = isset($payload['from_path']) ? str_replace('\\', '/', (string)$payload['from_path']) : '';
+        $to      = isset($payload['to_path']) ? str_replace('\\', '/', (string)$payload['to_path']) : '';
+        $hash    = isset($payload['hash']) ? (string)$payload['hash'] : '';
+        $ext     = isset($payload['ext']) ? (string)$payload['ext'] : '';
+
+        $updateStatus = function (string $status, ?string $errorMsg = null) use ($pdo, $jobId): void {
+            $stmtUpd = $pdo->prepare('UPDATE jobs SET status = :status, updated_at = :updated_at, error_message = :err WHERE id = :id');
+            $stmtUpd->execute([
+                ':status'     => $status,
+                ':updated_at' => date('c'),
+                ':err'        => $errorMsg,
+                ':id'         => $jobId,
+            ]);
+        };
+
+        $updateStatus('running');
+
+        try {
+            if ($from === '' || $to === '' || $hash === '') {
+                throw new RuntimeException('Payload unvollständig.');
+            }
+
+            sv_assert_media_path_allowed($from, $pathsCfg, 'library_rename_source');
+            sv_assert_media_path_allowed($to, $pathsCfg, 'library_rename_target');
+
+            $targetExists = is_file($to);
+            if ($targetExists) {
+                $targetHash = @hash_file('md5', $to);
+                if ($targetHash !== $hash) {
+                    throw new RuntimeException('Zielpfad belegt mit anderem Inhalt.');
+                }
+            }
+
+            if (!$targetExists) {
+                if (is_file($from)) {
+                    if (!sv_move_file($from, $to)) {
+                        throw new RuntimeException('Verschieben fehlgeschlagen.');
+                    }
+                } else {
+                    throw new RuntimeException('Quelldatei fehlt.');
+                }
+            }
+
+            $pdo->beginTransaction();
+            $upd = $pdo->prepare('UPDATE media SET path = :path WHERE id = :id');
+            $upd->execute([
+                ':path' => $to,
+                ':id'   => $mediaId,
+            ]);
+
+            $metaCheck = $pdo->prepare('SELECT 1 FROM media_meta WHERE media_id = ? AND source = ? AND meta_key = ? LIMIT 1');
+            $metaIns   = $pdo->prepare('INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)');
+            foreach ([['import', 'original_path', $from], ['import', 'original_name', basename($from)]] as $metaDef) {
+                $metaCheck->execute([$mediaId, $metaDef[0], $metaDef[1]]);
+                if ($metaCheck->fetchColumn() === false) {
+                    $metaIns->execute([$mediaId, $metaDef[0], $metaDef[1], $metaDef[2], date('c')]);
+                }
+            }
+            $metaIns->execute([$mediaId, 'library_rename', 'rename_at', date('c'), date('c')]);
+
+            $pdo->commit();
+
+            $updateStatus('done');
+            $done++;
+            $logger('Library-Rename Job #' . $jobId . ' abgeschlossen.');
+            sv_audit_log($pdo, 'library_rename', 'media', $mediaId, [
+                'job_id' => $jobId,
+                'from'   => $from,
+                'to'     => $to,
+                'ext'    => $ext,
+            ]);
+        } catch (Throwable $e) {
+            $pdo->rollBack();
+            $error++;
+            $updateStatus('error', $e->getMessage());
+            $logger('Library-Rename Job #' . $jobId . ' Fehler: ' . $e->getMessage());
+        }
+    }
+
+    return [
+        'total' => count($jobs),
+        'done'  => $done,
+        'error' => $error,
+    ];
 }
 
 function sv_requeue_job(PDO $pdo, int $jobId, callable $logger): array
