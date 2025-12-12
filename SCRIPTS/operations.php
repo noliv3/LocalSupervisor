@@ -13,12 +13,32 @@ const SV_JOB_TYPE_SCAN_PATH       = 'scan_path';
 const SV_JOB_TYPE_LIBRARY_RENAME  = 'library_rename';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
 const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
+const SV_FORGE_TXT2IMG_PATH       = '/sdapi/v1/txt2img';
+const SV_FORGE_IMG2IMG_PATH       = '/sdapi/v1/img2img';
+const SV_FORGE_OPTIONS_PATH       = '/sdapi/v1/options';
+const SV_FORGE_PROGRESS_PATH      = '/sdapi/v1/progress';
 const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors';
 const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
+
+class SvForgeHttpException extends RuntimeException
+{
+    private array $logData;
+
+    public function __construct(string $message, array $logData = [], int $code = 0, ?Throwable $previous = null)
+    {
+        parent::__construct($message, $code, $previous);
+        $this->logData = $logData;
+    }
+
+    public function getLogData(): array
+    {
+        return $this->logData;
+    }
+}
 
 function sv_load_config(?string $baseDir = null): array
 {
@@ -34,6 +54,70 @@ function sv_load_config(?string $baseDir = null): array
     }
 
     return $config;
+}
+
+function sv_sanitize_url(string $url): string
+{
+    $parts = @parse_url($url);
+    if (!is_array($parts)) {
+        return $url;
+    }
+
+    $scheme   = isset($parts['scheme']) ? $parts['scheme'] . '://' : '';
+    $host     = $parts['host'] ?? '';
+    $port     = isset($parts['port']) ? ':' . $parts['port'] : '';
+    $path     = $parts['path'] ?? '';
+    $query    = isset($parts['query']) ? '?' . $parts['query'] : '';
+    $fragment = isset($parts['fragment']) ? '#' . $parts['fragment'] : '';
+
+    return $scheme . $host . $port . $path . $query . $fragment;
+}
+
+function sv_forge_response_snippet(?string $body, int $limit = 200): ?string
+{
+    if (!is_string($body) || $body === '') {
+        return null;
+    }
+
+    $substr  = function_exists('mb_substr') ? 'mb_substr' : 'substr';
+    $snippet = $substr($body, 0, $limit);
+    return $snippet === '' ? null : $snippet;
+}
+
+function sv_forge_build_url(string $baseUrl, string $path): string
+{
+    return rtrim($baseUrl, '/') . $path;
+}
+
+function sv_forge_basic_auth_header(array $endpoint): ?string
+{
+    $user = isset($endpoint['basic_auth_user']) && is_string($endpoint['basic_auth_user'])
+        ? trim($endpoint['basic_auth_user'])
+        : '';
+    $pass = isset($endpoint['basic_auth_pass']) && is_string($endpoint['basic_auth_pass'])
+        ? trim($endpoint['basic_auth_pass'])
+        : '';
+
+    if ($user === '' && $pass === '') {
+        return null;
+    }
+
+    return 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
+}
+
+function sv_forge_log_payload(string $targetUrl, ?int $httpStatus, ?string $responseBody, array $extra = []): array
+{
+    $payload = [
+        'target_url'       => sv_sanitize_url($targetUrl),
+        'http_status'      => $httpStatus,
+        'response_snippet' => sv_forge_response_snippet($responseBody),
+    ];
+
+    foreach ($extra as $key => $value) {
+        $payload[$key] = $value;
+    }
+
+    return $payload;
 }
 
 function sv_open_pdo(array $config): PDO
@@ -355,17 +439,21 @@ function sv_forge_endpoint_config(array $config, bool $requireDispatchEnabled = 
 
     $forge = $config['forge'];
     $baseUrl = isset($forge['base_url']) && is_string($forge['base_url']) ? trim($forge['base_url']) : '';
-    $token   = isset($forge['token']) && is_string($forge['token']) ? trim($forge['token']) : '';
-    $timeout = sv_forge_timeout($config);
-
-    if ($baseUrl === '' || $token === '') {
-        return null;
+    if ($baseUrl === '') {
+        $baseUrl = SV_FORGE_DEFAULT_BASE_URL;
     }
 
+    $timeout = sv_forge_timeout($config);
+
     return [
-        'base_url' => $baseUrl,
-        'token'    => $token,
-        'timeout'  => $timeout > 0 ? $timeout : 15,
+        'base_url'        => $baseUrl,
+        'timeout'         => $timeout > 0 ? $timeout : 15,
+        'basic_auth_user' => isset($forge['basic_auth_user']) && is_string($forge['basic_auth_user'])
+            ? trim($forge['basic_auth_user'])
+            : '',
+        'basic_auth_pass' => isset($forge['basic_auth_pass']) && is_string($forge['basic_auth_pass'])
+            ? trim($forge['basic_auth_pass'])
+            : '',
     ];
 }
 
@@ -381,6 +469,58 @@ function sv_forge_base_url(array $config): string
     return SV_FORGE_DEFAULT_BASE_URL;
 }
 
+function sv_forge_healthcheck(array $endpoint, callable $logger): array
+{
+    $baseUrl = rtrim((string)($endpoint['base_url'] ?? SV_FORGE_DEFAULT_BASE_URL), '/');
+    $url     = sv_forge_build_url($baseUrl, SV_FORGE_OPTIONS_PATH);
+    $timeout = (int)($endpoint['timeout'] ?? 10);
+
+    $headers = ['Accept: application/json'];
+    $authHeader = sv_forge_basic_auth_header($endpoint);
+    if ($authHeader !== null) {
+        $headers[] = $authHeader;
+    }
+
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'GET',
+            'header'  => implode("\r\n", $headers),
+            'timeout' => $timeout,
+        ],
+    ]);
+
+    $responseBody = @file_get_contents($url, false, $context);
+    $httpCode     = null;
+    if (isset($http_response_header) && is_array($http_response_header)) {
+        foreach ($http_response_header as $headerLine) {
+            if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
+                $httpCode = (int)$matches[1];
+                break;
+            }
+        }
+    }
+
+    if ($httpCode !== null && $httpCode >= 200 && $httpCode < 300) {
+        $logger('Forge-Healthcheck erfolgreich (options).');
+        return [
+            'ok'          => true,
+            'http_code'   => $httpCode,
+            'body'        => $responseBody === false ? null : $responseBody,
+            'target_url'  => $url,
+            'log_payload' => sv_forge_log_payload($url, $httpCode, $responseBody),
+        ];
+    }
+
+    $logger('Forge-Healthcheck fehlgeschlagen' . ($httpCode !== null ? ' (HTTP ' . $httpCode . ')' : '')); 
+    return [
+        'ok'          => false,
+        'http_code'   => $httpCode,
+        'body'        => $responseBody === false ? null : $responseBody,
+        'target_url'  => $url,
+        'log_payload' => sv_forge_log_payload($url, $httpCode, $responseBody),
+    ];
+}
+
 function sv_forge_fetch_model_list(array $config, callable $logger): ?array
 {
     if (!sv_is_forge_enabled($config)) {
@@ -388,17 +528,19 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
         return null;
     }
 
-    $baseUrl = rtrim(sv_forge_base_url($config), '/');
+    $endpoint = sv_forge_endpoint_config($config) ?? [
+        'base_url' => sv_forge_base_url($config),
+        'timeout'  => sv_forge_timeout($config),
+    ];
+    $baseUrl = rtrim((string)($endpoint['base_url'] ?? sv_forge_base_url($config)), '/');
     $url     = $baseUrl . SV_FORGE_MODEL_LIST_PATH;
 
-    $timeout = sv_forge_timeout($config);
+    $timeout = (int)($endpoint['timeout'] ?? sv_forge_timeout($config));
 
     $headers = ['Accept: application/json'];
-    $token   = isset($config['forge']['token']) && is_string($config['forge']['token'])
-        ? trim($config['forge']['token'])
-        : '';
-    if ($token !== '') {
-        $headers[] = 'Authorization: Bearer ' . $token;
+    $authHeader = sv_forge_basic_auth_header($endpoint);
+    if ($authHeader !== null) {
+        $headers[] = $authHeader;
     }
 
     $context = stream_context_create([
@@ -486,6 +628,12 @@ function sv_resolve_forge_model(array $config, ?string $requestedModelName, call
     return $fallback;
 }
 
+function sv_forge_target_path(array $payload): string
+{
+    $hasInitImages = isset($payload['init_images']) && is_array($payload['init_images']) && $payload['init_images'] !== [];
+    return $hasInitImages ? SV_FORGE_IMG2IMG_PATH : SV_FORGE_TXT2IMG_PATH;
+}
+
 function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $payload, callable $logger): array
 {
     if (!sv_is_forge_dispatch_enabled($config)) {
@@ -507,12 +655,49 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
         ];
     }
 
-    $url      = rtrim($endpoint['base_url'], '/');
+    $health = sv_forge_healthcheck($endpoint, $logger);
+    if (!$health['ok']) {
+        $now          = date('c');
+        $status       = 'error';
+        $errorMessage = 'Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : '');
+        $responseJson = json_encode($health['log_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        $update = $pdo->prepare(
+            'UPDATE jobs SET status = :status, forge_response_json = :response, error_message = :error, updated_at = :updated_at WHERE id = :id'
+        );
+        $update->execute([
+            ':status'     => $status,
+            ':response'   => $responseJson,
+            ':error'      => $errorMessage,
+            ':updated_at' => $now,
+            ':id'         => $jobId,
+        ]);
+
+        sv_audit_log($pdo, 'forge_job_dispatch_failed', 'jobs', $jobId, [
+            'status'      => $status,
+            'http_code'   => $health['http_code'],
+            'error'       => $errorMessage,
+            'target_url'  => $health['log_payload']['target_url'] ?? null,
+        ]);
+
+        return [
+            'dispatched' => false,
+            'status'     => $status,
+            'error'      => $errorMessage,
+            'response'   => $responseJson,
+        ];
+    }
+
+    $url      = sv_forge_build_url($endpoint['base_url'], sv_forge_target_path($payload));
     $timeout  = $endpoint['timeout'];
     $headers  = [
         'Content-Type: application/json',
-        'Authorization: Bearer ' . $endpoint['token'],
     ];
+
+    $authHeader = sv_forge_basic_auth_header($endpoint);
+    if ($authHeader !== null) {
+        $headers[] = $authHeader;
+    }
 
     $logger('Sende Forge-Request für Job ID ' . $jobId . ' an ' . $url);
 
@@ -537,7 +722,8 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
     }
 
     $now = date('c');
-    $responseJson = $responseBody !== false ? $responseBody : null;
+    $logPayload   = sv_forge_log_payload($url, $httpCode, $responseBody);
+    $responseJson = json_encode($logPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
     if ($httpCode !== null && $httpCode >= 200 && $httpCode < 300 && $responseBody !== false) {
         $status = 'running';
@@ -1807,12 +1993,24 @@ function sv_call_forge_sync(array $config, array $payload, callable $logger): ar
         throw new RuntimeException('Forge-Konfiguration fehlt oder ist unvollständig.');
     }
 
-    $url     = rtrim($endpoint['base_url'], '/');
+    $health = sv_forge_healthcheck($endpoint, $logger);
+    if (!$health['ok']) {
+        throw new SvForgeHttpException(
+            'Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : ''),
+            $health['log_payload'] ?? []
+        );
+    }
+
+    $url     = sv_forge_build_url($endpoint['base_url'], sv_forge_target_path($payload));
     $timeout = $endpoint['timeout'];
     $headers = [
         'Content-Type: application/json',
-        'Authorization: Bearer ' . $endpoint['token'],
     ];
+
+    $authHeader = sv_forge_basic_auth_header($endpoint);
+    if ($authHeader !== null) {
+        $headers[] = $authHeader;
+    }
 
     $logger('Sende Forge-Request (synchron) an ' . $url);
 
@@ -1836,13 +2034,18 @@ function sv_call_forge_sync(array $config, array $payload, callable $logger): ar
         }
     }
 
+    $logPayload = sv_forge_log_payload($url, $httpCode, $responseBody);
+
     if ($responseBody === false || $httpCode === null || $httpCode < 200 || $httpCode >= 300) {
-        throw new RuntimeException('Forge-Request fehlgeschlagen' . ($httpCode !== null ? ' (HTTP ' . $httpCode . ')' : ''));
+        throw new SvForgeHttpException(
+            'Forge-Request fehlgeschlagen' . ($httpCode !== null ? ' (HTTP ' . $httpCode . ')' : ''),
+            $logPayload
+        );
     }
 
     $decoded = json_decode($responseBody, true);
     if (!is_array($decoded)) {
-        throw new RuntimeException('Forge-Antwort ungültig oder leer.');
+        throw new SvForgeHttpException('Forge-Antwort ungültig oder leer.', $logPayload);
     }
 
     $imageBinary = null;
@@ -1861,7 +2064,7 @@ function sv_call_forge_sync(array $config, array $payload, callable $logger): ar
     return [
         'binary'         => $imageBinary,
         'response_array' => $decoded,
-        'response_json'  => $responseBody,
+        'response_json'  => json_encode($logPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
         'http_code'      => $httpCode,
     ];
 }
@@ -2154,11 +2357,14 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'status'            => 'done',
         ];
     } catch (Throwable $e) {
+        $responseJson = null;
         if ($forgeResponse !== null) {
-            sv_update_job_status($pdo, $jobId, 'error', $forgeResponse['response_json'] ?? null, $e->getMessage());
-        } else {
-            sv_update_job_status($pdo, $jobId, 'error', null, $e->getMessage());
+            $responseJson = $forgeResponse['response_json'] ?? null;
+        } elseif ($e instanceof SvForgeHttpException) {
+            $responseJson = json_encode($e->getLogData(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         }
+
+        sv_update_job_status($pdo, $jobId, 'error', $responseJson, $e->getMessage());
 
         if ($backupPath !== null && $newFileInfo !== null && is_file($backupPath)) {
             try {
