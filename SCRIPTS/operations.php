@@ -295,16 +295,68 @@ function sv_create_forge_job(PDO $pdo, int $mediaId, array $payload, ?int $promp
     return $jobId;
 }
 
-function sv_forge_endpoint_config(array $config): ?array
+function sv_is_forge_enabled(array $config): bool
 {
     if (!isset($config['forge']) || !is_array($config['forge'])) {
+        return false;
+    }
+
+    if (!array_key_exists('enabled', $config['forge'])) {
+        return true;
+    }
+
+    return (bool)$config['forge']['enabled'];
+}
+
+function sv_is_forge_dispatch_enabled(array $config): bool
+{
+    if (!sv_is_forge_enabled($config)) {
+        return false;
+    }
+
+    if (!isset($config['forge']['dispatch_enabled'])) {
+        return true;
+    }
+
+    return (bool)$config['forge']['dispatch_enabled'];
+}
+
+function sv_forge_timeout(array $config): int
+{
+    $timeout = isset($config['forge']['timeout']) ? (int)$config['forge']['timeout'] : 15;
+    return $timeout > 0 ? $timeout : 15;
+}
+
+function sv_forge_fallback_model(array $config): string
+{
+    if (isset($config['forge']['internal_model_fallback']) && is_string($config['forge']['internal_model_fallback'])) {
+        $candidate = trim($config['forge']['internal_model_fallback']);
+        if ($candidate !== '') {
+            return $candidate;
+        }
+    }
+
+    return SV_FORGE_FALLBACK_MODEL;
+}
+
+function sv_forge_endpoint_config(array $config, bool $requireDispatchEnabled = false): ?array
+{
+    if (!sv_is_forge_enabled($config)) {
+        return null;
+    }
+
+    if (!isset($config['forge']) || !is_array($config['forge'])) {
+        return null;
+    }
+
+    if ($requireDispatchEnabled && !sv_is_forge_dispatch_enabled($config)) {
         return null;
     }
 
     $forge = $config['forge'];
     $baseUrl = isset($forge['base_url']) && is_string($forge['base_url']) ? trim($forge['base_url']) : '';
     $token   = isset($forge['token']) && is_string($forge['token']) ? trim($forge['token']) : '';
-    $timeout = isset($forge['timeout']) ? (int)$forge['timeout'] : 15;
+    $timeout = sv_forge_timeout($config);
 
     if ($baseUrl === '' || $token === '') {
         return null;
@@ -331,14 +383,15 @@ function sv_forge_base_url(array $config): string
 
 function sv_forge_fetch_model_list(array $config, callable $logger): ?array
 {
+    if (!sv_is_forge_enabled($config)) {
+        $logger('Forge deaktiviert; Modellliste wird nicht abgefragt.');
+        return null;
+    }
+
     $baseUrl = rtrim(sv_forge_base_url($config), '/');
     $url     = $baseUrl . SV_FORGE_MODEL_LIST_PATH;
 
-    $timeout = 15;
-    if (isset($config['forge']) && is_array($config['forge'])) {
-        $timeoutCfg = (int)($config['forge']['timeout'] ?? 15);
-        $timeout    = $timeoutCfg > 0 ? $timeoutCfg : 15;
-    }
+    $timeout = sv_forge_timeout($config);
 
     $headers = ['Accept: application/json'];
     $token   = isset($config['forge']['token']) && is_string($config['forge']['token'])
@@ -380,6 +433,7 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
 function sv_resolve_forge_model(array $config, ?string $requestedModelName, callable $logger): string
 {
     $requested = trim((string)$requestedModelName);
+    $fallback  = sv_forge_fallback_model($config);
     $models    = sv_forge_fetch_model_list($config, $logger);
 
     if ($models === null || $models === []) {
@@ -389,12 +443,12 @@ function sv_resolve_forge_model(array $config, ?string $requestedModelName, call
             $logger('Forge model fallback used (requested=' . $requested . ', no model list).');
         }
 
-        return SV_FORGE_FALLBACK_MODEL;
+        return $fallback;
     }
 
     if ($requested === '') {
         $logger('Forge model fallback used (no model specified).');
-        return SV_FORGE_FALLBACK_MODEL;
+        return $fallback;
     }
 
     $requestedLower = strtolower($requested);
@@ -428,13 +482,22 @@ function sv_resolve_forge_model(array $config, ?string $requestedModelName, call
         }
     }
 
-    $logger('Forge model fallback used (requested=' . $requested . ', fallback=' . SV_FORGE_FALLBACK_MODEL . ').');
-    return SV_FORGE_FALLBACK_MODEL;
+    $logger('Forge model fallback used (requested=' . $requested . ', fallback=' . $fallback . ').');
+    return $fallback;
 }
 
 function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $payload, callable $logger): array
 {
-    $endpoint = sv_forge_endpoint_config($config);
+    if (!sv_is_forge_dispatch_enabled($config)) {
+        $logger('Forge-Dispatch übersprungen: Forge ist deaktiviert oder Dispatch ist abgeschaltet.');
+        return [
+            'dispatched' => false,
+            'status'     => 'queued',
+            'message'    => 'Forge-Dispatch ist deaktiviert.',
+        ];
+    }
+
+    $endpoint = sv_forge_endpoint_config($config, true);
     if ($endpoint === null) {
         $logger('Forge-Dispatch übersprungen: keine gültige Forge-Konfiguration.');
         return [
@@ -592,7 +655,12 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
 
 function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, callable $logger): array
 {
+    if (!sv_is_forge_enabled($config)) {
+        throw new RuntimeException('Forge ist deaktiviert.');
+    }
+
     $jobData = sv_prepare_forge_regen_job($pdo, $config, $mediaId, $logger);
+    $fallbackModel = sv_forge_fallback_model($config);
 
     $jobId = sv_create_forge_job(
         $pdo,
@@ -607,7 +675,7 @@ function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, call
         sv_audit_log($pdo, 'forge_model_resolved', 'jobs', $jobId, [
             'requested_model' => $jobData['requested_model'],
             'resolved_model'  => $jobData['resolved_model'],
-            'fallback_used'   => $jobData['resolved_model'] === SV_FORGE_FALLBACK_MODEL,
+            'fallback_used'   => $jobData['resolved_model'] === $fallbackModel,
         ]);
     }
 
@@ -1730,7 +1798,11 @@ function sv_replace_media_file_with_image(array $config, string $targetPath, str
 
 function sv_call_forge_sync(array $config, array $payload, callable $logger): array
 {
-    $endpoint = sv_forge_endpoint_config($config);
+    if (!sv_is_forge_dispatch_enabled($config)) {
+        throw new RuntimeException('Forge-Dispatch ist deaktiviert.');
+    }
+
+    $endpoint = sv_forge_endpoint_config($config, true);
     if ($endpoint === null) {
         throw new RuntimeException('Forge-Konfiguration fehlt oder ist unvollständig.');
     }
