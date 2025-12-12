@@ -6,6 +6,7 @@ declare(strict_types=1);
  * Kann von CLI und Web eingebunden werden.
  */
 
+require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/prompt_parser.php';
 
 function sv_move_file(string $src, string $dest): bool
@@ -741,9 +742,18 @@ function sv_import_file(
     $type = $isImage ? 'image' : 'video';
 
     $hash = @hash_file('md5', $file) ?: null;
+    if ($hash === null) {
+        if ($logger) {
+            $logger('Hash konnte nicht berechnet werden: ' . $file);
+        }
+        return false;
+    }
     $size = @filesize($file) ?: null;
     $ctime = @filemtime($file) ?: time();
     $createdAt = date('c', $ctime);
+
+    $originalPath = str_replace('\\', '/', $file);
+    $originalName = basename($file);
 
     $width  = null;
     $height = null;
@@ -792,34 +802,97 @@ function sv_import_file(
 
     $destBase = rtrim(str_replace('\\', '/', $destBase), '/');
 
-    $rootInput = rtrim(str_replace('\\', '/', $rootInput), '/');
-    $rel = ltrim(substr($file, strlen($rootInput)), '/\\');
-    if ($rel === '' || $rel === $file) {
-        $rel = basename($file);
-    }
+    $destPath = sv_resolve_library_path($hash, $ext, $destBase);
+    $destPath = str_replace('\\', '/', $destPath);
 
-    $destPath = $destBase . '/' . $rel;
-
-    if (!sv_move_file($file, $destPath)) {
-        if ($logger) {
-            $logger("Verschieben fehlgeschlagen: {$file} -> {$destPath}");
+    $destExists = is_file($destPath);
+    if ($destExists) {
+        $existingHash = @hash_file('md5', $destPath);
+        if ($existingHash !== $hash) {
+            if ($logger) {
+                $logger('Hash-Kollision bei Zielpfad: ' . $destPath);
+            }
+            return false;
         }
-        return false;
+    } else {
+        if (!sv_move_file($file, $destPath)) {
+            if ($logger) {
+                $logger("Verschieben fehlgeschlagen: {$file} -> {$destPath}");
+            }
+            return false;
+        }
     }
 
-    $destPathDb = str_replace('\\', '/', $destPath);
+    $destPathDb = $destPath;
+
+    $existingRow = null;
+    $existingStmt = $pdo->prepare("SELECT id, path FROM media WHERE hash = ?");
+    $existingStmt->execute([$hash]);
+    $existingRow = $existingStmt->fetch(PDO::FETCH_ASSOC) ?: null;
 
     try {
         $pdo->beginTransaction();
 
-        if ($hash !== null) {
-            $stmt = $pdo->prepare("SELECT id FROM media WHERE hash = ?");
-            $stmt->execute([$hash]);
-            $existingId = $stmt->fetchColumn();
-            if ($existingId) {
-                $pdo->commit();
-                return true;
+        if ($existingRow) {
+            $existingId   = (int)$existingRow['id'];
+            $existingPath = (string)$existingRow['path'];
+
+            if ($existingPath !== $destPathDb) {
+                $upd = $pdo->prepare('UPDATE media SET path = ? WHERE id = ?');
+                $upd->execute([$destPathDb, $existingId]);
             }
+
+            $logStmt = $pdo->prepare(
+                "INSERT INTO import_log (path, status, message, created_at) VALUES (?, ?, ?, ?)"
+            );
+            $logStmt->execute([
+                $destPathDb,
+                'skipped_duplicate',
+                'Hash bereits vorhanden',
+                date('c'),
+            ]);
+
+            $metaCheck = $pdo->prepare('SELECT 1 FROM media_meta WHERE media_id = ? AND source = ? AND meta_key = ? LIMIT 1');
+            $metaInsert = $pdo->prepare(
+                "INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)"
+            );
+
+            $existingExt = strtolower(pathinfo($existingPath, PATHINFO_EXTENSION));
+            $metaKeyPairs = [
+                ['import', 'original_path', $originalPath],
+                ['import', 'original_name', $originalName],
+            ];
+
+            if ($existingExt !== '' && $existingExt !== $ext) {
+                $metaKeyPairs[] = [
+                    'import',
+                    'ext_mismatch',
+                    json_encode(
+                        [
+                            'existing' => $existingExt,
+                            'incoming' => $ext,
+                        ],
+                        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+                    ),
+                ];
+            }
+
+            foreach ($metaKeyPairs as [$src, $key, $value]) {
+                $metaCheck->execute([$existingId, $src, $key]);
+                if ($metaCheck->fetchColumn() !== false) {
+                    continue;
+                }
+                $metaInsert->execute([
+                    $existingId,
+                    $src,
+                    $key,
+                    $value,
+                    $createdAt,
+                ]);
+            }
+
+            $pdo->commit();
+            return true;
         }
 
         $stmt = $pdo->prepare("
@@ -864,6 +937,12 @@ function sv_import_file(
             null,
             date('c'),
         ]);
+
+        $metaInsert = $pdo->prepare(
+            "INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)"
+        );
+        $metaInsert->execute([$mediaId, 'import', 'original_path', $originalPath, $createdAt]);
+        $metaInsert->execute([$mediaId, 'import', 'original_name', $originalName, $createdAt]);
 
         try {
             $metadata = sv_extract_metadata($destPathDb, $type, 'import', $logger);

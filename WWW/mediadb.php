@@ -97,6 +97,11 @@ $page    = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
 $perPage = 100;
 $offset  = ($page - 1) * $perPage;
 $issueFilter = isset($_GET['issues']) && ((string)$_GET['issues'] === '1');
+$dupeFilter  = isset($_GET['dupes']) && ((string)$_GET['dupes'] === '1');
+$dupeHashFilter = sv_limit_string((string)($_GET['dupe_hash'] ?? ''), 64);
+if ($dupeHashFilter !== '') {
+    $dupeFilter = true;
+}
 
 $typeFilter       = $_GET['type'] ?? 'all';
 $hasPromptFilter  = $_GET['has_prompt'] ?? 'all';
@@ -150,6 +155,14 @@ if ($statusFilter !== 'all') {
 if ($minRating > 0) {
     $where[]               = 'm.rating >= :minRating';
     $params[':minRating'] = $minRating;
+}
+
+if ($dupeFilter) {
+    $where[] = 'm.hash IN (SELECT hash FROM media WHERE hash IS NOT NULL GROUP BY hash HAVING COUNT(*) > 1)';
+}
+if ($dupeHashFilter !== '') {
+    $where[]              = 'm.hash = :dupe_hash';
+    $params[':dupe_hash'] = $dupeHashFilter;
 }
 
 $promptCompleteExists = 'EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ')';
@@ -213,10 +226,10 @@ if ($issueFilter) {
         $rows = [];
     } else {
         $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
-        $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
+        $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
-           EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
@@ -238,10 +251,10 @@ ORDER BY m.id DESC';
         }
     }
 } elseif ($promptQualityFilter !== 'all') {
-    $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
+    $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
-           EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
@@ -279,10 +292,10 @@ ORDER BY m.id DESC';
     $countStmt->execute($params);
     $total = (int)$countStmt->fetchColumn();
 
-    $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status,
+    $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
-           EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
+            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
 FROM media m
@@ -318,6 +331,23 @@ $queryParams = [
 ];
 
 $issuesByMedia = $issueReport['by_media'] ?? [];
+
+$dupeCounts = [];
+$hashes = [];
+foreach ($rows as $row) {
+    if (!empty($row['hash'])) {
+        $hashes[] = (string)$row['hash'];
+    }
+}
+$hashes = array_values(array_unique($hashes));
+if ($hashes) {
+    $ph = implode(',', array_fill(0, count($hashes), '?'));
+    $dupeStmt = $pdo->prepare('SELECT hash, COUNT(*) AS cnt FROM media WHERE hash IN (' . $ph . ') GROUP BY hash HAVING COUNT(*) > 1');
+    $dupeStmt->execute($hashes);
+    foreach ($dupeStmt->fetchAll(PDO::FETCH_ASSOC) as $dupeRow) {
+        $dupeCounts[(string)$dupeRow['hash']] = (int)$dupeRow['cnt'];
+    }
+}
 
 ?>
 <!doctype html>
@@ -440,6 +470,11 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
             background: #f57f17;
             color: #fff;
         }
+        .badge.dupe {
+            background: #6a1b9a;
+            color: #fff;
+        }
+        .badge.dupe a { color: #fff; text-decoration: none; }
         .pager {
             margin: 10px 0;
             font-size: 13px;
@@ -537,6 +572,13 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
         <input type="text" name="q" size="40"
                value="<?= htmlspecialchars($pathFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
     </label>
+    <label>
+        <input type="checkbox" name="dupes" value="1" <?= $dupeFilter ? 'checked' : '' ?>> nur Duplikate
+    </label>
+    <label>
+        Hash:
+        <input type="text" name="dupe_hash" size="20" value="<?= htmlspecialchars($dupeHashFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    </label>
     <input type="hidden" name="adult" value="<?= $showAdult ? '1' : '0' ?>">
     <button type="submit">Filtern</button>
 </form>
@@ -563,6 +605,8 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
         $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
         $rating  = (int)($row['rating'] ?? 0);
         $status  = (string)($row['status'] ?? '');
+        $hash    = (string)($row['hash'] ?? '');
+        $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
         $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
@@ -600,6 +644,9 @@ $issuesByMedia = $issueReport['by_media'] ?? [];
             </div>
             <div class="badges">
                 <span class="badge <?= $type === 'video' ? 'video' : 'image' ?>"><?= $type === 'video' ? 'V' : 'I' ?></span>
+                <?php if ($dupeCount > 1): ?>
+                    <span class="badge dupe"><a href="?<?= http_build_query(array_merge($queryParams, ['dupes' => '1', 'dupe_hash' => $hash])) ?>">DUPE x<?= (int)$dupeCount ?></a></span>
+                <?php endif; ?>
                 <?php if ($hasIssues): ?>
                     <span class="badge issue" title="Integritätsprobleme erkannt">!</span>
                 <?php endif; ?>
