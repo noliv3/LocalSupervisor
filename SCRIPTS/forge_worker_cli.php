@@ -16,10 +16,13 @@ try {
     exit(1);
 }
 
-$limit = null;
+$limit   = null;
+$mediaId = null;
 foreach (array_slice($argv, 1) as $arg) {
     if (strpos($arg, '--limit=') === 0) {
         $limit = (int)substr($arg, 8);
+    } elseif (strpos($arg, '--media-id=') === 0) {
+        $mediaId = (int)substr($arg, 11);
     }
 }
 
@@ -28,7 +31,7 @@ $logger = function (string $msg): void {
 };
 
 try {
-    $summary = sv_process_forge_job_batch($pdo, $config, $limit, $logger);
+    $summary = sv_process_forge_job_batch($pdo, $config, $limit, $logger, $mediaId);
     $line = sprintf(
         'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d',
         (int)($summary['total'] ?? 0),

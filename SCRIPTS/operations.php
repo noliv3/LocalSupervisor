@@ -14,6 +14,7 @@ const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
 const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors';
 const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
+const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
 
@@ -48,6 +49,75 @@ function sv_open_pdo(array $config): PDO
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
     return $pdo;
+}
+
+function sv_is_pid_running(int $pid): array
+{
+    if ($pid <= 0) {
+        return ['running' => false, 'unknown' => false];
+    }
+
+    if (function_exists('posix_kill')) {
+        return [
+            'running' => @posix_kill($pid, 0),
+            'unknown' => false,
+        ];
+    }
+
+    $osFamily = PHP_OS_FAMILY ?? PHP_OS;
+    if (stripos((string)$osFamily, 'Windows') !== false) {
+        $output = @shell_exec('tasklist /FI "PID eq ' . (int)$pid . '" 2> NUL');
+        if ($output === null) {
+            return ['running' => false, 'unknown' => true];
+        }
+
+        return [
+            'running' => stripos($output, (string)$pid) !== false,
+            'unknown' => false,
+        ];
+    }
+
+    $output = @shell_exec('ps -p ' . (int)$pid . ' -o pid=');
+    if ($output === null) {
+        return ['running' => false, 'unknown' => true];
+    }
+
+    return [
+        'running' => trim($output) !== '',
+        'unknown' => false,
+    ];
+}
+
+function sv_collect_media_roots(array $pathsCfg): array
+{
+    $keys = ['images_sfw', 'videos_sfw', 'images_nsfw', 'videos_nsfw'];
+    $roots = [];
+    foreach ($keys as $key) {
+        if (!empty($pathsCfg[$key]) && is_string($pathsCfg[$key])) {
+            $roots[] = rtrim(str_replace('\\', '/', (string)$pathsCfg[$key]), '/');
+        }
+    }
+
+    return $roots;
+}
+
+function sv_assert_backup_outside_media_roots(array $config, string $backupDir): void
+{
+    $pathsCfg  = $config['paths'] ?? [];
+    $roots     = sv_collect_media_roots($pathsCfg);
+    $backupAbs = realpath($backupDir) ?: $backupDir;
+    $backupAbs = rtrim(str_replace('\\', '/', $backupAbs), '/');
+
+    foreach ($roots as $root) {
+        $rootAbs = realpath($root) ?: $root;
+        $rootAbs = rtrim(str_replace('\\', '/', $rootAbs), '/');
+        if ($rootAbs === '') {
+            continue;
+        }
+        if (str_starts_with($backupAbs . '/', $rootAbs . '/')) {
+            throw new RuntimeException('Backup-Verzeichnis darf nicht innerhalb der Medien-Bibliothek liegen: ' . $backupDir);
+        }
+    }
 }
 
 function sv_prompt_core_complete_condition(string $alias = 'p'): string
@@ -513,6 +583,106 @@ function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, call
     ];
 }
 
+function sv_record_forge_worker_meta(PDO $pdo, int $mediaId, ?int $pid, string $startedAt): void
+{
+    $insert = $pdo->prepare(
+        'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)' 
+    );
+
+    $insert->execute([
+        $mediaId,
+        SV_FORGE_WORKER_META_SOURCE,
+        'worker_started_at',
+        $startedAt,
+        $startedAt,
+    ]);
+
+    if ($pid !== null) {
+        $insert->execute([
+            $mediaId,
+            SV_FORGE_WORKER_META_SOURCE,
+            'worker_pid',
+            (string)$pid,
+            $startedAt,
+        ]);
+    }
+}
+
+function sv_merge_job_response_metadata(PDO $pdo, int $jobId, array $data): void
+{
+    $stmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
+    $stmt->execute([':id' => $jobId]);
+    $current = $stmt->fetchColumn();
+    $decoded = is_string($current) && $current !== '' ? json_decode($current, true) : [];
+    if (!is_array($decoded)) {
+        $decoded = [];
+    }
+
+    $merged = array_merge($decoded, $data);
+    $update = $pdo->prepare('UPDATE jobs SET forge_response_json = :json WHERE id = :id');
+    $update->execute([
+        ':json' => json_encode($merged, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        ':id'   => $jobId,
+    ]);
+}
+
+function sv_spawn_forge_worker_for_media(
+    PDO $pdo,
+    array $config,
+    int $mediaId,
+    ?int $jobId,
+    ?int $limit,
+    callable $logger
+): array {
+    if (!sv_is_cli() && !sv_has_valid_internal_key()) {
+        throw new RuntimeException('Internal-Key erforderlich, um Forge-Worker zu starten.');
+    }
+
+    $effectiveLimit = $limit === null ? 1 : max(1, (int)$limit);
+    $baseDir        = sv_base_dir();
+    $script         = $baseDir . '/SCRIPTS/forge_worker_cli.php';
+    $startedAt      = date('c');
+    $pid            = null;
+    $unknown        = false;
+
+    $logger('Starte Forge-Worker (media_id=' . $mediaId . ', limit=' . $effectiveLimit . ')');
+
+    if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
+        $cmd = 'start /B "" php ' . escapeshellarg($script) . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId;
+        $proc = @popen($cmd, 'r');
+        if ($proc !== false) {
+            pclose($proc);
+        }
+        $unknown = true;
+    } else {
+        $cmd = 'php ' . escapeshellarg($script) . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
+            . ' > /dev/null 2>&1 & echo $!';
+        $output = @shell_exec($cmd);
+        if ($output !== null && trim($output) !== '') {
+            $pid = (int)trim($output);
+            if ($pid <= 0) {
+                $pid = null;
+            }
+        } else {
+            $unknown = true;
+        }
+    }
+
+    sv_record_forge_worker_meta($pdo, $mediaId, $pid, $startedAt);
+    if ($jobId !== null) {
+        sv_merge_job_response_metadata($pdo, $jobId, [
+            '_sv_worker_pid'        => $pid,
+            '_sv_worker_started_at' => $startedAt,
+        ]);
+    }
+
+    return [
+        'pid'      => $pid,
+        'started'  => $startedAt,
+        'unknown'  => $unknown,
+    ];
+}
+
 function sv_forge_job_overview(PDO $pdo): array
 {
     $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type = :type GROUP BY status');
@@ -921,6 +1091,7 @@ function sv_backup_media_file(array $config, string $path, callable $logger): st
     $baseDir   = sv_base_dir();
     $backupDir = (string)($config['paths']['backups'] ?? ($baseDir . '/BACKUPS'));
     $backupDir = rtrim(str_replace('\\', '/', $backupDir), '/');
+    sv_assert_backup_outside_media_roots($config, $backupDir);
     if (!is_dir($backupDir)) {
         if (!mkdir($backupDir, 0777, true) && !is_dir($backupDir)) {
             throw new RuntimeException('Backup-Verzeichnis kann nicht angelegt werden: ' . $backupDir);
@@ -1159,7 +1330,27 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
 {
     $logger('Forge-Regeneration wird in V3 asynchron über die Job-Queue abgewickelt.');
 
-    return sv_queue_forge_regeneration($pdo, $config, $mediaId, $logger);
+    $queued = sv_queue_forge_regeneration($pdo, $config, $mediaId, $logger);
+
+    $worker = sv_spawn_forge_worker_for_media(
+        $pdo,
+        $config,
+        $mediaId,
+        (int)($queued['job_id'] ?? 0) ?: null,
+        1,
+        $logger
+    );
+
+    $pidStatus = $worker['pid'] !== null ? sv_is_pid_running((int)$worker['pid']) : ['running' => false, 'unknown' => $worker['unknown']];
+    $status    = ($pidStatus['running'] ?? false) ? 'running' : ($queued['status'] ?? 'queued');
+
+    return array_merge($queued, [
+        'status'               => $status,
+        'worker_pid'           => $worker['pid'],
+        'worker_started_at'    => $worker['started'],
+        'worker_status_unknown'=> (bool)($pidStatus['unknown'] ?? $worker['unknown']),
+        'message'              => $status === 'running' ? 'Worker läuft' : 'Job in Queue',
+    ]);
 }
 
 function sv_extract_regen_plan_from_payload(array $payload): array
@@ -1195,6 +1386,9 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
     $payloadRaw = (string)($jobRow['forge_request_json'] ?? '');
     $payload    = json_decode($payloadRaw, true);
+    $existingResponse = json_decode((string)($jobRow['forge_response_json'] ?? ''), true);
+    $workerPid    = is_array($existingResponse) ? ($existingResponse['_sv_worker_pid'] ?? null) : null;
+    $workerStart  = is_array($existingResponse) ? ($existingResponse['_sv_worker_started_at'] ?? null) : null;
     if (!is_array($payload)) {
         sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job hat keine gültige Payload.');
         throw new RuntimeException('Forge-Job #' . $jobId . ' hat keine gültige Payload.');
@@ -1264,7 +1458,9 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         ]);
 
         $responsePayload = [
-            'forge_response' => $forgeResponse['response_array'] ?? null,
+            '_sv_worker_pid'        => $workerPid,
+            '_sv_worker_started_at' => $workerStart,
+            'forge_response'        => $forgeResponse['response_array'] ?? null,
             'result' => [
                 'replaced'        => true,
                 'backup_path'     => $backupPath,
@@ -1336,14 +1532,27 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     }
 }
 
-function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger): array
+function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?int $mediaId = null): array
 {
     $effectiveLimit = $limit === null ? 1 : max(1, min(10, (int)$limit));
 
-    $stmt = $pdo->prepare(
-        'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC LIMIT :limit'
-    );
-    $stmt->bindValue(':type', SV_FORGE_JOB_TYPE, PDO::PARAM_STR);
+    $sql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running")';
+    $params = [
+        ':type' => SV_FORGE_JOB_TYPE,
+    ];
+
+    if ($mediaId !== null) {
+        $sql .= ' AND media_id = :media_id';
+        $params[':media_id'] = $mediaId;
+    }
+
+    $sql .= ' ORDER BY id ASC LIMIT :limit';
+
+    $stmt = $pdo->prepare($sql);
+    foreach ($params as $key => $value) {
+        $paramType = $key === ':type' ? PDO::PARAM_STR : PDO::PARAM_INT;
+        $stmt->bindValue($key, $value, $paramType);
+    }
     $stmt->bindValue(':limit', $effectiveLimit, PDO::PARAM_INT);
     $stmt->execute();
 
@@ -1513,6 +1722,58 @@ function sv_get_media_versions(PDO $pdo, int $mediaId): array
     return $versions;
 }
 
+function sv_fetch_worker_meta_for_media(PDO $pdo, int $mediaId): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT meta_key, meta_value FROM media_meta WHERE media_id = :media_id AND source = :source ORDER BY id DESC'
+    );
+    $stmt->execute([
+        ':media_id' => $mediaId,
+        ':source'   => SV_FORGE_WORKER_META_SOURCE,
+    ]);
+
+    $meta = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $key = (string)($row['meta_key'] ?? '');
+        if ($key !== '' && !isset($meta[$key])) {
+            $meta[$key] = (string)($row['meta_value'] ?? '');
+        }
+    }
+
+    return $meta;
+}
+
+function sv_fetch_worker_meta_for_media_list(PDO $pdo, array $mediaIds): array
+{
+    if ($mediaIds === []) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($mediaIds), '?'));
+    $stmt = $pdo->prepare(
+        'SELECT media_id, meta_key, meta_value FROM media_meta '
+        . 'WHERE media_id IN (' . $placeholders . ') AND source = ? ORDER BY id DESC'
+    );
+    $stmt->execute(array_merge($mediaIds, [SV_FORGE_WORKER_META_SOURCE]));
+
+    $meta = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $mid = (int)($row['media_id'] ?? 0);
+        $key = (string)($row['meta_key'] ?? '');
+        if ($mid <= 0 || $key === '') {
+            continue;
+        }
+        if (!isset($meta[$mid])) {
+            $meta[$mid] = [];
+        }
+        if (!isset($meta[$mid][$key])) {
+            $meta[$mid][$key] = (string)($row['meta_value'] ?? '');
+        }
+    }
+
+    return $meta;
+}
+
 function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10): array
 {
     $limit = max(1, $limit);
@@ -1525,25 +1786,112 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10):
     $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
     $stmt->execute();
 
-    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $rows      = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $workerMeta = sv_fetch_worker_meta_for_media($pdo, $mediaId);
 
     $jobs = [];
     foreach ($rows as $row) {
         $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
 
+        $workerPid    = $response['_sv_worker_pid'] ?? ($workerMeta['worker_pid'] ?? null);
+        $workerStart  = $response['_sv_worker_started_at'] ?? ($workerMeta['worker_started_at'] ?? null);
+        $pidInfo      = is_numeric($workerPid) ? sv_is_pid_running((int)$workerPid) : ['running' => false, 'unknown' => $workerPid !== null];
+        $promptInfo   = $response['result']['prompt_category'] ?? ($payload['_sv_regen_plan']['category'] ?? null);
+
         $jobs[] = [
-            'id'         => (int)$row['id'],
-            'status'     => (string)$row['status'],
-            'created_at' => (string)($row['created_at'] ?? ''),
-            'updated_at' => (string)($row['updated_at'] ?? ''),
-            'model'      => $payload['model'] ?? null,
-            'replaced'   => $response['result']['replaced'] ?? ($row['status'] === 'done'),
-            'error'      => $row['error_message'] ?? null,
+            'id'                 => (int)$row['id'],
+            'status'             => (string)$row['status'],
+            'created_at'         => (string)($row['created_at'] ?? ''),
+            'updated_at'         => (string)($row['updated_at'] ?? ''),
+            'model'              => $payload['model'] ?? null,
+            'replaced'           => $response['result']['replaced'] ?? ($row['status'] === 'done'),
+            'error'              => $row['error_message'] ?? null,
+            'worker_pid'         => $workerPid !== null ? (int)$workerPid : null,
+            'worker_started_at'  => $workerStart,
+            'worker_running'     => (bool)($pidInfo['running'] ?? false),
+            'worker_unknown'     => (bool)($pidInfo['unknown'] ?? false),
+            'prompt_category'    => $promptInfo,
         ];
     }
 
     return $jobs;
+}
+
+function sv_fetch_forge_jobs_grouped(PDO $pdo, array $mediaIds, int $limitPerMedia = 5): array
+{
+    $limitPerMedia = max(1, $limitPerMedia);
+    $mediaIds      = array_values(array_unique(array_filter(array_map('intval', $mediaIds), fn($v) => $v > 0)));
+    if ($mediaIds === []) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($mediaIds), '?'));
+    $stmt = $pdo->prepare(
+        'SELECT id, media_id, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+        . 'FROM jobs WHERE type = ? AND media_id IN (' . $placeholders . ') ORDER BY id DESC'
+    );
+    $stmt->execute(array_merge([SV_FORGE_JOB_TYPE], $mediaIds));
+
+    $rows       = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $workerMeta = sv_fetch_worker_meta_for_media_list($pdo, $mediaIds);
+    $pidCache   = [];
+    $grouped    = [];
+
+    foreach ($rows as $row) {
+        $mediaId = (int)($row['media_id'] ?? 0);
+        if ($mediaId <= 0) {
+            continue;
+        }
+        if (!isset($grouped[$mediaId])) {
+            $grouped[$mediaId] = ['jobs' => []];
+        }
+        if (count($grouped[$mediaId]['jobs']) >= $limitPerMedia) {
+            continue;
+        }
+
+        $payload       = json_decode((string)($row['forge_request_json'] ?? ''), true);
+        $response      = json_decode((string)($row['forge_response_json'] ?? ''), true);
+        $workerPid     = $response['_sv_worker_pid'] ?? ($workerMeta[$mediaId]['worker_pid'] ?? null);
+        $workerStarted = $response['_sv_worker_started_at'] ?? ($workerMeta[$mediaId]['worker_started_at'] ?? null);
+        $pidKey        = is_numeric($workerPid) ? (int)$workerPid : null;
+        if ($pidKey !== null && !isset($pidCache[$pidKey])) {
+            $pidCache[$pidKey] = sv_is_pid_running($pidKey);
+        }
+        $pidInfo = $pidKey !== null ? ($pidCache[$pidKey] ?? ['running' => false, 'unknown' => false]) : ['running' => false, 'unknown' => $workerPid !== null];
+
+        $requestedModel = is_array($payload) ? ($payload['_sv_requested_model'] ?? ($payload['model'] ?? null)) : null;
+        $resolvedModel  = is_array($payload) ? ($payload['model'] ?? null) : null;
+        $shortInfoParts = [];
+        if ($resolvedModel) {
+            $shortInfoParts[] = 'Model: ' . $resolvedModel;
+        }
+        if ($requestedModel && $requestedModel !== $resolvedModel) {
+            $shortInfoParts[] = 'Requested: ' . $requestedModel;
+        }
+        $promptCategory = $response['result']['prompt_category']
+            ?? ($payload['_sv_regen_plan']['category'] ?? null);
+        if ($promptCategory) {
+            $shortInfoParts[] = 'Prompt ' . $promptCategory;
+        }
+
+        $grouped[$mediaId]['jobs'][] = [
+            'id'                => (int)$row['id'],
+            'status'            => (string)$row['status'],
+            'created_at'        => (string)($row['created_at'] ?? ''),
+            'updated_at'        => (string)($row['updated_at'] ?? ''),
+            'model'             => $resolvedModel,
+            'prompt_category'   => $promptCategory,
+            'error_message'     => $row['error_message'] ?? null,
+            'worker_pid'        => $pidKey,
+            'worker_started_at' => $workerStarted,
+            'worker_running'    => (bool)($pidInfo['running'] ?? false),
+            'worker_unknown'    => (bool)($pidInfo['unknown'] ?? false),
+            'info'              => implode(' | ', $shortInfoParts),
+        ];
+    }
+
+    return $grouped;
 }
 
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger): array

@@ -38,6 +38,7 @@
 - Neue Forge-Funktionen müssen das `jobs`-Modell verwenden und auditierbar sein; keine direkten Forge-Helper im Webroot anlegen.
 - Forge läuft standardmäßig lokal auf Port 7861 (sofern die Konfiguration nichts anderes vorgibt). Vor jedem Job wird das gewünschte Modell gegen die verfügbaren Forge-Modelle geprüft; bei nicht auflösbaren Modellen greift zentral in `operations.php` ein Fallback auf `SDXL_FP16_waiNSFWIllustrious_v120.safetensors`.
 - Forge-Regeneration ist asynchron (Web legt Job an, CLI-Worker arbeitet ab). Prompt-Bewertung + Tag-Fallback passieren beim Enqueue; Backup/Replace/Rescan läuft nur im Worker (Replace-in-place) und schreibt Audit/Job-Status. `media_view.php` zeigt den Fortschritt per AJAX, das Dashboard fasst den Queue-Status zusammen.
+- Die Grid-Ansicht `media.php` nutzt denselben Flow: Button „Forge Regen“ legt einen Job an, startet sofort einen dedizierten Worker (`forge_worker_cli.php --limit=1 --media-id=<id>`) ohne zu warten und zeigt Job-/PID-Status per Polling. Keine direkten Forge-Aufrufe aus dem Web.
 
 ## Konsistenz- und Rebuild-Funktionen
 - Neue Konsistenzanzeigen oder Prompt-Rebuild-Komfortpfade müssen über `SCRIPTS/operations.php` laufen und im Dashboard/Views eingebunden werden.
