@@ -59,7 +59,6 @@ $showAdult =
 
 $actionMessage = null;
 $actionSuccess = null;
-$hiddenForgeReasons = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
@@ -380,32 +379,8 @@ $jobsData   = sv_fetch_forge_jobs_grouped($pdo, $mediaIds, 6);
                 $isMissing = (int)($row['is_missing'] ?? 0) === 1;
                 $hasNsfw   = (int)($row['has_nsfw'] ?? 0) === 1;
                 $rating    = (int)($row['rating'] ?? 0);
-                $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
-
                 $thumbUrl  = 'thumb.php?id=' . $id;
                 $detailUrl = sv_media_view_url($id, $showAdult);
-                $forgeAllowed = true;
-                $forgeReason  = '';
-                if (!$hasInternalAccess) {
-                    $forgeAllowed = false;
-                    $forgeReason  = 'Internal-Key fehlt/ungültig.';
-                } elseif ($row['type'] !== 'image') {
-                    $forgeAllowed = false;
-                    $forgeReason  = 'Nur Bildmedien werden unterstützt.';
-                } elseif ($isMissing || $status === 'missing') {
-                    $forgeAllowed = false;
-                    $forgeReason  = 'Medium als fehlend markiert.';
-                } elseif (!$promptComplete) {
-                    $forgeAllowed = false;
-                    $forgeReason  = 'Prompt unvollständig.';
-                } elseif ($path === '') {
-                    $forgeAllowed = false;
-                    $forgeReason  = 'Pfad fehlt.';
-                }
-
-                if (!$forgeAllowed) {
-                    $hiddenForgeReasons[$forgeReason] = ($hiddenForgeReasons[$forgeReason] ?? 0) + 1;
-                }
                 ?>
                 <div class="item<?= $isMissing ? ' missing' : '' ?>" data-media-id="<?= $id ?>">
                     <div class="thumb-wrap">
@@ -437,22 +412,14 @@ $jobsData   = sv_fetch_forge_jobs_grouped($pdo, $mediaIds, 6);
                             <span class="badge">missing</span>
                         <?php endif; ?>
                     </div>
-                    <?php if ($forgeAllowed): ?>
-                        <form method="post" class="forge-form">
-                            <input type="hidden" name="action" value="forge_regen">
-                            <input type="hidden" name="media_id" value="<?= $id ?>">
-                            <button type="submit">Forge Regen</button>
-                        </form>
-                    <?php else: ?>
-                        <div class="help-text">Forge-Regen ausgeblendet: <?= htmlspecialchars($forgeReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                    <?php endif; ?>
+                    <form method="post" class="forge-form">
+                        <input type="hidden" name="action" value="forge_regen">
+                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                        <button type="submit">Forge Regen</button>
+                    </form>
                 </div>
             <?php endforeach; ?>
         </div>
-
-        <?php if ($hiddenForgeReasons !== []): ?>
-            <?php error_log('Forge Regen hidden in media.php: ' . json_encode($hiddenForgeReasons)); ?>
-        <?php endif; ?>
 
         <div class="pager">
             Seite <?= (int)$page ?> / <?= (int)$pages ?> |
