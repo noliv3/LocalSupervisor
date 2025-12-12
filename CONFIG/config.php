@@ -45,6 +45,15 @@ return [
         'nsfw_threshold' => 0.7,
     ],
 
+    'forge' => [
+        'enabled'                => true,
+        'base_url'               => 'http://127.0.0.1:7861/',
+        'dispatch_enabled'       => true,
+        'internal_model_fallback' => 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors',
+        'timeout'                => 30,
+        'token'                  => 'CHANGE_ME_FORGE_TOKEN',
+    ],
+
     'security' => [
         'internal_api_key' => 'CHANGE_ME_INTERNAL_API_KEY',
         'ip_whitelist'     => ['127.0.0.1'],
