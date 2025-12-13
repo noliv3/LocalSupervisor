@@ -553,6 +553,8 @@ $cliEntries = [
         <a href="mediadb.php">Media-Datenbank</a>
     </nav>
 
+    <p style="color: #555; font-size: 0.9rem;">Hinweis: Das neue Card-Grid liegt unter <code>mediadb.php</code>; die alte Grid-Ansicht (<code>media.php</code>) bleibt nur als Legacy-Option bestehen.</p>
+
     <h2>DB-Status</h2>
     <p>DB-Verbindung: OK</p>
     <ul>

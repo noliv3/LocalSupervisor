@@ -92,6 +92,7 @@ function sv_limit_string(string $value, int $maxLen): string
 }
 
 $showAdult = sv_normalize_adult_flag($_GET);
+$viewMode  = (isset($_GET['view']) && $_GET['view'] === 'list') ? 'list' : 'grid';
 
 $page    = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
 $perPage = 100;
@@ -287,7 +288,7 @@ ORDER BY m.id DESC';
     $rows = array_slice($filteredRows, $offset, $perPage);
     $issueReport = sv_collect_integrity_issues($pdo, array_map(static fn ($r) => (int)$r['id'], $rows));
 } else {
-    $countSql = 'SELECT COUNT(*) FROM media m ' . $latestPromptJoin . ' WHERE ' . $whereSql; 
+    $countSql = 'SELECT COUNT(*) FROM media m ' . $latestPromptJoin . ' WHERE ' . $whereSql;
     $countStmt = $pdo->prepare($countSql);
     $countStmt->execute($params);
     $total = (int)$countStmt->fetchColumn();
@@ -318,16 +319,19 @@ LIMIT :limit OFFSET :offset';
 }
 
 $queryParams = [
-    'type'       => $typeFilter,
-    'has_prompt' => $hasPromptFilter,
-    'has_meta'   => $hasMetaFilter,
-    'q'          => $pathFilter,
-    'status'     => $statusFilter,
-    'min_rating' => $minRating,
-    'incomplete' => $incompleteFilter,
-    'issues'     => $issueFilter ? '1' : '0',
+    'type'           => $typeFilter,
+    'has_prompt'     => $hasPromptFilter,
+    'has_meta'       => $hasMetaFilter,
+    'q'              => $pathFilter,
+    'status'         => $statusFilter,
+    'min_rating'     => $minRating,
+    'incomplete'     => $incompleteFilter,
+    'issues'         => $issueFilter ? '1' : '0',
     'prompt_quality' => $promptQualityFilter,
-    'adult'      => $showAdult ? '1' : '0',
+    'adult'          => $showAdult ? '1' : '0',
+    'dupes'          => $dupeFilter ? '1' : '0',
+    'dupe_hash'      => $dupeHashFilter,
+    'view'           => $viewMode,
 ];
 
 $issuesByMedia = $issueReport['by_media'] ?? [];
@@ -349,354 +353,390 @@ if ($hashes) {
     }
 }
 
+$tabConfigs = [
+    [
+        'label' => 'Alle',
+        'overrides' => ['type' => 'all', 'issues' => null, 'prompt_quality' => 'all'],
+    ],
+    [
+        'label' => 'Images',
+        'overrides' => ['type' => 'image', 'issues' => null, 'prompt_quality' => 'all'],
+    ],
+    [
+        'label' => 'Videos',
+        'overrides' => ['type' => 'video', 'issues' => null, 'prompt_quality' => 'all'],
+    ],
+    [
+        'label' => 'Issues',
+        'overrides' => ['issues' => '1', 'prompt_quality' => 'all'],
+    ],
+    [
+        'label' => 'Prompt C/Schwach',
+        'overrides' => ['prompt_quality' => 'C', 'issues' => null],
+    ],
+];
+
+function sv_tab_query(array $base, array $overrides): string
+{
+    $query = $base;
+    foreach ($overrides as $key => $value) {
+        if ($value === null) {
+            unset($query[$key]);
+        } else {
+            $query[$key] = $value;
+        }
+    }
+    $query['p'] = 1;
+    return http_build_query($query);
+}
+
+function sv_tab_active(array $current, array $overrides): bool
+{
+    foreach ($overrides as $key => $value) {
+        $currentValue = $current[$key] ?? null;
+        if ($value === null && $currentValue !== null && $currentValue !== '' && $currentValue !== '0') {
+            return false;
+        }
+        if ($value !== null && $currentValue !== $value) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+$paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !== null);
 ?>
 <!doctype html>
 <html lang="de">
 <head>
     <meta charset="utf-8">
     <title>SuperVisOr Medien</title>
-    <style>
-        body {
-            font-family: system-ui, -apple-system, sans-serif;
-            font-size: 14px;
-            margin: 10px;
-            line-height: 1.4;
-        }
-        h1 {
-            font-size: 20px;
-            margin-bottom: 10px;
-        }
-        form.filter {
-            margin-bottom: 10px;
-            padding: 8px;
-            background: #f7f7f7;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .meta {
-            font-size: 12px;
-            color: #555;
-            margin-bottom: 6px;
-        }
-        .gallery {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-            gap: 10px;
-        }
-        .item {
-            border: 1px solid #ddd;
-            padding: 6px;
-            border-radius: 4px;
-            background: #fafafa;
-            min-height: 260px;
-            box-sizing: border-box;
-        }
-        .thumb-wrap {
-            width: 100%;
-            aspect-ratio: 4 / 3;
-            background: #ececec;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-        }
-        .thumb-wrap img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            display: block;
-        }
-        .title {
-            font-size: 12px;
-            word-break: break-all;
-            margin-top: 6px;
-        }
-        .badges {
-            font-size: 11px;
-            margin-top: 4px;
-        }
-        .badge {
-            display: inline-block;
-            padding: 2px 5px;
-            border-radius: 3px;
-            background: #eee;
-            margin-right: 4px;
-        }
-        .badge.nsfw {
-            background: #c62828;
-            color: #fff;
-        }
-        .badge.video {
-            background: #1976d2;
-            color: #fff;
-        }
-        .badge.image {
-            background: #2e7d32;
-            color: #fff;
-        }
-        .badge.prompt,
-        .badge.meta {
-            background: #e0e0e0;
-            color: #222;
-        }
-        .badge.prompt.present {
-            background: #2e7d32;
-            color: #fff;
-        }
-        .badge.prompt.missing {
-            background: #bdbdbd;
-            color: #111;
-        }
-        .badge.prompt.partial {
-            background: #fbc02d;
-            color: #222;
-        }
-        .badge.meta.missing {
-            background: #ef9a9a;
-            color: #222;
-        }
-        .badge.tag {
-            background: #5c6bc0;
-            color: #fff;
-        }
-        .badge.quality {
-            background: #e0f2f1;
-            color: #00695c;
-        }
-        .badge.quality-A { background: #c8e6c9; color: #1b5e20; }
-        .badge.quality-B { background: #fff3e0; color: #e65100; }
-        .badge.quality-C { background: #ffebee; color: #c62828; }
-        .badge.issue {
-            background: #f57f17;
-            color: #fff;
-        }
-        .badge.dupe {
-            background: #6a1b9a;
-            color: #fff;
-        }
-        .badge.dupe a { color: #fff; text-decoration: none; }
-        .pager {
-            margin: 10px 0;
-            font-size: 13px;
-        }
-        .pager a {
-            margin-right: 5px;
-        }
-        .status {
-            color: #555;
-            font-size: 11px;
-        }
-    </style>
+    <link rel="stylesheet" href="mediadb.css">
 </head>
-<body>
+<body class="media-grid-page">
+<header class="page-header">
+    <div>
+        <h1>SuperVisOr Medien</h1>
+        <div class="header-stats">
+            Gesamt: <?= (int)$total ?> Einträge | <?= $showAdult ? 'FSK18 sichtbar' : 'FSK18 ausgeblendet' ?>
+        </div>
+    </div>
+    <div class="header-actions">
+        <form method="get" class="search-bar">
+            <?php foreach ($paginationBase as $key => $value): if ($key === 'q' || $key === 'p') { continue; } ?>
+                <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+            <?php endforeach; ?>
+            <input type="hidden" name="p" value="1">
+            <input type="text" name="q" value="<?= htmlspecialchars($pathFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Pfad oder Name" aria-label="Pfad oder Name">
+            <button type="submit" class="btn btn-secondary">Suche</button>
+        </form>
+        <div class="fsk-toggle">
+            <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '0', 'p' => 1])) ?>" class="<?= $showAdult ? '' : 'active' ?>">FSK18 aus</a>
+            <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '1', 'p' => 1])) ?>" class="<?= $showAdult ? 'active' : '' ?>">FSK18 an</a>
+        </div>
+        <div class="compact-status">
+            <label>
+                <span>Modus:</span>
+                <select name="view" form="view-form">
+                    <option value="grid" <?= $viewMode === 'grid' ? 'selected' : '' ?>>Card Grid</option>
+                    <option value="list" <?= $viewMode === 'list' ? 'selected' : '' ?>>List Mode</option>
+                </select>
+            </label>
+        </div>
+    </div>
+</header>
 
-<h1>SuperVisOr Medien</h1>
-
-<div class="meta">
-    Gesamt: <?= (int)$total ?> Einträge
-    <?php if (!$showAdult): ?>
-        | FSK18 ausgeblendet
-    <?php else: ?>
-        | FSK18 sichtbar
-    <?php endif; ?>
+<div class="quick-filters">
+    <?php foreach ($tabConfigs as $tab):
+        $tabQuery = sv_tab_query($paginationBase, $tab['overrides']);
+        $isActive = sv_tab_active($queryParams, $tab['overrides']);
+        ?>
+        <a class="filter-tab <?= $isActive ? 'active' : '' ?>" href="?<?= htmlspecialchars($tabQuery, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+            <?= htmlspecialchars($tab['label'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </a>
+    <?php endforeach; ?>
+    <div class="quick-filter-spacer"></div>
+    <div class="compact-status">
+        <label>
+            <span>Status:</span>
+            <select name="status" form="filters-form">
+                <option value="all" <?= $statusFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                <option value="active" <?= $statusFilter === 'active' ? 'selected' : '' ?>>active</option>
+                <option value="archived" <?= $statusFilter === 'archived' ? 'selected' : '' ?>>archived</option>
+                <option value="deleted" <?= $statusFilter === 'deleted' ? 'selected' : '' ?>>deleted</option>
+            </select>
+        </label>
+    </div>
 </div>
 
-<form method="get" class="filter">
+<form id="view-form" method="get" class="hidden-form">
+    <?php foreach ($paginationBase as $key => $value): if ($key === 'view' || $key === 'p') { continue; } ?>
+        <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    <?php endforeach; ?>
+    <input type="hidden" name="p" value="1">
+</form>
+
+<form id="filters-form" method="get" class="controls">
+    <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','min_rating','incomplete','prompt_quality','view','p'], true)) { continue; } ?>
+        <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    <?php endforeach; ?>
+    <input type="hidden" name="p" value="1">
     <label>
-        Typ:
+        Typ
         <select name="type">
-            <option value="all"   <?= $typeFilter === 'all' ? 'selected' : '' ?>>alle</option>
+            <option value="all" <?= $typeFilter === 'all' ? 'selected' : '' ?>>alle</option>
             <option value="image" <?= $typeFilter === 'image' ? 'selected' : '' ?>>Bilder</option>
             <option value="video" <?= $typeFilter === 'video' ? 'selected' : '' ?>>Videos</option>
         </select>
     </label>
     <label>
-        Prompt:
+        Prompt
         <select name="has_prompt">
-            <option value="all"     <?= $hasPromptFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="with"    <?= $hasPromptFilter === 'with' ? 'selected' : '' ?>>nur mit Prompt</option>
+            <option value="all" <?= $hasPromptFilter === 'all' ? 'selected' : '' ?>>alle</option>
+            <option value="with" <?= $hasPromptFilter === 'with' ? 'selected' : '' ?>>mit Prompt</option>
             <option value="without" <?= $hasPromptFilter === 'without' ? 'selected' : '' ?>>ohne Prompt</option>
         </select>
     </label>
     <label>
-        Prompt-Qualität:
-        <select name="prompt_quality">
-            <option value="all" <?= $promptQualityFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="A"   <?= $promptQualityFilter === 'A' ? 'selected' : '' ?>>A (gut)</option>
-            <option value="B"   <?= $promptQualityFilter === 'B' ? 'selected' : '' ?>>B (mittel)</option>
-            <option value="C"   <?= $promptQualityFilter === 'C' ? 'selected' : '' ?>>C (kritisch)</option>
-        </select>
-    </label>
-    <label>
-        Metadaten:
+        Metadaten
         <select name="has_meta">
-            <option value="all"     <?= $hasMetaFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="with"    <?= $hasMetaFilter === 'with' ? 'selected' : '' ?>>nur mit Meta</option>
+            <option value="all" <?= $hasMetaFilter === 'all' ? 'selected' : '' ?>>alle</option>
+            <option value="with" <?= $hasMetaFilter === 'with' ? 'selected' : '' ?>>mit Meta</option>
             <option value="without" <?= $hasMetaFilter === 'without' ? 'selected' : '' ?>>ohne Meta</option>
         </select>
     </label>
     <label>
-        Konsistenz:
-        <select name="incomplete">
-            <option value="none"    <?= $incompleteFilter === 'none' ? 'selected' : '' ?>>alle</option>
-            <option value="prompt"  <?= $incompleteFilter === 'prompt' ? 'selected' : '' ?>>Prompt unvollständig</option>
-            <option value="tags"    <?= $incompleteFilter === 'tags' ? 'selected' : '' ?>>ohne Tags</option>
-            <option value="meta"    <?= $incompleteFilter === 'meta' ? 'selected' : '' ?>>ohne Metadaten</option>
-            <option value="any"     <?= $incompleteFilter === 'any' ? 'selected' : '' ?>>irgendetwas fehlt</option>
-        </select>
-    </label>
-    <label>
-        <input type="checkbox" name="issues" value="1" <?= $issueFilter ? 'checked' : '' ?>>
-        nur mit Problemen
-    </label>
-    <label>
-        Status:
-        <select name="status">
-            <option value="all"      <?= $statusFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="active"   <?= $statusFilter === 'active' ? 'selected' : '' ?>>active</option>
-            <option value="archived" <?= $statusFilter === 'archived' ? 'selected' : '' ?>>archived</option>
-            <option value="deleted"  <?= $statusFilter === 'deleted' ? 'selected' : '' ?>>deleted</option>
-        </select>
-    </label>
-    <label>
-        Min. Rating:
+        Min Rating
         <select name="min_rating">
-            <option value="0" <?= $minRating === 0 ? 'selected' : '' ?>>keins</option>
-            <option value="1" <?= $minRating === 1 ? 'selected' : '' ?>>≥1</option>
-            <option value="2" <?= $minRating === 2 ? 'selected' : '' ?>>≥2</option>
-            <option value="3" <?= $minRating === 3 ? 'selected' : '' ?>>≥3</option>
+            <option value="0" <?= $minRating === 0 ? 'selected' : '' ?>>egal</option>
+            <option value="1" <?= $minRating === 1 ? 'selected' : '' ?>>1+</option>
+            <option value="2" <?= $minRating === 2 ? 'selected' : '' ?>>2+</option>
+            <option value="3" <?= $minRating === 3 ? 'selected' : '' ?>>3</option>
         </select>
     </label>
     <label>
-        Pfad enthält:
-        <input type="text" name="q" size="40"
-               value="<?= htmlspecialchars($pathFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+        Incomplete
+        <select name="incomplete">
+            <option value="none" <?= $incompleteFilter === 'none' ? 'selected' : '' ?>>aus</option>
+            <option value="prompt" <?= $incompleteFilter === 'prompt' ? 'selected' : '' ?>>Prompt</option>
+            <option value="tags" <?= $incompleteFilter === 'tags' ? 'selected' : '' ?>>Tags</option>
+            <option value="meta" <?= $incompleteFilter === 'meta' ? 'selected' : '' ?>>Meta</option>
+            <option value="any" <?= $incompleteFilter === 'any' ? 'selected' : '' ?>>alles</option>
+        </select>
     </label>
     <label>
-        <input type="checkbox" name="dupes" value="1" <?= $dupeFilter ? 'checked' : '' ?>> nur Duplikate
+        Prompt-Qualität
+        <select name="prompt_quality">
+            <option value="all" <?= $promptQualityFilter === 'all' ? 'selected' : '' ?>>alle</option>
+            <option value="A" <?= $promptQualityFilter === 'A' ? 'selected' : '' ?>>A</option>
+            <option value="B" <?= $promptQualityFilter === 'B' ? 'selected' : '' ?>>B</option>
+            <option value="C" <?= $promptQualityFilter === 'C' ? 'selected' : '' ?>>C</option>
+        </select>
     </label>
-    <label>
-        Hash:
-        <input type="text" name="dupe_hash" size="20" value="<?= htmlspecialchars($dupeHashFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-    </label>
-    <input type="hidden" name="adult" value="<?= $showAdult ? '1' : '0' ?>">
-    <button type="submit">Filtern</button>
+    <button type="submit">Filter anwenden</button>
+    <a class="reset-link" href="?adult=<?= $showAdult ? '1' : '0' ?>">Reset</a>
 </form>
 
-<div class="meta">
-    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code>
-</div>
-
-<div class="pager">
-    Seite <?= (int)$page ?> / <?= (int)$pages ?> |
+<div class="pager compact">
+    <span>Seite <?= (int)$page ?> / <?= (int)$pages ?></span>
     <?php if ($page > 1): ?>
-        <a href="?<?= http_build_query(array_merge($queryParams, ['p' => $page - 1])) ?>">« zurück</a>
+        <a href="?<?= http_build_query(array_merge($paginationBase, ['p' => $page - 1])) ?>">« zurück</a>
+    <?php else: ?>
+        <span class="disabled">« zurück</span>
     <?php endif; ?>
     <?php if ($page < $pages): ?>
-        <a href="?<?= http_build_query(array_merge($queryParams, ['p' => $page + 1])) ?>">weiter »</a>
+        <a href="?<?= http_build_query(array_merge($paginationBase, ['p' => $page + 1])) ?>">weiter »</a>
+    <?php else: ?>
+        <span class="disabled">weiter »</span>
     <?php endif; ?>
 </div>
 
-<div class="gallery">
-    <?php foreach ($rows as $row):
-        $id      = (int)$row['id'];
-        $path    = (string)$row['path'];
-        $type    = (string)$row['type'];
-        $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
-        $rating  = (int)($row['rating'] ?? 0);
-        $status  = (string)($row['status'] ?? '');
-        $hash    = (string)($row['hash'] ?? '');
-        $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
-        $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
-        $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
-        $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
-        $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
-        $hasIssues = isset($issuesByMedia[$id]);
+<?php if ($viewMode === 'grid'): ?>
+    <div class="media-grid">
+        <?php if ($rows === []): ?>
+            <div class="empty">Keine Einträge für diesen Filter.</div>
+        <?php endif; ?>
+        <?php foreach ($rows as $row):
+            $id      = (int)$row['id'];
+            $path    = (string)$row['path'];
+            $type    = (string)$row['type'];
+            $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
+            $rating  = (int)($row['rating'] ?? 0);
+            $status  = (string)($row['status'] ?? '');
+            $hash    = (string)($row['hash'] ?? '');
+            $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
+            $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
+            $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
+            $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
+            $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
+            $hasIssues = isset($issuesByMedia[$id]);
 
-        $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
-            $row['prompt_text'] ?? null,
-            isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
-            isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
-        );
-        $qualityClass = $qualityData['quality_class'];
-        $qualityScore = (int)$qualityData['score'];
-        $qualityIssues = array_slice($qualityData['issues'] ?? [], 0, 2);
+            $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
+                $row['prompt_text'] ?? null,
+                isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
+                isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
+            );
+            $qualityClass = $qualityData['quality_class'];
+            $qualityScore = (int)$qualityData['score'];
+            $qualityIssues = array_slice($qualityData['issues'] ?? [], 0, 2);
 
-        $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
-        $detailParams = array_merge($queryParams, ['id' => $id, 'p' => $page]);
-        $streamUrl = sv_media_stream_url($id, $showAdult, false);
-        ?>
-        <div class="item">
-            <div class="thumb-wrap">
-                <?php if ($type === 'image'): ?>
-                    <a href="media_view.php?<?= http_build_query($detailParams) ?>">
+            $statusVariant = 'clean';
+            if ($hasIssues) {
+                $statusVariant = 'warn';
+            }
+            if ($qualityClass === 'C') {
+                $statusVariant = 'warn';
+            }
+            if ($status !== '' && $status !== 'active') {
+                $statusVariant = 'bad';
+            }
+
+            $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
+            $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
+            $streamUrl = sv_media_stream_url($id, $showAdult, false);
+            $resolution = (isset($row['prompt_width'], $row['prompt_height']) && $row['prompt_width'] && $row['prompt_height'])
+                ? ((int)$row['prompt_width'] . '×' . (int)$row['prompt_height'])
+                : 'keine Größe';
+            ?>
+            <article class="media-card status-<?= $statusVariant ?>" data-media-id="<?= $id ?>">
+                <div class="card-badges">
+                    <?php if ($dupeCount > 1): ?>
+                        <span class="pill pill-warn">Dupe x<?= (int)$dupeCount ?></span>
+                    <?php endif; ?>
+                    <?php if ($hasIssues): ?>
+                        <span class="pill pill-warn" title="Integritätsprobleme erkannt">Issues</span>
+                    <?php endif; ?>
+                    <?php if ($hasNsfw): ?>
+                        <span class="pill pill-nsfw">FSK18</span>
+                    <?php endif; ?>
+                    <?php if ($status !== '' && $status !== 'active'): ?>
+                        <span class="pill pill-bad">Status <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <?php endif; ?>
+                    <?php if ($rating > 0): ?>
+                        <span class="pill">Rating <?= $rating ?></span>
+                    <?php endif; ?>
+                </div>
+
+                <div class="thumb-wrap">
+                    <?php if ($type === 'image'): ?>
                         <img
                             src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+                            data-media-id="<?= $id ?>"
                             loading="lazy"
                             alt="ID <?= $id ?>">
-                    </a>
-                <?php else: ?>
-                    <a href="media_view.php?<?= http_build_query($detailParams) ?>">Video</a>
-                <?php endif; ?>
-            </div>
-            <div class="title">
-                ID <?= $id ?> – <?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-            </div>
-            <div class="badges">
-                <span class="badge <?= $type === 'video' ? 'video' : 'image' ?>"><?= $type === 'video' ? 'V' : 'I' ?></span>
-                <?php if ($dupeCount > 1): ?>
-                    <span class="badge dupe"><a href="?<?= http_build_query(array_merge($queryParams, ['dupes' => '1', 'dupe_hash' => $hash])) ?>">DUPE x<?= (int)$dupeCount ?></a></span>
-                <?php endif; ?>
-                <?php if ($hasIssues): ?>
-                    <span class="badge issue" title="Integritätsprobleme erkannt">!</span>
-                <?php endif; ?>
-                <?php if ($hasPrompt && $promptComplete): ?>
-                    <span class="badge prompt present" title="Prompt vollständig">P</span>
-                <?php elseif ($hasPrompt && !$promptComplete): ?>
-                    <span class="badge prompt partial" title="Prompt-Daten unvollständig">P*</span>
-                <?php else: ?>
-                    <span class="badge prompt missing" title="Kein Prompt hinterlegt">P?</span>
-                <?php endif; ?>
-                <span class="badge quality quality-<?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?>)<?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>">PQ:<?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                <?php if ($hasMeta): ?>
-                    <span class="badge meta" title="Metadaten vorhanden">M</span>
-                <?php else: ?>
-                    <span class="badge meta missing" title="Keine Metadaten gefunden">M?</span>
-                <?php endif; ?>
-                <?php if ($hasTags): ?>
-                    <span class="badge tag" title="Tags gespeichert">T</span>
-                <?php endif; ?>
-                <?php if ($hasNsfw): ?>
-                    <span class="badge nsfw">FSK18</span>
-                <?php endif; ?>
-                <?php if ($rating > 0): ?>
-                    <span class="badge">Rating <?= $rating ?></span>
-                <?php endif; ?>
-                <?php if ($status !== '' && $status !== 'active'): ?>
-                    <span class="badge status">Status <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                <?php endif; ?>
-            </div>
-            <div class="badges">
-                <a href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
-                <?php if ($type === 'image'): ?>
-                    | <a href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">Original</a>
-                <?php elseif ($type === 'video'): ?>
-                    | <a href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank">Pfad</a>
-                <?php endif; ?>
-            </div>
+                    <?php else: ?>
+                        <div class="thumb-missing">Video</div>
+                    <?php endif; ?>
+                    <div class="card-actions">
+                        <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
+                    </div>
+                </div>
+
+                <div class="card-info">
+                    <div class="info-line">
+                        <span class="info-chip"><?= $type === 'video' ? 'Video' : 'Bild' ?></span>
+                        <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">PQ <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <?php if ($hasMeta): ?><span class="info-chip">Meta</span><?php endif; ?>
+                        <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
+                        <?php if ($hasPrompt && !$promptComplete): ?><span class="info-chip chip-warn">Prompt unvollständig</span><?php endif; ?>
+                        <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
+                    </div>
+                    <div class="info-path" title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        ID <?= $id ?> · <?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                    </div>
+                    <div class="info-line">
+                        <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
+                        <a class="btn btn-primary" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
+                    </div>
+                </div>
+            </article>
+        <?php endforeach; ?>
+    </div>
+<?php else: ?>
+    <div class="panel" style="margin: 1rem;">
+        <div class="panel-header">Listenansicht</div>
+        <div class="panel-content">
+            <?php if ($rows === []): ?>
+                <div class="empty">Keine Einträge für diesen Filter.</div>
+            <?php else: ?>
+                <table style="width:100%; border-collapse: collapse; font-size: 0.9rem;">
+                    <thead>
+                        <tr style="text-align:left; border-bottom:1px solid #1f2733;">
+                            <th>ID</th>
+                            <th>Name</th>
+                            <th>Typ</th>
+                            <th>Prompt</th>
+                            <th>Meta</th>
+                            <th>Tags</th>
+                            <th>Issues</th>
+                            <th>Rating</th>
+                            <th>Status</th>
+                            <th>Aktion</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($rows as $row):
+                        $id      = (int)$row['id'];
+                        $path    = (string)$row['path'];
+                        $type    = (string)$row['type'];
+                        $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
+                        $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
+                        $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
+                        $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
+                        $hasIssues = isset($issuesByMedia[$id]);
+                        $rating  = (int)($row['rating'] ?? 0);
+                        $status  = (string)($row['status'] ?? '');
+                        $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
+                        ?>
+                        <tr style="border-bottom:1px solid #111827;">
+                            <td><?= $id ?></td>
+                            <td title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                            <td><?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                            <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
+                            <td><?= $hasMeta ? 'ja' : 'nein' ?></td>
+                            <td><?= $hasTags ? 'ja' : 'nein' ?></td>
+                            <td><?= $hasIssues ? 'ja' : '—' ?></td>
+                            <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
+                            <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?></td>
+                            <td><a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
         </div>
-    <?php endforeach; ?>
+    </div>
+<?php endif; ?>
+
+<div class="meta" style="text-align:center; padding:0.6rem; color:#9ca3af;">
+    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Card Grid · Legacy-Grid media.php bleibt unverändert
 </div>
 
-<div class="pager">
-    Seite <?= (int)$page ?> / <?= (int)$pages ?> |
+<div class="pager compact">
+    <span>Seite <?= (int)$page ?> / <?= (int)$pages ?></span>
     <?php if ($page > 1): ?>
-        <a href="?<?= http_build_query(array_merge($queryParams, ['p' => $page - 1])) ?>">« zurück</a>
+        <a href="?<?= http_build_query(array_merge($paginationBase, ['p' => $page - 1])) ?>">« zurück</a>
+    <?php else: ?>
+        <span class="disabled">« zurück</span>
     <?php endif; ?>
     <?php if ($page < $pages): ?>
-        <a href="?<?= http_build_query(array_merge($queryParams, ['p' => $page + 1])) ?>">weiter »</a>
+        <a href="?<?= http_build_query(array_merge($paginationBase, ['p' => $page + 1])) ?>">weiter »</a>
+    <?php else: ?>
+        <span class="disabled">weiter »</span>
     <?php endif; ?>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const viewSelect = document.querySelector('select[name="view"][form="view-form"]');
+    const viewForm = document.getElementById('view-form');
+    if (viewSelect && viewForm) {
+        viewSelect.addEventListener('change', () => viewForm.submit());
+    }
+});
+</script>
 
 </body>
 </html>
