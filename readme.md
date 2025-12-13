@@ -30,7 +30,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Prompt-Extraktion & -Normalisierung**: Kandidaten aus EXIF-Kommentaren, PNG-Text, Parameter-Strings und JSON-Blöcken werden gesammelt, gewichtet und in `prompts` strukturiert; Raw-Blöcke landen parallel in `media_meta`.
 - **Prompt-Rebuild**: Liest aktive Medien mit fehlenden Kernfeldern erneut von der Quelldatei und wendet die Prompt-Pipeline an (keine Auswertung bestehender `media_meta`-Snapshots).
 - **Tag-Pipeline**: Scanner liefert Tags/Confidence; Persistenz erfolgt in `tags`/`media_tags` mit Lock-Flag, um manuelle Korrekturen zu schützen.
-- **Medienanzeige**: `mediadb.php` filtert/zeigt Liste, `media_view.php` zeigt Details inkl. Metadaten/Prompts, `media_stream.php`/`thumb.php` streamen geprüfte Pfade.
+- **Medienanzeige**: `mediadb.php` filtert/zeigt Liste, `media_view.php` zeigt Details inkl. Metadaten/Prompts, `media_stream.php`/`thumb.php` streamen geprüfte Pfade. Die Detailansicht ist als zweispaltige Workbench mit großem Preview, Aktions-/Status-Panels und einklappbaren Prompt/Tags/Meta-Bereichen aufgebaut.
 - **Media-Grid**: `media.php` rendert eine kompakte Kartenansicht mit Hover-Aktionen (Forge, Details, Missing) und farbcodierten Statusrändern.
 - **Einzel-Rebuild / logisches Löschen**: In `media_view.php` können einzelne Medien erneut durch die Prompt-Pipeline geschickt oder als `missing` markiert werden (keine Dateilöschung, Status-Umschaltung über `operations.php`).
 - **Sicherheitsmodell**: Schreibende Webaktionen verlangen Internal-Key + IP-Whitelist; Pfadvalidierung verhindert Symlinks/Webroot-Bypass; Audit-Log dokumentiert kritische Operationen.
@@ -117,4 +117,4 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - Prompt-Historie fehlt; Raw-Blöcke werden zwar gespeichert, aber Historisierung/Versionierung der Prompts ist nicht vorhanden.
 - Automatische Regeneration aus bestehenden `media_meta`-Snapshots existiert nicht; Rebuild liest immer von der Quelldatei.
 - Delete-/Qualitätsmechanik (automatisches Löschen/Retagging) ist nicht implementiert; Status-Flag `missing` ersetzt Löschungen.
-- UI-Modernisierung steht aus: Dashboard/Listen/Detail sind funktional, aber ohne moderne UX/JS-Verbesserungen.
+- UI-Modernisierung teilweise umgesetzt: Die Media-Detailansicht nutzt bereits das neue Workbench-Layout; Dashboard und Listenansicht bleiben funktional, aber ohne moderne UX/JS-Verbesserungen.
