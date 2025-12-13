@@ -43,6 +43,18 @@ $logger = function (string $msg): void {
 
 try {
     $summary = sv_process_forge_job_batch($pdo, $config, $limit, $logger, $mediaId);
+
+    if (($summary['total'] ?? 0) === 0) {
+        $scope = $mediaId === null ? 'all' : (string)$mediaId;
+        $message = 'No forge jobs found for media_id=' . $scope . ', exiting';
+        @file_put_contents(
+            $runtimeLog,
+            sprintf('[%s] %s', date('c'), $message) . PHP_EOL,
+            FILE_APPEND
+        );
+        $logger($message);
+    }
+
     $line = sprintf(
         'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d',
         (int)($summary['total'] ?? 0),
