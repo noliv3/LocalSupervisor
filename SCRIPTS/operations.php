@@ -783,7 +783,7 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
     ];
 }
 
-function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, callable $logger): array
+function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, callable $logger, array $overrides = []): array
 {
     $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
     $type     = (string)($mediaRow['type'] ?? '');
@@ -805,19 +805,23 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
 
     $tags       = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
-    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger);
+    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger, $overrides);
     $promptId   = isset($mediaRow['prompt_id']) ? (int)$mediaRow['prompt_id'] : null;
+
+    $imageInfo = @getimagesize($path);
+    $origWidth = $imageInfo !== false ? (int)$imageInfo[0] : (int)($mediaRow['width'] ?? 0);
+    $origHeight = $imageInfo !== false ? (int)$imageInfo[1] : (int)($mediaRow['height'] ?? 0);
 
     $payload = [
         'prompt'          => $regenPlan['final_prompt'],
-        'negative_prompt' => (string)($mediaRow['negative_prompt'] ?? ''),
+        'negative_prompt' => '',
         'model'           => (string)($mediaRow['model'] ?? ''),
         'sampler'         => (string)($mediaRow['sampler'] ?? ''),
         'cfg_scale'       => isset($mediaRow['cfg_scale']) ? (float)$mediaRow['cfg_scale'] : 7.0,
         'steps'           => isset($mediaRow['steps']) ? (int)$mediaRow['steps'] : 30,
         'seed'            => (string)($mediaRow['seed'] ?? ''),
-        'width'           => (int)($mediaRow['width'] ?? 0),
-        'height'          => (int)($mediaRow['height'] ?? 0),
+        'width'           => $origWidth,
+        'height'          => $origHeight,
     ];
 
     if (!empty($mediaRow['scheduler'])) {
@@ -836,14 +840,6 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         $payload['source_metadata'] = (string)$mediaRow['source_metadata'];
     }
 
-    if ($payload['width'] <= 0 || $payload['height'] <= 0) {
-        $imageInfo = @getimagesize($path);
-        if ($imageInfo !== false) {
-            $payload['width']  = (int)$imageInfo[0];
-            $payload['height'] = (int)$imageInfo[1];
-        }
-    }
-
     if ($payload['steps'] <= 0) {
         $payload['steps'] = 30;
     }
@@ -853,6 +849,9 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
 
     $seedInfo        = sv_ensure_media_seed($pdo, (int)$mediaRow['id'], $payload['seed'], $logger);
     $payload['seed'] = $seedInfo['seed'];
+
+    $negativePlan = sv_resolve_negative_prompt($mediaRow, $overrides, $regenPlan, $tags);
+    $payload['negative_prompt'] = $negativePlan['negative_prompt'];
 
     $requestedModel = (string)($payload['model'] ?? '');
     $resolvedModel  = sv_resolve_forge_model($config, $requestedModel, $logger);
@@ -882,18 +881,36 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         $payload['_sv_mode'] = 'txt2img';
     }
 
+    $origExt = strtolower(pathinfo($path, PATHINFO_EXTENSION));
     $payload['_sv_regen_plan'] = [
-        'category'        => $regenPlan['category'],
-        'final_prompt'    => $regenPlan['final_prompt'],
-        'fallback_used'   => $regenPlan['fallback_used'],
-        'tag_prompt_used' => $regenPlan['tag_prompt_used'],
-        'original_prompt' => $regenPlan['original_prompt'] ?? null,
-        'quality_score'   => $regenPlan['assessment']['score'] ?? null,
-        'quality_issues'  => $regenPlan['assessment']['issues'] ?? null,
-        'tag_fragment'    => $regenPlan['tag_fragment'] ?? null,
-        'seed_generated'  => $seedInfo['created'],
-        'prompt_missing'  => $regenPlan['prompt_missing'],
+        'category'         => $regenPlan['category'],
+        'final_prompt'     => $regenPlan['final_prompt'],
+        'fallback_used'    => $regenPlan['fallback_used'],
+        'tag_prompt_used'  => $regenPlan['tag_prompt_used'],
+        'original_prompt'  => $regenPlan['original_prompt'] ?? null,
+        'quality_score'    => $regenPlan['assessment']['score'] ?? null,
+        'quality_issues'   => $regenPlan['assessment']['issues'] ?? null,
+        'tag_fragment'     => $regenPlan['tag_fragment'] ?? null,
+        'seed_generated'   => $seedInfo['created'],
+        'prompt_missing'   => $regenPlan['prompt_missing'],
+        'prompt_source'    => $regenPlan['prompt_source'] ?? null,
+        'tags_used_count'  => $regenPlan['tags_used_count'] ?? 0,
+        'tags_limited'     => $regenPlan['tags_limited'] ?? false,
+        'negative_mode'    => $negativePlan['negative_mode'],
+        'negative_len'     => $negativePlan['negative_len'],
+        'orig_width'       => $origWidth,
+        'orig_height'      => $origHeight,
+        'orig_ext'         => $origExt,
+        'allow_empty_neg'  => !empty($overrides['allow_empty_negative']),
+        'manual_prompt'    => $overrides['manual_prompt'] ?? null,
+        'manual_negative'  => array_key_exists('manual_negative_prompt', $overrides)
+            ? ($overrides['manual_negative_prompt'] ?? '')
+            : null,
+        'use_hybrid'       => !empty($overrides['use_hybrid']),
     ];
+
+    $payload['_sv_negative_mode'] = $negativePlan['negative_mode'];
+    $payload['_sv_negative_len']  = $negativePlan['negative_len'];
 
     return [
         'payload'         => $payload,
@@ -903,16 +920,18 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         'resolved_model'  => $resolvedModel,
         'media_row'       => $mediaRow,
         'path'            => $path,
+        'negative_mode'   => $negativePlan['negative_mode'],
+        'negative_len'    => $negativePlan['negative_len'],
     ];
 }
 
-function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, callable $logger): array
+function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, callable $logger, array $overrides = []): array
 {
     if (!sv_is_forge_enabled($config)) {
         throw new RuntimeException('Forge ist deaktiviert.');
     }
 
-    $jobData = sv_prepare_forge_regen_job($pdo, $config, $mediaId, $logger);
+    $jobData = sv_prepare_forge_regen_job($pdo, $config, $mediaId, $logger, $overrides);
     $fallbackModel = sv_forge_fallback_model($config);
 
     $jobId = sv_create_forge_job(
@@ -1952,11 +1971,25 @@ function sv_strip_human_tokens(string $prompt): string
     return trim(preg_replace('~\s{2,}~', ' ', $cleaned) ?? $cleaned, " ,");
 }
 
-function sv_build_grouped_tag_prompt(array $tags, bool $noHumans): ?string
+function sv_limit_tag_bucket(array $items, int $limit, string $fallbackLabel): array
+{
+    $unique = array_values(array_unique(array_filter(array_map('trim', $items), fn($v) => $v !== '')));
+    if (count($unique) <= $limit) {
+        return [$unique, false];
+    }
+
+    $kept      = array_slice($unique, 0, $limit);
+    $kept[]    = $fallbackLabel;
+
+    return [$kept, true];
+}
+
+function sv_build_grouped_tag_prompt(array $tags, bool $noHumans): ?array
 {
     $subject = [];
     $background = [];
     $style = [];
+    $pattern = [];
 
     foreach ($tags as $tag) {
         $name = isset($tag['name']) ? trim((string)$tag['name']) : '';
@@ -1967,6 +2000,16 @@ function sv_build_grouped_tag_prompt(array $tags, bool $noHumans): ?string
         $type = strtolower((string)($tag['type'] ?? 'content'));
         if ($type === 'style') {
             $style[] = $name;
+            continue;
+        }
+
+        if ($type === 'pattern') {
+            $pattern[] = $name;
+            continue;
+        }
+
+        if ($type === 'background') {
+            $background[] = $name;
             continue;
         }
 
@@ -1984,9 +2027,15 @@ function sv_build_grouped_tag_prompt(array $tags, bool $noHumans): ?string
         }));
     }
 
+    [$pattern, $patternLimited]     = sv_limit_tag_bucket($pattern, 3, 'pattern mix');
+    [$background, $backgroundLimited] = sv_limit_tag_bucket($background, 3, 'background detail');
+
     $parts = [];
     if ($subject !== []) {
         $parts[] = implode(', ', $subject);
+    }
+    if ($pattern !== []) {
+        $parts[] = implode(', ', $pattern);
     }
     if ($background !== []) {
         $parts[] = implode(', ', $background);
@@ -2000,27 +2049,66 @@ function sv_build_grouped_tag_prompt(array $tags, bool $noHumans): ?string
     }
 
     $prompt = implode(', ', $parts);
-    return $prompt === '' ? null : $prompt;
+    if ($prompt === '') {
+        return null;
+    }
+
+    return [
+        'prompt'          => $prompt,
+        'tags_used_count' => count($subject) + count($background) + count($style) + count($pattern),
+        'limited'         => $patternLimited || $backgroundLimited,
+        'no_humans'       => $noHumans,
+    ];
 }
 
-function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $logger): array
+function sv_is_flux_media(array $mediaRow): bool
 {
-    $originalPrompt = trim((string)($mediaRow['prompt'] ?? ''));
-    $noHumans       = sv_tag_has_no_humans_flag($tags);
-    $tagPrompt      = sv_build_grouped_tag_prompt($tags, $noHumans);
+    $modelName = strtolower((string)($mediaRow['model'] ?? ''));
+    if ($modelName !== '' && str_contains($modelName, 'flux')) {
+        return true;
+    }
 
-    $effectivePrompt = $originalPrompt;
+    $metaRaw = (string)($mediaRow['source_metadata'] ?? '');
+    return stripos($metaRaw, 'flux') !== false;
+}
+
+function sv_normalize_manual_field(?string $value, int $maxLen): string
+{
+    if (!is_string($value)) {
+        return '';
+    }
+
+    $trimmed = trim($value);
+    if ($trimmed === '') {
+        return '';
+    }
+
+    return mb_substr($trimmed, 0, $maxLen);
+}
+
+function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $logger, array $overrides = []): array
+{
+    $manualPrompt = sv_normalize_manual_field($overrides['manual_prompt'] ?? null, 2000);
+    $useHybrid    = !empty($overrides['use_hybrid']);
+    $noHumans       = sv_tag_has_no_humans_flag($tags);
+    $tagPromptData  = sv_build_grouped_tag_prompt($tags, $noHumans);
+    $tagPrompt      = is_array($tagPromptData) ? ($tagPromptData['prompt'] ?? null) : null;
+
+    $originalPrompt = trim((string)($mediaRow['prompt'] ?? ''));
+    $effectivePrompt = $manualPrompt !== '' ? $manualPrompt : $originalPrompt;
     $tagPromptUsed   = false;
     $fallbackUsed    = false;
+    $promptSource    = $manualPrompt !== '' ? 'manual' : 'stored_prompt';
     $assessment      = null;
 
-    if ($effectivePrompt === '' && $tagPrompt !== null) {
+    if ($manualPrompt === '' && $effectivePrompt === '' && $tagPrompt !== null) {
         $effectivePrompt = $tagPrompt;
         $tagPromptUsed   = true;
         $fallbackUsed    = true;
+        $promptSource    = 'tags_prompt';
     }
 
-    if ($effectivePrompt === '') {
+    if ($effectivePrompt === '' && $tagPrompt === null) {
         throw new RuntimeException('Kein Prompt vorhanden und keine Tags verfügbar.');
     }
 
@@ -2035,25 +2123,33 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
     $quality     = $assessment['quality_class'];
     $tagFragment = $assessment['tag_based_suggestion'] ?? '';
 
-    if ($quality === 'B' && $assessment['hybrid_suggestion'] !== null) {
-        $effectivePrompt = (string)$assessment['hybrid_suggestion'];
-        $fallbackUsed    = true;
-    } elseif ($quality === 'C') {
-        if ($tagPrompt === null && $assessment['tag_based_suggestion'] === null) {
-            throw new RuntimeException('Prompt zu schwach und keine Tags verfügbar.');
+    if ($manualPrompt === '') {
+        if ($quality === 'C') {
+            $effectivePrompt = $tagPrompt !== null ? 'Detailed reconstruction, ' . $tagPrompt : $effectivePrompt;
+            $promptSource    = 'tags_prompt';
+            $fallbackUsed    = true;
+            $tagPromptUsed   = $tagPrompt !== null;
+        } elseif ($useHybrid && $tagPrompt !== null && $originalPrompt !== '') {
+            $effectivePrompt = $originalPrompt . ', ' . $tagPrompt;
+            $promptSource    = 'hybrid';
+            $tagPromptUsed   = true;
+        } elseif ($effectivePrompt === '' && $tagPrompt !== null) {
+            $effectivePrompt = $tagPrompt;
+            $promptSource    = 'tags_prompt';
+            $tagPromptUsed   = true;
+        } elseif ($promptSource === 'stored_prompt' && $quality !== 'A' && $quality !== 'B' && $tagPrompt !== null) {
+            $effectivePrompt = $tagPrompt;
+            $promptSource    = 'tags_prompt';
+            $tagPromptUsed   = true;
+            $fallbackUsed    = true;
         }
-        $baseSuggestion = $assessment['tag_based_suggestion'] ?? $tagPrompt ?? $effectivePrompt;
-        $effectivePrompt = 'Detailed reconstruction, ' . $baseSuggestion;
-        $fallbackUsed    = true;
-        $tagPromptUsed   = true;
     }
 
     if ($noHumans) {
         $cleaned = sv_strip_human_tokens($effectivePrompt);
-        if ($cleaned === '') {
-            throw new RuntimeException('Prompt kollidiert mit no_humans-Tag.');
+        if ($cleaned !== '') {
+            $effectivePrompt = $cleaned;
         }
-        $effectivePrompt = $cleaned;
     }
 
     if ($fallbackUsed && $tagFragment !== '') {
@@ -2069,7 +2165,10 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
         'assessment'      => $assessment,
         'tag_fragment'    => $tagFragment,
         'no_humans'       => $noHumans,
-        'prompt_missing'  => $originalPrompt === '',
+        'prompt_missing'  => $manualPrompt === '' ? ($originalPrompt === '') : false,
+        'prompt_source'   => $promptSource,
+        'tags_used_count' => is_array($tagPromptData) ? ($tagPromptData['tags_used_count'] ?? 0) : 0,
+        'tags_limited'    => is_array($tagPromptData) ? (bool)($tagPromptData['limited'] ?? false) : false,
     ];
 }
 
@@ -2106,6 +2205,63 @@ function sv_ensure_media_seed(PDO $pdo, int $mediaId, ?string $existingSeed, cal
     $logger('Seed generiert und gespeichert: ' . $seed);
 
     return ['seed' => $seed, 'created' => true];
+}
+
+function sv_resolve_negative_prompt(array $mediaRow, array $overrides, array $regenPlan, array $tags): array
+{
+    $manualNegative = array_key_exists('manual_negative_prompt', $overrides)
+        ? sv_normalize_manual_field((string)$overrides['manual_negative_prompt'], 2000)
+        : null;
+    $allowEmpty     = !empty($overrides['allow_empty_negative']);
+    $fallback       = 'low quality, blurry, watermark, jpeg artifacts, extra limbs';
+    $isFlux         = sv_is_flux_media($mediaRow);
+
+    if ($manualNegative !== null) {
+        if ($manualNegative === '') {
+            return [
+                'negative_prompt' => '',
+                'negative_mode'   => 'empty_allowed',
+                'negative_len'    => 0,
+            ];
+        }
+
+        return [
+            'negative_prompt' => $manualNegative,
+            'negative_mode'   => 'manual',
+            'negative_len'    => mb_strlen($manualNegative),
+        ];
+    }
+
+    $storedNegative = trim((string)($mediaRow['negative_prompt'] ?? ''));
+    if ($storedNegative !== '') {
+        return [
+            'negative_prompt' => $storedNegative,
+            'negative_mode'   => 'manual',
+            'negative_len'    => mb_strlen($storedNegative),
+        ];
+    }
+
+    if ($isFlux) {
+        return [
+            'negative_prompt' => '',
+            'negative_mode'   => 'empty_flux',
+            'negative_len'    => 0,
+        ];
+    }
+
+    if ($allowEmpty) {
+        return [
+            'negative_prompt' => '',
+            'negative_mode'   => 'empty_allowed',
+            'negative_len'    => 0,
+        ];
+    }
+
+    return [
+        'negative_prompt' => $fallback,
+        'negative_mode'   => 'fallback',
+        'negative_len'    => mb_strlen($fallback),
+    ];
 }
 
 function sv_encode_init_image(string $path): string
@@ -2160,7 +2316,7 @@ function sv_backup_media_file(array $config, string $path, callable $logger): st
     return $backupPath;
 }
 
-function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger): array
+function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = []): array
 {
     $pathsCfg = $config['paths'] ?? [];
     sv_assert_media_path_allowed($targetPath, $pathsCfg, 'forge_regen_replace');
@@ -2172,20 +2328,65 @@ function sv_replace_media_file_with_image(array $config, string $targetPath, str
         mkdir($tmpDir, 0777, true);
     }
 
+    $image = @imagecreatefromstring($binary);
+    if ($image === false) {
+        throw new RuntimeException('Forge lieferte keine decodierbare Bildantwort.');
+    }
+
+    $targetExt   = strtolower(pathinfo($targetPath, PATHINFO_EXTENSION));
+    $targetWidth = isset($expectedMeta['width']) ? (int)$expectedMeta['width'] : null;
+    $targetHeight = isset($expectedMeta['height']) ? (int)$expectedMeta['height'] : null;
+
+    $currentWidth  = imagesx($image);
+    $currentHeight = imagesy($image);
+    if ($targetWidth !== null && $targetHeight !== null
+        && $targetWidth > 0 && $targetHeight > 0
+        && ($currentWidth !== $targetWidth || $currentHeight !== $targetHeight)
+    ) {
+        $resized = @imagescale($image, $targetWidth, $targetHeight);
+        if ($resized !== false) {
+            imagedestroy($image);
+            $image         = $resized;
+            $currentWidth  = $targetWidth;
+            $currentHeight = $targetHeight;
+        }
+    }
+
+    $formatMap = [
+        'jpg'  => 'jpeg',
+        'jpeg' => 'jpeg',
+        'png'  => 'png',
+        'webp' => 'webp',
+    ];
+    $targetFormat = $formatMap[$targetExt] ?? 'jpeg';
+    $formatPreserved = isset($formatMap[$targetExt]);
+    $outExt = $formatMap[$targetExt] ?? 'jpeg';
+
     $tmpFile = tempnam($tmpDir, 'forge_regen_');
     if ($tmpFile === false) {
+        imagedestroy($image);
         throw new RuntimeException('Temporäre Datei konnte nicht angelegt werden.');
     }
 
-    if (file_put_contents($tmpFile, $binary) === false) {
-        @unlink($tmpFile);
-        throw new RuntimeException('Schreiben der neuen Bilddatei fehlgeschlagen.');
+    $writeOk = false;
+    if ($targetFormat === 'jpeg') {
+        $writeOk = @imagejpeg($image, $tmpFile, 95);
+    } elseif ($targetFormat === 'png') {
+        $writeOk = @imagepng($image, $tmpFile, 6);
+    } elseif ($targetFormat === 'webp' && function_exists('imagewebp')) {
+        $writeOk = @imagewebp($image, $tmpFile, 88);
+    } else {
+        $formatPreserved = false;
+        $targetFormat    = 'png';
+        $outExt          = 'png';
+        $writeOk         = @imagepng($image, $tmpFile, 6);
     }
 
-    $imageInfo = @getimagesize($tmpFile);
-    if ($imageInfo === false) {
+    imagedestroy($image);
+
+    if (!$writeOk) {
         @unlink($tmpFile);
-        throw new RuntimeException('Forge lieferte keine gültige Bilddatei.');
+        throw new RuntimeException('Neue Bilddatei konnte nicht geschrieben werden.');
     }
 
     if (!rename($tmpFile, $targetPath)) {
@@ -2197,10 +2398,13 @@ function sv_replace_media_file_with_image(array $config, string $targetPath, str
     $filesize = @filesize($targetPath) ?: null;
 
     return [
-        'width'    => (int)$imageInfo[0],
-        'height'   => (int)$imageInfo[1],
-        'hash'     => $hash,
-        'filesize' => $filesize === false ? null : (int)$filesize,
+        'width'             => $currentWidth,
+        'height'            => $currentHeight,
+        'hash'              => $hash,
+        'filesize'          => $filesize === false ? null : (int)$filesize,
+        'format_preserved'  => $formatPreserved,
+        'orig_ext'          => $targetExt,
+        'out_ext'           => $outExt,
     ];
 }
 
@@ -2569,11 +2773,11 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
     ]);
 }
 
-function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, callable $logger): array
+function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, callable $logger, array $overrides = []): array
 {
     $logger('Forge-Regeneration wird in V3 asynchron über die Job-Queue abgewickelt.');
 
-    $queued = sv_queue_forge_regeneration($pdo, $config, $mediaId, $logger);
+    $queued = sv_queue_forge_regeneration($pdo, $config, $mediaId, $logger, $overrides);
 
     $worker = sv_spawn_forge_worker_for_media(
         $pdo,
@@ -2639,6 +2843,10 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
     $regenPlan = sv_extract_regen_plan_from_payload($payload);
     $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
+    $origExt = strtolower(pathinfo($mediaRow['path'] ?? '', PATHINFO_EXTENSION));
+    $origImageInfo = @getimagesize((string)$mediaRow['path']);
+    $origWidth = $origImageInfo !== false ? (int)$origImageInfo[0] : (int)($mediaRow['width'] ?? 0);
+    $origHeight = $origImageInfo !== false ? (int)$origImageInfo[1] : (int)($mediaRow['height'] ?? 0);
     if (trim((string)$regenPlan['final_prompt']) === '') {
         sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job ohne finalen Prompt.');
         throw new RuntimeException('Forge-Job #' . $jobId . ' hat keinen finalen Prompt.');
@@ -2676,7 +2884,10 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     try {
         $forgeResponse = sv_call_forge_sync($config, $payload, $logger);
         $backupPath    = sv_backup_media_file($config, $path, $logger);
-        $newFileInfo   = sv_replace_media_file_with_image($config, $path, $forgeResponse['binary'], $logger);
+        $newFileInfo   = sv_replace_media_file_with_image($config, $path, $forgeResponse['binary'], $logger, [
+            'width'  => $origWidth,
+            'height' => $origHeight,
+        ]);
 
         $update = $pdo->prepare(
             'UPDATE media SET hash = ?, width = ?, height = ?, filesize = ?, status = "active" WHERE id = ?'
@@ -2700,6 +2911,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'backup_path'     => $backupPath,
         ]);
 
+        $outputMtime   = @filemtime($path) ?: time();
         $responsePayload = [
             '_sv_worker_pid'        => $workerPid,
             '_sv_worker_started_at' => $workerStart,
@@ -2708,16 +2920,30 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'used_scheduler'        => $forgeResponse['used_scheduler'] ?? ($payload['scheduler'] ?? null),
             'attempt_index'         => $forgeResponse['attempt_index'] ?? null,
             'attempt_chain'         => $forgeResponse['attempt_chain'] ?? null,
+            'mode'                  => $payload['_sv_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img'),
+            'denoise'               => isset($payload['denoising_strength']) ? (float)$payload['denoising_strength'] : null,
+            'negative_mode'         => $payload['_sv_negative_mode'] ?? null,
+            'negative_len'          => $payload['_sv_negative_len'] ?? null,
             'result' => [
-                'replaced'        => true,
-                'backup_path'     => $backupPath,
-                'new_hash'        => $newFileInfo['hash'] ?? null,
-                'old_hash'        => $mediaRow['hash'] ?? null,
-                'prompt_category' => $regenPlan['category'],
-                'fallback_used'   => $regenPlan['fallback_used'],
-                'tag_prompt_used' => $regenPlan['tag_prompt_used'],
-                'model'           => $payload['model'] ?? null,
-                'requested_model' => $requestedModel,
+                'replaced'         => true,
+                'backup_path'      => $backupPath,
+                'new_hash'         => $newFileInfo['hash'] ?? null,
+                'old_hash'         => $mediaRow['hash'] ?? null,
+                'prompt_category'  => $regenPlan['category'],
+                'fallback_used'    => $regenPlan['fallback_used'],
+                'tag_prompt_used'  => $regenPlan['tag_prompt_used'],
+                'model'            => $payload['model'] ?? null,
+                'requested_model'  => $requestedModel,
+                'orig_w'           => $origWidth,
+                'orig_h'           => $origHeight,
+                'out_w'            => $newFileInfo['width'] ?? null,
+                'out_h'            => $newFileInfo['height'] ?? null,
+                'orig_ext'         => $origExt,
+                'out_ext'          => $newFileInfo['out_ext'] ?? null,
+                'format_preserved' => (bool)($newFileInfo['format_preserved'] ?? false),
+                'output_path'      => $path,
+                'output_mtime'     => $outputMtime,
+                'version_token'    => (string)$outputMtime,
             ],
         ];
 
@@ -2732,6 +2958,13 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'tag_prompt_used'   => $regenPlan['tag_prompt_used'],
             'old_hash'          => $mediaRow['hash'] ?? null,
             'new_hash'          => $newFileInfo['hash'] ?? null,
+            'orig_ext'          => $origExt,
+            'out_ext'           => $newFileInfo['out_ext'] ?? null,
+            'format_preserved'  => (bool)($newFileInfo['format_preserved'] ?? false),
+            'orig_w'            => $origWidth,
+            'orig_h'            => $origHeight,
+            'out_w'             => $newFileInfo['width'] ?? null,
+            'out_h'             => $newFileInfo['height'] ?? null,
             'scan_updated'      => $refreshResult['scan_updated'] ?? false,
             'meta_updated'      => $refreshResult['meta_updated'] ?? false,
             'prompt_created'    => $refreshResult['prompt_created'] ?? false,
@@ -2750,6 +2983,13 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'old_hash'          => $mediaRow['hash'] ?? null,
             'resolved_model'    => $payload['model'] ?? null,
             'requested_model'   => $requestedModel,
+            'orig_ext'          => $origExt,
+            'out_ext'           => $newFileInfo['out_ext'] ?? null,
+            'format_preserved'  => (bool)($newFileInfo['format_preserved'] ?? false),
+            'orig_w'            => $origWidth,
+            'orig_h'            => $origHeight,
+            'out_w'             => $newFileInfo['width'] ?? null,
+            'out_h'             => $newFileInfo['height'] ?? null,
             'scan_updated'      => $refreshResult['scan_updated'] ?? false,
             'meta_updated'      => $refreshResult['meta_updated'] ?? false,
             'prompt_created'    => $refreshResult['prompt_created'] ?? false,
@@ -3065,6 +3305,7 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
         $resolvedModel  = $payload['model'] ?? null;
         $fallbackUsed   = $resolvedModel === $fallbackModel && $requestedModel !== null && $requestedModel !== $resolvedModel;
 
+        $resultMeta = is_array($response['result'] ?? null) ? $response['result'] : [];
         $jobs[] = [
             'id'                 => (int)$row['id'],
             'status'             => (string)$row['status'],
@@ -3078,13 +3319,26 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
             'attempt_index'      => $attemptIndex,
             'attempt_chain'      => $attemptChain,
             'fallback_model'     => $fallbackUsed,
-            'replaced'           => $response['result']['replaced'] ?? ($row['status'] === 'done'),
+            'replaced'           => $resultMeta['replaced'] ?? ($row['status'] === 'done'),
             'error'              => $row['error_message'] ?? null,
             'worker_pid'         => $workerPid !== null ? (int)$workerPid : null,
             'worker_started_at'  => $workerStart,
             'worker_running'     => (bool)($pidInfo['running'] ?? false),
             'worker_unknown'     => (bool)($pidInfo['unknown'] ?? false),
             'prompt_category'    => $promptInfo,
+            'prompt_source'      => $payload['_sv_regen_plan']['prompt_source'] ?? null,
+            'negative_mode'      => $response['negative_mode'] ?? ($payload['_sv_negative_mode'] ?? null),
+            'format_preserved'   => $resultMeta['format_preserved'] ?? null,
+            'orig_w'             => $resultMeta['orig_w'] ?? ($payload['_sv_regen_plan']['orig_width'] ?? null),
+            'orig_h'             => $resultMeta['orig_h'] ?? ($payload['_sv_regen_plan']['orig_height'] ?? null),
+            'out_w'              => $resultMeta['out_w'] ?? null,
+            'out_h'              => $resultMeta['out_h'] ?? null,
+            'orig_ext'           => $resultMeta['orig_ext'] ?? ($payload['_sv_regen_plan']['orig_ext'] ?? null),
+            'out_ext'            => $resultMeta['out_ext'] ?? null,
+            'old_hash'           => $resultMeta['old_hash'] ?? null,
+            'new_hash'           => $resultMeta['new_hash'] ?? null,
+            'output_path'        => $resultMeta['output_path'] ?? null,
+            'version_token'      => $resultMeta['version_token'] ?? null,
         ];
     }
 
@@ -3148,6 +3402,8 @@ function sv_fetch_forge_jobs_grouped(PDO $pdo, array $mediaIds, int $limitPerMed
             $shortInfoParts[] = 'Prompt ' . $promptCategory;
         }
 
+        $resultMeta = is_array($response['result'] ?? null) ? $response['result'] : [];
+
         $grouped[$mediaId]['jobs'][] = [
             'id'                => (int)$row['id'],
             'status'            => (string)$row['status'],
@@ -3161,6 +3417,7 @@ function sv_fetch_forge_jobs_grouped(PDO $pdo, array $mediaIds, int $limitPerMed
             'worker_running'    => (bool)($pidInfo['running'] ?? false),
             'worker_unknown'    => (bool)($pidInfo['unknown'] ?? false),
             'info'              => implode(' | ', $shortInfoParts),
+            'version_token'     => $resultMeta['version_token'] ?? null,
         ];
     }
 

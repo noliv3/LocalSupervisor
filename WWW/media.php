@@ -73,7 +73,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $logLines = [];
         [$logFile, $logger] = sv_create_operation_log($config, 'forge_regen', $logLines, 10);
-        $result   = sv_run_forge_regen_replace($pdo, $config, $mediaId, $logger);
+        $result   = sv_run_forge_regen_replace($pdo, $config, $mediaId, $logger, []);
         $jobId    = (int)($result['job_id'] ?? 0);
         $status   = (string)($result['status'] ?? 'queued');
 
@@ -598,7 +598,7 @@ $jobsData   = sv_fetch_forge_jobs_grouped($pdo, $mediaIds, 6);
             if (payload.jobs && payload.jobs[0]) {
                 const latest = payload.jobs[0];
                 if (latest.status === 'done' && previous[mid] !== 'done') {
-                    refreshThumbnail(mid, latest.updated_at || latest.id);
+                    refreshThumbnail(mid, latest.version_token || latest.updated_at || latest.id);
                 }
             }
         });
