@@ -1017,28 +1017,52 @@ function sv_spawn_forge_worker_for_media(
 
     $cooldownSeconds = isset($config['forge']['spawn_cooldown']) ? max(1, (int)$config['forge']['spawn_cooldown']) : 15;
     $lockPath        = sv_base_dir() . '/LOGS/forge_worker_spawn.lock';
-    $now             = time();
-    $lastSpawnAt     = is_file($lockPath) ? (int)@file_get_contents($lockPath) : null;
-    $cooldownActive  = $lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds;
+    $spawnOutLog     = sv_base_dir() . '/LOGS/forge_worker_spawn.out.log';
+    $spawnErrLog     = sv_base_dir() . '/LOGS/forge_worker_spawn.err.log';
+    $logPaths        = [
+        'stdout' => $spawnOutLog,
+        'stderr' => $spawnErrLog,
+    ];
+
+    $now            = time();
+    $lastSpawnAt    = is_file($lockPath) ? (int)@file_get_contents($lockPath) : null;
+    $cooldownActive = $lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds;
+    $remaining      = $cooldownActive ? max(0, $cooldownSeconds - ($now - $lastSpawnAt)) : 0;
+
+    $recordSpawnLog = function (string $state, string $reason) use ($spawnErrLog): void {
+        $line = '[' . date('c') . '] ' . $state . ': ' . $reason . PHP_EOL;
+        @file_put_contents($spawnErrLog, $line, FILE_APPEND);
+    };
 
     if ($cooldownActive) {
+        $reason = 'cooldown (' . $remaining . 's verbleibend)';
         $logger('Forge-Worker-Spawn übersprungen (Cooldown aktiv, letzter Start vor ' . ($now - $lastSpawnAt) . 's).');
+        $recordSpawnLog('skipped', $reason);
+        $snippet = substr($reason, 0, 200);
         if ($jobId !== null) {
             sv_merge_job_response_metadata($pdo, $jobId, [
-                '_sv_worker_spawned'        => false,
-                '_sv_worker_spawn_skipped'  => true,
-                '_sv_worker_spawn_reason'   => 'cooldown',
-                '_sv_worker_spawn_error'    => null,
-                '_sv_worker_spawn_attempt'  => date('c', $now),
+                '_sv_worker_spawned'          => false,
+                '_sv_worker_spawn_skipped'    => true,
+                '_sv_worker_spawn_reason'     => 'cooldown',
+                '_sv_worker_spawn_error'      => null,
+                '_sv_worker_spawn_attempt'    => date('c', $now),
+                'worker_spawn'                => 'skipped',
+                'worker_spawn_cmd'            => null,
+                'worker_spawn_err_snippet'    => $snippet,
+                'worker_spawn_log_paths'      => $logPaths,
             ]);
         }
 
         return [
-            'pid'      => null,
-            'started'  => date('c', $now),
-            'unknown'  => false,
-            'skipped'  => true,
-            'reason'   => 'cooldown',
+            'pid'          => null,
+            'started'      => date('c', $now),
+            'unknown'      => false,
+            'skipped'      => true,
+            'reason'       => 'cooldown',
+            'state'        => 'skipped',
+            'cmd'          => null,
+            'err_snippet'  => $snippet,
+            'log_paths'    => $logPaths,
         ];
     }
 
@@ -1051,34 +1075,90 @@ function sv_spawn_forge_worker_for_media(
     $unknown        = false;
     $spawnError     = null;
     $spawned        = false;
+    $spawnState     = 'error';
+    $spawnCmd       = null;
+    $errSnippet     = null;
 
-    $logger('Starte Forge-Worker (media_id=' . $mediaId . ', limit=' . $effectiveLimit . ')');
+    $resolvePhpCli = function () use ($config): ?string {
+        $binary      = PHP_BINARY ?? null;
+        $isWindows   = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
+        $hasPhpExe   = is_string($binary) && stripos($binary, 'php.exe') !== false && is_file($binary);
 
-    if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
-        $cmd = 'start /B "" php ' . escapeshellarg($script) . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId;
-        $proc = @popen($cmd, 'r');
-        if ($proc !== false) {
-            pclose($proc);
+        if ($isWindows && $hasPhpExe) {
+            return $binary;
         }
-        $unknown = true;
-        $spawned = true;
+
+        if (!$isWindows && is_string($binary) && $binary !== '') {
+            return $binary;
+        }
+
+        if (!empty($config['php_cli'])) {
+            return (string)$config['php_cli'];
+        }
+
+        return null;
+    };
+
+    $phpCli = $resolvePhpCli();
+    if ($phpCli === null) {
+        $spawnError = 'php cli not resolvable';
+        $recordSpawnLog('error', $spawnError);
+        $errSnippet = substr($spawnError, 0, 200);
     } else {
-        $cmd = 'php ' . escapeshellarg($script) . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
-            . ' > /dev/null 2>&1 & echo $!';
-        $output = @shell_exec($cmd);
-        if ($output !== null && trim($output) !== '') {
-            $pid = (int)trim($output);
-            if ($pid <= 0) {
-                $pid = null;
+        $logger('Starte Forge-Worker (media_id=' . $mediaId . ', limit=' . $effectiveLimit . ')');
+
+        if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
+            $toWindowsPath = static function (string $path): string {
+                return '"' . str_replace('/', '\\', $path) . '"';
+            };
+
+            $spawnCmd = 'cmd.exe /C start "" /B ' . $toWindowsPath($phpCli) . ' ' . $toWindowsPath($script)
+                . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
+                . ' >> ' . $toWindowsPath($spawnOutLog) . ' 2>> ' . $toWindowsPath($spawnErrLog);
+
+            $proc = @popen($spawnCmd, 'r');
+            if ($proc !== false) {
+                pclose($proc);
+                $spawned    = true;
+                $spawnState = 'spawned';
+            } else {
+                $spawnError = 'popen failed';
+                $spawnState = 'error';
             }
-        } else {
             $unknown = true;
-            $spawnError = 'Kein PID aus shell_exec';
+        } else {
+            $spawnCmd = 'nohup ' . escapeshellarg($phpCli) . ' ' . escapeshellarg($script)
+                . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
+                . ' >> ' . escapeshellarg($spawnOutLog) . ' 2>> ' . escapeshellarg($spawnErrLog) . ' & echo $!';
+
+            $output = @shell_exec($spawnCmd);
+            if ($output !== null && trim((string)$output) !== '') {
+                $pid = (int)trim((string)$output);
+                if ($pid <= 0) {
+                    $pid = null;
+                }
+            }
+            if ($pid !== null) {
+                $spawned    = true;
+                $spawnState = 'spawned';
+            } else {
+                $unknown    = true;
+                $spawnError = 'Kein PID aus shell_exec';
+                $spawnState = 'error';
+            }
         }
-        $spawned = $pid !== null || $unknown;
+
+        $recordSpawnLog($spawnState === 'spawned' ? 'spawned' : 'error', $spawnError === null ? 'ok' : $spawnError);
+        $errLog = @file_get_contents($spawnErrLog);
+        if ($errLog !== false && $errLog !== '') {
+            $errSnippet = substr($errLog, -200);
+        }
     }
 
-    sv_record_forge_worker_meta($pdo, $mediaId, $pid, $startedAt);
+    if ($spawned) {
+        sv_record_forge_worker_meta($pdo, $mediaId, $pid, $startedAt);
+    }
+
     if ($jobId !== null) {
         sv_merge_job_response_metadata($pdo, $jobId, [
             '_sv_worker_pid'        => $pid,
@@ -1088,6 +1168,10 @@ function sv_spawn_forge_worker_for_media(
             '_sv_worker_spawn_reason'  => $spawnError === null ? 'ok' : 'spawn_error',
             '_sv_worker_spawn_error'   => $spawnError,
             '_sv_worker_spawn_attempt' => $startedAt,
+            'worker_spawn'             => $spawnState,
+            'worker_spawn_cmd'         => $spawnCmd,
+            'worker_spawn_err_snippet' => $errSnippet,
+            'worker_spawn_log_paths'   => $logPaths,
         ]);
     }
 
@@ -1097,6 +1181,10 @@ function sv_spawn_forge_worker_for_media(
         'unknown'  => $unknown,
         'skipped'  => false,
         'reason'   => $spawnError,
+        'state'    => $spawnState,
+        'cmd'      => $spawnCmd,
+        'err_snippet' => $errSnippet,
+        'log_paths'   => $logPaths,
     ];
 }
 
@@ -2828,6 +2916,22 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
         $logger
     );
 
+    if (($worker['state'] ?? null) === 'error' && !empty($queued['job_id'])) {
+        $snippet = trim((string)($worker['err_snippet'] ?? $worker['reason'] ?? 'spawn failed'));
+        $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
+        $stmt    = $pdo->prepare(
+            'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
+            . ' ELSE CONCAT(error_message, "; ", :msg) END WHERE id = :id'
+        );
+        $stmt->execute([
+            ':msg' => $message,
+            ':id'  => (int)$queued['job_id'],
+        ]);
+        $queued['error_message'] = isset($queued['error_message']) && (string)$queued['error_message'] !== ''
+            ? $queued['error_message'] . '; ' . $message
+            : $message;
+    }
+
     $pidStatus = $worker['pid'] !== null ? sv_is_pid_running((int)$worker['pid']) : ['running' => false, 'unknown' => $worker['unknown']];
     $status    = ($pidStatus['running'] ?? false) ? 'running' : ($queued['status'] ?? 'queued');
     $spawnMessage = 'Job in Queue';
@@ -2844,6 +2948,9 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
         'worker_status_unknown'=> (bool)($pidStatus['unknown'] ?? $worker['unknown']),
         'worker_spawn_skipped' => (bool)($worker['skipped'] ?? false),
         'worker_spawn_reason'  => $worker['reason'] ?? null,
+        'worker_spawn'         => $worker['state'] ?? null,
+        'worker_spawn_cmd'     => $worker['cmd'] ?? null,
+        'worker_spawn_log_paths' => $worker['log_paths'] ?? null,
         'message'              => $spawnMessage,
     ]);
 }
