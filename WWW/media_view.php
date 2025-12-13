@@ -339,497 +339,287 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
 <head>
     <meta charset="utf-8">
     <title>Media #<?= (int)$id ?></title>
-    <style>
-        body {
-            font-family: system-ui, -apple-system, sans-serif;
-            font-size: 14px;
-            margin: 12px;
-            line-height: 1.5;
-        }
-        h1 {
-            margin-bottom: 6px;
-        }
-        .nav a {
-            margin-right: 8px;
-        }
-        .media-block {
-            margin-bottom: 12px;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            background: #fafafa;
-        }
-        .prompt-block {
-            margin-bottom: 12px;
-        }
-        textarea {
-            width: 100%;
-            min-height: 80px;
-            font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            font-size: 13px;
-            padding: 6px;
-        }
-        table.meta {
-            border-collapse: collapse;
-            width: 100%;
-        }
-        table.meta th,
-        table.meta td {
-            border: 1px solid #ddd;
-            padding: 6px;
-            text-align: left;
-        }
-        table.meta th {
-            background: #f0f0f0;
-            width: 200px;
-        }
-        .meta-group {
-            margin-bottom: 12px;
-        }
-        .meta-group h3 {
-            margin-bottom: 4px;
-            font-size: 15px;
-        }
-        .meta-entry {
-            padding: 4px 0;
-            border-bottom: 1px solid #eee;
-        }
-        .meta-entry:last-child {
-            border-bottom: none;
-        }
-        .placeholder {
-            padding: 20px;
-            text-align: center;
-            background: #f5f5f5;
-            border: 1px dashed #bbb;
-        }
-        .tags {
-            margin: 6px 0 10px;
-        }
-        .tag {
-            display: inline-block;
-            padding: 4px 6px;
-            margin: 2px;
-            border-radius: 4px;
-            background: #e0e0e0;
-            font-size: 12px;
-        }
-        .tag-type-content { background: #bbdefb; }
-        .tag-type-style { background: #ffe0b2; }
-        .tag-type-character { background: #f8bbd0; }
-        .tag-type-nsfw { background: #ef9a9a; }
-        .tag-type-technical { background: #c5e1a5; }
-        .tag-type-other { background: #d7ccc8; }
-        .consistency {
-            margin: 12px 0;
-            padding: 10px;
-            background: #eef6ff;
-            border: 1px solid #cfdffa;
-            border-radius: 4px;
-        }
-        .consistency h2 {
-            margin-top: 0;
-            margin-bottom: 6px;
-        }
-        .consistency-badges {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        .consistency-badge {
-            padding: 6px 10px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .consistency-badge.ok {
-            background: #e8f5e9;
-            color: #2e7d32;
-            border: 1px solid #c8e6c9;
-        }
-        .consistency-badge.warn {
-            background: #fff8e1;
-            color: #f57f17;
-            border: 1px solid #ffecb3;
-        }
-        .consistency-badge.error {
-            background: #ffebee;
-            color: #c62828;
-            border: 1px solid #ffcdd2;
-        }
-        .actions {
-            margin-top: 12px;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            background: #f9f9f9;
-        }
-        .actions button {
-            margin-right: 8px;
-            padding: 6px 10px;
-        }
-        .action-note {
-            font-size: 12px;
-            color: #555;
-            margin-top: 6px;
-        }
-        .layout-grid { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-        .forge-jobs { flex: 1 1 260px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9; min-width: 260px; }
-        .forge-jobs h2 { margin-top: 0; }
-        .job-list { display: flex; flex-direction: column; gap: 8px; }
-        .job-card { border: 1px solid #ddd; border-radius: 4px; padding: 8px; background: #fff; cursor: pointer; }
-        .job-card:hover { background: #f4f7ff; }
-        .job-header { display: flex; justify-content: space-between; align-items: center; }
-        .job-status { padding: 2px 6px; border-radius: 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .job-status.status-queued { background: #fff8e1; color: #f57f17; border: 1px solid #ffecb3; }
-        .job-status.status-running { background: #e3f2fd; color: #1565c0; border: 1px solid #bbdefb; }
-        .job-status.status-done { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
-        .job-status.status-error { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
-        .job-meta { margin-top: 6px; font-size: 12px; color: #444; }
-        .job-meta div { margin-bottom: 2px; }
-        .job-hint { font-size: 12px; color: #555; margin-top: 8px; }
-        .job-thumb img { max-width: 100%; height: auto; border-radius: 4px; margin-top: 6px; }
-        .issues-block ul {
-            margin: 0 0 8px 16px;
-            padding: 0;
-        }
-        .issues-block li {
-            margin: 4px 0;
-        }
-        .quality-panel {
-            margin-top: 10px;
-            padding: 8px;
-            border: 1px solid #cfdffa;
-            border-radius: 4px;
-            background: #f5f8ff;
-        }
-        .quality-panel h3 {
-            margin: 0 0 6px;
-        }
-        .quality-badge {
-            display: inline-block;
-            padding: 4px 6px;
-            border-radius: 4px;
-            font-weight: 700;
-        }
-        .quality-badge.A { background: #c8e6c9; color: #1b5e20; }
-        .quality-badge.B { background: #fff3e0; color: #e65100; }
-        .quality-badge.C { background: #ffebee; color: #c62828; }
-        .quality-issues { margin: 6px 0; font-size: 13px; }
-        .quality-issues span { display: inline-block; margin-right: 6px; padding: 2px 6px; background: #e0e0e0; border-radius: 3px; }
-        .quality-suggestion { font-size: 12px; color: #444; margin-top: 6px; }
-        .versions { margin-top: 12px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9; }
-        .version-card { border: 1px solid #e0e0e0; border-radius: 4px; padding: 8px; margin-bottom: 8px; background: #fff; }
-        .version-card:last-child { margin-bottom: 0; }
-        .version-header { display: flex; justify-content: space-between; align-items: center; }
-        .version-title { font-weight: 700; }
-        .version-status { padding: 2px 6px; border-radius: 4px; font-size: 12px; border: 1px solid #ccc; text-transform: uppercase; letter-spacing: 0.5px; }
-        .version-status.ok { background: #e8f5e9; color: #2e7d32; border-color: #c8e6c9; }
-        .version-status.error { background: #ffebee; color: #c62828; border-color: #ffcdd2; }
-        .version-status.baseline { background: #f0f0f0; color: #555; }
-        .version-meta { margin-top: 6px; font-size: 12px; color: #333; }
-        .version-meta div { margin-bottom: 2px; }
-    </style>
+    <link rel="stylesheet" href="mediadb.css">
 </head>
-<body>
+<body class="media-view-body" id="media-top">
 
-<div class="nav">
-    <a href="<?= htmlspecialchars($backLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">« Zurück zur Übersicht</a>
-    <?php if ($prevId !== false): ?>
-        <a href="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$prevId])) ?>">« Vorheriges</a>
-    <?php endif; ?>
-    <?php if ($nextId !== false): ?>
-        <a href="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$nextId])) ?>">Nächstes »</a>
-    <?php endif; ?>
-</div>
-
-<h1>Media #<?= (int)$id ?> (<?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</h1>
-
-<?php
-$promptBadgeClass = $consistencyStatus['prompt_complete'] ? 'ok' : ($consistencyStatus['prompt_present'] ? 'warn' : 'error');
-$promptLabel = $consistencyStatus['prompt_complete']
-    ? 'Prompt vollständig'
-    : ($consistencyStatus['prompt_present'] ? 'Prompt unvollständig' : 'Prompt fehlt');
-
-$tagBadgeClass  = $consistencyStatus['has_tags'] ? 'ok' : 'error';
-$tagLabel       = $consistencyStatus['has_tags'] ? 'Tags vorhanden' : 'Keine Tags';
-
-$metaBadgeClass = $consistencyStatus['has_meta'] ? 'ok' : 'warn';
-$metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Metadaten fehlen';
-?>
-
-<div class="consistency">
-    <h2>Konsistenz</h2>
-    <div class="consistency-badges">
-        <span class="consistency-badge <?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-              title="Prompt-Vollständigkeit">
-            <?= htmlspecialchars($promptLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-        </span>
-        <span class="consistency-badge <?= htmlspecialchars($tagBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-              title="Tags für dieses Medium">
-            <?= htmlspecialchars($tagLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-        </span>
-        <span class="consistency-badge <?= htmlspecialchars($metaBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-              title="Metadaten-Einträge">
-            <?= htmlspecialchars($metaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-        </span>
-    </div>
-</div>
-
-<?php if ($mediaIssues !== []): ?>
-<div class="consistency issues-block">
-    <h3>Integritätsprobleme</h3>
-    <ul>
-        <?php foreach (array_slice($mediaIssues, 0, 3) as $issue): ?>
-            <li>
-                <strong><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>:</strong>
-                <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-            </li>
-        <?php endforeach; ?>
-    </ul>
-    <?php if (count($mediaIssues) > 3): ?>
-        <details>
-            <summary>Weitere Probleme einblenden</summary>
-            <ul>
-                <?php foreach ($mediaIssues as $issue): ?>
-                    <li>
-                        <strong><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>:</strong>
-                        <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                    </li>
-                <?php endforeach; ?>
-            </ul>
-        </details>
-    <?php endif; ?>
-</div>
-<?php endif; ?>
-
-<div class="media-block">
-    <?php if ($type === 'image'): ?>
-        <div>
-        <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" style="max-width: 100%; height: auto;">
-        </div>
-    <?php else: ?>
-        <div class="placeholder">
-            <strong>Video (kein Player)</strong><br>
-            <div><?= htmlspecialchars((string)($media['path'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-            <div>Auflösung: <?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-            <div>Dauer: <?= htmlspecialchars((string)($media['duration'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> Sekunden | FPS: <?= htmlspecialchars((string)($media['fps'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-        </div>
-    <?php endif; ?>
-</div>
-
-<?php if ($promptExists): ?>
-<div class="prompt-block">
-    <h2>Prompt</h2>
-    <h3>Prompt</h3>
-    <textarea readonly><?= htmlspecialchars($promptText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
-    <?php if ($negativePrompt !== ''): ?>
-        <h3>Negativer Prompt</h3>
-        <textarea readonly><?= htmlspecialchars($negativePrompt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
-    <?php endif; ?>
-    <div class="quality-panel">
-        <h3>Prompt-Qualität</h3>
-        <div>
-            <span class="quality-badge <?= htmlspecialchars($promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                <?= htmlspecialchars($promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-            </span>
-            <strong>Score:</strong> <?= (int)$promptQuality['score'] ?>
-        </div>
-        <?php if ($promptQualityIssues !== []): ?>
-            <div class="quality-issues">
-                <?php foreach ($promptQualityIssues as $issue): ?>
-                    <span><?= htmlspecialchars((string)$issue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                <?php endforeach; ?>
-            </div>
+<div class="page-shell">
+    <div class="top-nav">
+        <a class="nav-link" href="<?= htmlspecialchars($backLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">« Übersicht</a>
+        <div class="nav-spacer"></div>
+        <?php if ($prevId !== false): ?>
+            <a class="nav-link" href="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$prevId])) ?>">« Vorheriges</a>
         <?php endif; ?>
-        <?php if (!empty($promptQuality['tag_based_suggestion']) || !empty($promptQuality['hybrid_suggestion'])): ?>
-            <details class="quality-suggestion">
-                <summary>Prompt-Vorschläge anzeigen</summary>
-                <?php if (!empty($promptQuality['hybrid_suggestion'])): ?>
-                    <div><strong>Hybrid:</strong> <?= htmlspecialchars((string)$promptQuality['hybrid_suggestion'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php endif; ?>
-                <?php if (!empty($promptQuality['tag_based_suggestion'])): ?>
-                    <div><strong>Tag-basiert:</strong> <?= htmlspecialchars((string)$promptQuality['tag_based_suggestion'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php endif; ?>
-            </details>
-        <?php else: ?>
-            <div class="quality-suggestion">Keine alternativen Vorschläge verfügbar.</div>
+        <?php if ($nextId !== false): ?>
+            <a class="nav-link" href="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$nextId])) ?>">Nächstes »</a>
         <?php endif; ?>
     </div>
-    <?php if ($promptParams !== []): ?>
-        <h3>Parameter</h3>
-        <table class="meta">
-            <tbody>
-            <?php foreach ($promptParams as $label => $value): ?>
-                <tr><th><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></th><td><?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-    <?php endif; ?>
-    <?php if (!empty($prompt['source_metadata'])): ?>
-        <h3>Roh-Prompt/Metadaten</h3>
-        <textarea readonly><?= htmlspecialchars((string)$prompt['source_metadata'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
-    <?php endif; ?>
-</div>
-<?php else: ?>
-<div class="prompt-block">
-    <h2>Prompt</h2>
-    <p><strong>Kein Prompt gefunden – Rebuild empfohlen.</strong></p>
-</div>
-<?php endif; ?>
 
-<div class="media-block">
-    <h2>Tags</h2>
-    <?php if ($tags === []): ?>
-        <p>Keine Tags gespeichert.</p>
-    <?php else: ?>
-        <div class="tags">
-            <?php foreach ($tags as $tag):
-                $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
-                $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
-                ?>
-                <span class="tag tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                    <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>
-                </span>
-            <?php endforeach; ?>
+    <header class="media-header">
+        <div class="title-wrap">
+            <h1>Media #<?= (int)$id ?></h1>
+            <div class="subtitle">Typ: <?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
         </div>
-    <?php endif; ?>
-</div>
+        <div class="header-info">
+            <span class="pill">FSK18: <?= (int)($media['has_nsfw'] ?? 0) === 1 ? 'ja' : 'nein' ?></span>
+            <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+        </div>
+    </header>
 
-<div class="layout-grid">
-    <div class="actions">
-        <h2>Aktionen</h2>
-        <?php if ($actionMessage !== null): ?>
-            <div style="padding:8px; border:1px solid <?= $actionSuccess ? '#4caf50' : '#e53935' ?>; background: <?= $actionSuccess ? '#e8f5e9' : '#ffebee' ?>; margin-bottom:10px;">
-                <strong><?= $actionSuccess ? 'OK' : 'Fehler' ?>:</strong>
-                <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                <?php if ($actionLogFile): ?>
-                    <div>Logdatei: <?= htmlspecialchars((string)$actionLogFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+    <?php
+    $promptBadgeClass = $consistencyStatus['prompt_complete'] ? 'ok' : ($consistencyStatus['prompt_present'] ? 'warn' : 'error');
+    $promptLabel = $consistencyStatus['prompt_complete']
+        ? 'Prompt vollständig'
+        : ($consistencyStatus['prompt_present'] ? 'Prompt unvollständig' : 'Prompt fehlt');
+
+    $tagBadgeClass  = $consistencyStatus['has_tags'] ? 'ok' : 'error';
+    $tagLabel       = $consistencyStatus['has_tags'] ? 'Tags vorhanden' : 'Keine Tags';
+
+    $metaBadgeClass = $consistencyStatus['has_meta'] ? 'ok' : 'warn';
+    $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Metadaten fehlen';
+    $forgeDisabled  = !$showForgeButton;
+    $forgeReason    = $showForgeButton ? null : 'nur images';
+    $rebuildDisabled = !$showRebuildButton;
+    $rebuildReason   = $showRebuildButton ? null : 'Prompt vollständig';
+    $overrideDisabled = !$showForgeButton && !$promptExists;
+    $overrideReason   = $overrideDisabled ? 'kein Bild/Prompt' : null;
+    ?>
+
+    <div class="media-main-grid">
+        <div class="media-left">
+            <div class="panel media-visual" id="visual">
+                <?php if ($type === 'image'): ?>
+                    <div class="preview-frame">
+                        <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau">
+                    </div>
+                <?php else: ?>
+                    <div class="preview-placeholder">
+                        <div class="placeholder-title">Video</div>
+                        <div class="placeholder-meta">Pfad: <?= htmlspecialchars((string)($media['path'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <div class="placeholder-meta">Auflösung: <?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <div class="placeholder-meta">Dauer: <?= htmlspecialchars((string)($media['duration'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s | FPS: <?= htmlspecialchars((string)($media['fps'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    </div>
                 <?php endif; ?>
-                <?php if ($actionLogs !== []): ?>
-                    <details style="margin-top:6px;">
-                        <summary>Details</summary>
-                        <pre style="white-space:pre-wrap; background:#f6f8fa; padding:6px;"><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
-                    </details>
+                <div class="media-infobar">
+                    <span class="pill">ID: <?= (int)$media['id'] ?></span>
+                    <span class="pill">Typ: <?= htmlspecialchars((string)$media['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="pill">Auflösung: <?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="media-right">
+            <div class="panel action-panel">
+                <div class="panel-header">Aktionen</div>
+                <?php if ($actionMessage !== null): ?>
+                    <div class="action-feedback <?= $actionSuccess ? 'success' : 'error' ?>">
+                        <div class="action-feedback-title"><?= $actionSuccess ? 'OK' : 'Fehler' ?></div>
+                        <div><?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php if ($actionLogFile): ?>
+                            <div class="action-logfile">Logdatei: <?= htmlspecialchars((string)$actionLogFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php endif; ?>
+                        <?php if ($actionLogs !== []): ?>
+                            <details class="action-logdetails">
+                                <summary>Details</summary>
+                                <pre><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                            </details>
+                        <?php endif; ?>
+                    </div>
+                <?php endif; ?>
+
+                <div class="button-stack">
+                    <button class="btn primary" type="submit" form="forge-form" <?= $forgeDisabled ? 'disabled' : '' ?>>Forge Regen</button>
+                    <?php if ($forgeReason): ?><div class="btn-reason"><?= htmlspecialchars($forgeReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+
+                    <button class="btn secondary" type="button" <?= $overrideDisabled ? 'disabled' : '' ?> onclick="document.getElementById('prompt-panel')?.scrollIntoView({ behavior: 'smooth' });">Prompt bearbeiten</button>
+                    <?php if ($overrideReason): ?><div class="btn-reason"><?= htmlspecialchars($overrideReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+
+                    <button class="btn muted" type="submit" form="rebuild-form" <?= $rebuildDisabled ? 'disabled' : '' ?>>Prompt neu aufbauen</button>
+                    <?php if ($rebuildReason): ?><div class="btn-reason"><?= htmlspecialchars($rebuildReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+
+                    <button class="btn danger" type="submit" form="missing-form">Missing markieren</button>
+                    <div class="btn-reason">Status wird nur auf missing gesetzt.</div>
+                </div>
+                <?php if ($forgeInfoNotes !== []): ?>
+                    <div class="action-note">Hinweise: <?= htmlspecialchars(implode(' ', $forgeInfoNotes), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
+                <div class="action-note">Alle Aktionen nutzen die bestehende Internal-Key/IP-Prüfung.</div>
+            </div>
+
+            <div class="panel status-panel">
+                <div class="panel-header">Status</div>
+                <div class="status-badges">
+                    <span class="status-pill <?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($promptLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="status-pill <?= htmlspecialchars($tagBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($tagLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="status-pill <?= htmlspecialchars($metaBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($metaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-pill">Prompt-Qualität: <strong><?= htmlspecialchars((string)$promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></span>
+                    <span class="quality-score">Score <?= (int)$promptQuality['score'] ?></span>
+                </div>
+                <?php if ($mediaIssues !== []): ?>
+                    <div class="issues-list">
+                        <div class="issues-title">Issues (<?= count($mediaIssues) ?>)</div>
+                        <ul>
+                            <?php foreach (array_slice($mediaIssues, 0, 3) as $issue): ?>
+                                <li><span class="issue-type"><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span> <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <?php if (count($mediaIssues) > 3): ?>
+                            <details>
+                                <summary>Mehr anzeigen</summary>
+                                <ul>
+                                    <?php foreach ($mediaIssues as $issue): ?>
+                                        <li><span class="issue-type"><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span> <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            </details>
+                        <?php endif; ?>
+                    </div>
                 <?php endif; ?>
             </div>
-        <?php endif; ?>
 
-        <?php if ($showRebuildButton): ?>
-            <form method="post" style="display:inline-block; margin-right:8px;">
-                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                <input type="hidden" name="action" value="rebuild_prompt">
-                <button type="submit">Prompt neu aufbauen</button>
-            </form>
-        <?php endif; ?>
+            <div class="panel forge-panel">
+                <div class="panel-header">Forge-Jobs</div>
+                <div id="forge-jobs" class="timeline">
+                    <div class="job-hint">Jobs werden geladen …</div>
+                </div>
+                <div class="job-hint">Automatische Aktualisierung aktiv.</div>
+            </div>
 
-        <?php if ($showForgeButton): ?>
-            <form method="post" style="display:inline-block; margin-right:8px;">
-                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                <input type="hidden" name="action" value="forge_regen">
-                <div style="margin-bottom:6px;">
-                    <label for="manual_prompt">Manueller Prompt (optional)</label><br>
-                    <textarea name="manual_prompt" id="manual_prompt" rows="2" cols="50" maxlength="2000"></textarea>
+            <div class="panel versions-panel">
+                <div class="panel-header">Versionen</div>
+                <?php if ($versions === []): ?>
+                    <div class="job-hint">Keine Versionsdaten verfügbar.</div>
+                <?php else: ?>
+                    <div class="version-grid">
+                        <?php foreach ($versions as $version):
+                            $versionToken = (string)($version['version_token'] ?? ($version['timestamp'] ?? $version['version_index']));
+                            $versionCache = $thumbUrl . (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode($versionToken);
+                            $versionLink = 'media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'v' => $versionToken])) . '#visual';
+                            ?>
+                            <a class="version-tile<?= !empty($version['is_current']) ? ' current' : '' ?>" href="<?= htmlspecialchars($versionLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                <div class="version-thumb">
+                                    <img src="<?= htmlspecialchars($versionCache, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Version <?= (int)$version['version_index'] ?>">
+                                </div>
+                                <div class="version-label">V<?= (int)$version['version_index'] ?> <?= !empty($version['is_current']) ? '· aktuell' : '' ?></div>
+                                <div class="version-meta-small">Modell: <?= htmlspecialchars((string)($version['model_used'] ?? $version['model_requested'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            </a>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <details class="panel collapsible" open id="prompt-panel">
+        <summary>Prompt &amp; Negative Prompt</summary>
+        <div class="tab-bar" role="tablist">
+            <button class="tab-button active" data-tab="tab-effective">Effektiv</button>
+            <button class="tab-button" data-tab="tab-manual" <?= $overrideDisabled ? 'disabled' : '' ?>>Manuell</button>
+            <button class="tab-button" data-tab="tab-tags">Tags</button>
+        </div>
+        <div class="tab-content active" id="tab-effective">
+            <div class="label-row">Effektiver Prompt</div>
+            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($promptText ?: 'Kein Prompt gespeichert.', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+            <div class="label-row">Negativer Prompt</div>
+            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($negativePrompt ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+            <?php if ($promptParams !== []): ?>
+                <div class="prompt-params">
+                    <?php foreach ($promptParams as $label => $value): ?>
+                        <div class="param-row"><span><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><strong><?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <?php endforeach; ?>
                 </div>
-                <div style="margin-bottom:6px;">
-                    <label for="manual_negative_prompt">Negativer Prompt (optional, leer = kein Block)</label><br>
-                    <textarea name="manual_negative_prompt" id="manual_negative_prompt" rows="2" cols="50" maxlength="2000"></textarea>
-                </div>
-                <div style="margin-bottom:6px;">
-                    <label><input type="checkbox" name="use_hybrid" value="1"> Hybrid (Prompt + Tags)</label><br>
-                    <label><input type="checkbox" name="allow_empty_negative" value="1"> Leeren negativen Prompt erlauben</label>
-                </div>
-                <button type="submit">Regen über Forge</button>
-            </form>
-            <?php if ($forgeInfoNotes !== []): ?>
-                <div class="action-note">Hinweise: <?= htmlspecialchars(implode(' ', $forgeInfoNotes), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
             <?php endif; ?>
-        <?php else: ?>
-            <div class="action-note">Forge-Regen steht nur für Bildmedien zur Verfügung.</div>
-        <?php endif; ?>
-
-        <form method="post" style="display:inline-block; margin-right:8px;" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
-            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-            <input type="hidden" name="action" value="logical_delete">
-            <button type="submit">Medium logisch löschen</button>
-        </form>
-
-        <div class="action-note">Aktionen erfordern Internal-Key und IP-Whitelist. Löschfunktion setzt nur den Status auf missing.</div>
-    </div>
-    <div class="forge-jobs">
-        <h2>Forge-Jobs</h2>
-        <div id="forge-jobs" class="job-list">
-            <div class="job-hint">Jobs werden geladen …</div>
         </div>
-        <div class="job-hint">Status wird automatisch aktualisiert.</div>
-    </div>
-</div>
-
-<div class="versions">
-    <h2>Versionen</h2>
-    <?php if ($versions === []): ?>
-        <div class="job-hint">Keine Versionsdaten verfügbar.</div>
-    <?php else: ?>
-        <?php foreach ($versions as $version): ?>
-            <div class="version-card">
-                <div class="version-header">
-                    <div class="version-title">
-                        Version #<?= (int)$version['version_index'] ?><?php if (!empty($version['is_current'])): ?> (aktuell)<?php endif; ?>
-                    </div>
-                    <div class="version-status <?= htmlspecialchars((string)$version['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?= htmlspecialchars((string)$version['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                    </div>
-                </div>
-                <div class="version-meta">
-                    <div>Quelle: <?= htmlspecialchars($version['source'] === 'import' ? 'Import/Scan' : 'Forge-Regen', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                    <div>Zeit: <?= htmlspecialchars((string)($version['timestamp'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                    <div>Modell: <?= htmlspecialchars((string)($version['model_requested'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php if (($version['model_used'] ?? null) && ($version['model_used'] ?? null) !== ($version['model_requested'] ?? null)): ?> → <?= htmlspecialchars((string)$version['model_used'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?></div>
-                    <div>Prompt: <?php if ($version['prompt_category'] !== null): ?>Kategorie <?= htmlspecialchars((string)$version['prompt_category'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php else: ?>–<?php endif; ?><?php if (!empty($version['fallback_used'])): ?>, Fallback aktiv<?php endif; ?></div>
-                    <div>Hash: <?php if (!empty($version['hash_old']) || !empty($version['hash_new'])): ?><?= htmlspecialchars((string)($version['hash_old'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> → <?= htmlspecialchars((string)($version['hash_new'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php else: ?><?= htmlspecialchars((string)($version['hash_new'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?></div>
-                    <div>Backup: <?php if (!empty($version['backup_path'])): ?><?= htmlspecialchars((string)$version['backup_path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php if (!empty($version['backup_exists'])): ?> (vorhanden)<?php else: ?> (Datei fehlt)<?php endif; ?><?php else: ?>kein Backup<?php endif; ?></div>
-                </div>
+        <div class="tab-content" id="tab-manual">
+            <div class="label-row">Manueller Prompt (optional)</div>
+            <textarea class="prompt-input" name="manual_prompt" form="forge-form" maxlength="2000" placeholder="Manueller Prompt eintragen"></textarea>
+            <div class="label-row">Negativer Prompt (optional)</div>
+            <textarea class="prompt-input" name="manual_negative_prompt" form="forge-form" maxlength="2000" placeholder="Negativer Prompt oder leer lassen"></textarea>
+            <div class="checkbox-row">
+                <label><input type="checkbox" name="use_hybrid" value="1" form="forge-form"> Hybrid (Prompt + Tags)</label>
+                <label><input type="checkbox" name="allow_empty_negative" value="1" form="forge-form"> Leeren negativen Prompt erlauben</label>
             </div>
-        <?php endforeach; ?>
-    <?php endif; ?>
-</div>
+            <div class="tab-hint">Absenden über „Forge Regen“.</div>
+        </div>
+        <div class="tab-content" id="tab-tags">
+            <?php if ($tags === []): ?>
+                <div class="tab-hint">Keine Tags vorhanden.</div>
+            <?php else: ?>
+                <div class="chip-list">
+                    <?php foreach ($tags as $tag):
+                        $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
+                        $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
+                        ?>
+                        <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                            <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>
+                        </span>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+    </details>
 
-<div class="media-block">
-    <h2>Kern-Metadaten</h2>
-    <table class="meta">
-        <tr><th>ID</th><td><?= (int)$media['id'] ?></td></tr>
-        <tr><th>Typ</th><td><?= htmlspecialchars((string)$media['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Pfad</th><td><?= htmlspecialchars((string)$media['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Quelle</th><td><?= htmlspecialchars((string)($media['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Auflösung</th><td><?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Dauer</th><td><?= htmlspecialchars((string)($media['duration'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>FPS</th><td><?= htmlspecialchars((string)($media['fps'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Dateigröße</th><td><?= htmlspecialchars((string)($media['filesize'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Hash</th><td><?= htmlspecialchars((string)($media['hash'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Rating</th><td><?= htmlspecialchars((string)($media['rating'] ?? '0'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>FSK18</th><td><?= (int)($media['has_nsfw'] ?? 0) === 1 ? 'ja' : 'nein' ?></td></tr>
-        <tr><th>Status</th><td><?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td></tr>
-        <tr><th>Erstellt</th><td><?= sv_date_field($media['created_at'] ?? null) ?></td></tr>
-        <tr><th>Importiert</th><td><?= sv_date_field($media['imported_at'] ?? null) ?></td></tr>
-    </table>
-</div>
-
-<div class="media-block">
-    <h2>Erweiterte Metadaten</h2>
-    <?php if ($groupedMeta === []): ?>
-        <p>Keine Einträge vorhanden.</p>
-    <?php else: ?>
-        <?php foreach ($groupedMeta as $source => $entries): ?>
-            <div class="meta-group">
-                <h3>[<?= htmlspecialchars((string)$source, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>]</h3>
-                <?php foreach ($entries as $entry): ?>
-                    <div class="meta-entry">
-                        <strong><?= htmlspecialchars((string)$entry['key'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong> =
-                        <span><?= htmlspecialchars(sv_meta_value($entry['value']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    </div>
+    <details class="panel collapsible" id="tags-panel">
+        <summary>Tags</summary>
+        <?php if ($tags === []): ?>
+            <div class="tab-hint">Keine Tags gespeichert.</div>
+        <?php else: ?>
+            <div class="chip-list limited" data-limit="30">
+                <?php foreach ($tags as $tag):
+                    $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
+                    $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
+                    ?>
+                    <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>
+                    </span>
                 <?php endforeach; ?>
             </div>
-        <?php endforeach; ?>
-    <?php endif; ?>
+            <?php if (count($tags) > 30): ?><div class="tab-hint">Weitere Tags per „Mehr anzeigen“ sichtbar.</div><?php endif; ?>
+        <?php endif; ?>
+    </details>
+
+    <details class="panel collapsible" id="meta-panel">
+        <summary>Meta</summary>
+        <?php if ($groupedMeta === []): ?>
+            <div class="tab-hint">Keine Einträge vorhanden.</div>
+        <?php else: ?>
+            <?php foreach ($groupedMeta as $source => $entries): ?>
+                <div class="meta-section">
+                    <div class="meta-title">[<?= htmlspecialchars((string)$source, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>]</div>
+                    <div class="meta-grid">
+                        <?php foreach ($entries as $entry): ?>
+                            <div class="meta-row"><span><?= htmlspecialchars((string)$entry['key'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><strong><?= htmlspecialchars(sv_meta_value($entry['value']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </details>
+
+    <details class="panel collapsible" id="logs-panel">
+        <summary>Logs</summary>
+        <?php if ($actionLogs === []): ?>
+            <div class="tab-hint">Keine aktuellen Logeinträge.</div>
+        <?php else: ?>
+            <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+        <?php endif; ?>
+    </details>
+
+    <form id="forge-form" method="post">
+        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+        <input type="hidden" name="action" value="forge_regen">
+    </form>
+    <form id="rebuild-form" method="post">
+        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+        <input type="hidden" name="action" value="rebuild_prompt">
+    </form>
+    <form id="missing-form" method="post" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
+        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+        <input type="hidden" name="action" value="logical_delete">
+    </form>
 </div>
 
 <script>
@@ -837,7 +627,6 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
     const container = document.getElementById('forge-jobs');
     if (!container) return;
     const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'forge_jobs'])) ?>';
-    const targetUrl = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id])) ?>';
     const thumbUrl = <?= json_encode($thumbUrl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
 
     function statusClass(status) {
@@ -856,48 +645,50 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
         }
         container.innerHTML = '';
         jobs.forEach((job) => {
-            const card = document.createElement('div');
-            card.className = 'job-card';
+            const item = document.createElement('div');
+            item.className = 'timeline-item';
             const cacheBust = job.version_token || job.updated_at || job.id;
             const thumbSrc = job.replaced ? (thumbUrl + (thumbUrl.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(cacheBust)) : thumbUrl;
-            const thumbMarkup = job.replaced ? '<div class="job-thumb"><img src="' + thumbSrc + '" alt="Thumbnail"></div>' : '';
-            const attemptLabel = job.attempt_index ? ('Attempt ' + job.attempt_index + '/' + (job.attempt_chain ? job.attempt_chain.length : 3)) : 'Attempt –';
             const samplerLabel = (job.used_sampler || '–') + ' / ' + (job.used_scheduler || '–');
-            const formatLine = 'Format: ' + (job.orig_w || '–') + '×' + (job.orig_h || '–') + ' ' + (job.orig_ext || '')
-                + ' → ' + (job.out_w || '–') + '×' + (job.out_h || '–') + ' ' + (job.out_ext || '–')
-                + ' [' + ((job.format_preserved === null) ? '–' : (job.format_preserved ? '1:1' : 'konvertiert')) + ']';
-            const hashLine = 'Hash: ' + (job.old_hash || '–') + ' → ' + (job.new_hash || '–');
-            const promptLine = 'Prompt: ' + (job.prompt_source || '–') + ' | Negativ: ' + (job.negative_mode || '–');
-            const versionLine = 'Version-Token: ' + (job.version_token || cacheBust || '–');
-            card.innerHTML = '
-                <div class="job-header">
-                    <div class="job-title">Job #' + job.id + '</div>
-                    <div class="job-status ' + statusClass(job.status) + '">' + (job.status || '') + '</div>
+            const modelLine = (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '');
+            const formatLine = (job.orig_w || '–') + '×' + (job.orig_h || '–') + ' ' + (job.orig_ext || '–') + ' → ' + (job.out_w || '–') + '×' + (job.out_h || '–') + ' ' + (job.out_ext || '–');
+            const attemptLine = job.attempt_index ? ('Attempt ' + job.attempt_index + '/' + (job.attempt_chain ? job.attempt_chain.length : 3)) : 'Attempt –';
+            const errorBlock = job.error ? '<div class="job-error">' + job.error + '</div>' : '';
+            const detailsId = 'job-details-' + job.id;
+
+            item.innerHTML = '
+                <div class="timeline-header">
+                    <div class="timeline-title">Job #' + job.id + '</div>
+                    <span class="status-badge ' + statusClass(job.status) + '">' + (job.status || 'queued') + '</span>
                 </div>
-                <div class="job-meta">
-                    <div>Modell: ' + (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '') + '</div>
-                    <div>Mode: ' + (job.mode || 'txt2img') + ' | Seed: ' + (job.seed || '–') + '</div>
-                    <div>Sampler/Scheduler: ' + samplerLabel + '</div>
-                    <div>' + attemptLabel + '</div>
-                    <div>' + formatLine + '</div>
-                    <div>' + hashLine + '</div>
-                    <div>Pfad: ' + (job.output_path || '–') + '</div>
-                    <div>' + promptLine + '</div>
-                    <div>' + versionLine + '</div>
-                    <div>Aktualisiert: ' + (job.updated_at || job.created_at || '–') + '</div>
-                    <div>' + (job.replaced ? 'Medium ersetzt' : 'Noch in Bearbeitung') + '</div>
-                    ' + (job.error ? ('<div style="color:#c62828;">Fehler: ' + job.error + '</div>') : '') + '
+                <div class="timeline-meta">' + (job.created_at || '–') + ' • ' + (job.updated_at || '–') + '</div>
+                <div class="timeline-body">
+                    <div class="meta-line"><span>Mode</span><strong>' + (job.mode || 'txt2img') + '</strong></div>
+                    <div class="meta-line"><span>Seed</span><strong>' + (job.seed || '–') + '</strong></div>
+                    <div class="meta-line"><span>Model</span><strong>' + modelLine + '</strong></div>
+                    <div class="meta-line"><span>Sampler/Scheduler</span><strong>' + samplerLabel + ' · ' + attemptLine + '</strong></div>
+                    <div class="meta-line"><span>Format</span><strong>' + formatLine + ' [' + ((job.format_preserved === null) ? '–' : (job.format_preserved ? '1:1' : 'konvertiert')) + ']</strong></div>
+                    <div class="meta-line"><span>Prompt</span><strong>' + (job.prompt_source || '–') + '</strong></div>
+                    <div class="meta-line"><span>Negativ</span><strong>' + (job.negative_mode || '–') + '</strong></div>
+                    <div class="meta-line"><span>Output</span><strong>' + (job.output_path || '–') + '</strong></div>
+                    <div class="meta-line"><span>Version</span><strong>' + (job.version_token || cacheBust || '–') + '</strong></div>
+                    ' + errorBlock + '
                 </div>
-                ' + thumbMarkup + '
+                <details class="timeline-details" id="' + detailsId + '">
+                    <summary>Details</summary>
+                    <div class="meta-line"><span>Hash</span><strong>' + (job.old_hash || '–') + ' → ' + (job.new_hash || '–') + '</strong></div>
+                    <div class="meta-line"><span>Request</span><strong>' + (job.request_snippet || '–') + '</strong></div>
+                    <div class="meta-line"><span>Response</span><strong>' + (job.response_snippet || '–') + '</strong></div>
+                </details>
             ';
+
             if (job.replaced) {
                 const preview = document.getElementById('media-preview-thumb');
                 if (preview) {
                     preview.src = thumbSrc;
                 }
             }
-            card.addEventListener('click', function () { window.location.href = targetUrl; });
-            container.appendChild(card);
+            container.appendChild(item);
         });
     }
 
@@ -910,6 +701,25 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
 
     loadJobs();
     setInterval(loadJobs, 8000);
+})();
+
+(function() {
+    const tabs = document.querySelectorAll('.tab-button');
+    const contents = document.querySelectorAll('.tab-content');
+    if (!tabs.length || !contents.length) return;
+
+    tabs.forEach((tab) => {
+        tab.addEventListener('click', () => {
+            if (tab.disabled) return;
+            tabs.forEach((t) => t.classList.remove('active'));
+            contents.forEach((c) => c.classList.remove('active'));
+            tab.classList.add('active');
+            const target = document.getElementById(tab.dataset.tab || '');
+            if (target) {
+                target.classList.add('active');
+            }
+        });
+    });
 })();
 </script>
 
