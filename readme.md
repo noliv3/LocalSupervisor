@@ -31,6 +31,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Prompt-Rebuild**: Liest aktive Medien mit fehlenden Kernfeldern erneut von der Quelldatei und wendet die Prompt-Pipeline an (keine Auswertung bestehender `media_meta`-Snapshots).
 - **Tag-Pipeline**: Scanner liefert Tags/Confidence; Persistenz erfolgt in `tags`/`media_tags` mit Lock-Flag, um manuelle Korrekturen zu schützen.
 - **Medienanzeige**: `mediadb.php` filtert/zeigt Liste, `media_view.php` zeigt Details inkl. Metadaten/Prompts, `media_stream.php`/`thumb.php` streamen geprüfte Pfade.
+- **Media-Grid**: `media.php` rendert eine kompakte Kartenansicht mit Hover-Aktionen (Forge, Details, Missing) und farbcodierten Statusrändern.
 - **Einzel-Rebuild / logisches Löschen**: In `media_view.php` können einzelne Medien erneut durch die Prompt-Pipeline geschickt oder als `missing` markiert werden (keine Dateilöschung, Status-Umschaltung über `operations.php`).
 - **Sicherheitsmodell**: Schreibende Webaktionen verlangen Internal-Key + IP-Whitelist; Pfadvalidierung verhindert Symlinks/Webroot-Bypass; Audit-Log dokumentiert kritische Operationen.
 
