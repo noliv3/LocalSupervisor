@@ -9,6 +9,8 @@ require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
 
 const SV_FORGE_JOB_TYPE           = 'forge_regen';
+const SV_FORGE_JOB_TYPES          = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
+const SV_FORGE_JOB_STATUSES       = ['queued', 'pending', 'created'];
 const SV_JOB_TYPE_SCAN_PATH       = 'scan_path';
 const SV_JOB_TYPE_LIBRARY_RENAME  = 'library_rename';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
@@ -3186,37 +3188,89 @@ function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callab
 {
     $effectiveLimit = $limit === null ? 1 : max(1, min(10, (int)$limit));
 
-    $sql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running")';
-    $params = [
-        ':type' => SV_FORGE_JOB_TYPE,
+    $typePlaceholders = implode(', ', array_fill(0, count(SV_FORGE_JOB_TYPES), '?'));
+    $statusPlaceholders = implode(', ', array_fill(0, count(SV_FORGE_JOB_STATUSES), '?'));
+
+    $whereParts = [
+        'type IN (' . $typePlaceholders . ')',
+        'status IN (' . $statusPlaceholders . ')',
     ];
 
+    $params = array_merge(SV_FORGE_JOB_TYPES, SV_FORGE_JOB_STATUSES);
+
     if ($mediaId !== null) {
-        $sql .= ' AND media_id = :media_id';
-        $params[':media_id'] = $mediaId;
+        $whereParts[] = 'media_id = ?';
+        $params[]    = $mediaId;
     }
 
-    $sql .= ' ORDER BY id ASC LIMIT :limit';
+    $whereClause = implode(' AND ', $whereParts);
+    $sql = 'SELECT * FROM jobs WHERE ' . $whereClause . ' ORDER BY id ASC LIMIT ?';
 
     $stmt = $pdo->prepare($sql);
-    foreach ($params as $key => $value) {
-        $paramType = $key === ':type' ? PDO::PARAM_STR : PDO::PARAM_INT;
-        $stmt->bindValue($key, $value, $paramType);
-    }
-    $stmt->bindValue(':limit', $effectiveLimit, PDO::PARAM_INT);
-    $stmt->execute();
+    $params[] = $effectiveLimit;
+    $stmt->execute($params);
 
     $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $logger(sprintf(
+        'Forge job query: media_scope=%s WHERE="%s" found=%d',
+        $mediaId === null ? 'all' : (string)$mediaId,
+        $whereClause,
+        count($jobs)
+    ));
 
     $summary = [
         'total'   => count($jobs),
         'done'    => 0,
         'error'   => 0,
+        'skipped' => 0,
+        'filters' => [
+            'types'    => SV_FORGE_JOB_TYPES,
+            'statuses' => SV_FORGE_JOB_STATUSES,
+            'media_id' => $mediaId,
+            'where'    => $whereClause,
+        ],
         'results' => [],
     ];
 
     foreach ($jobs as $jobRow) {
         $jobId = (int)($jobRow['id'] ?? 0);
+        $jobType = (string)($jobRow['type'] ?? '');
+        $jobStatus = (string)($jobRow['status'] ?? '');
+        $jobMediaId = isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : null;
+
+        if (!in_array($jobType, SV_FORGE_JOB_TYPES, true)) {
+            $summary['skipped']++;
+            $summary['results'][] = [
+                'job_id' => $jobId,
+                'status' => 'skipped',
+                'error'  => 'type mismatch: ' . $jobType,
+            ];
+            $logger('Überspringe Forge-Job #' . $jobId . ' wegen type mismatch: ' . $jobType);
+            continue;
+        }
+
+        if (!in_array($jobStatus, SV_FORGE_JOB_STATUSES, true)) {
+            $summary['skipped']++;
+            $summary['results'][] = [
+                'job_id' => $jobId,
+                'status' => 'skipped',
+                'error'  => 'status mismatch: ' . $jobStatus,
+            ];
+            $logger('Überspringe Forge-Job #' . $jobId . ' wegen status mismatch: ' . $jobStatus);
+            continue;
+        }
+
+        if ($mediaId !== null && $jobMediaId !== $mediaId) {
+            $summary['skipped']++;
+            $summary['results'][] = [
+                'job_id' => $jobId,
+                'status' => 'skipped',
+                'error'  => 'media_id mismatch: ' . ($jobMediaId === null ? 'null' : (string)$jobMediaId),
+            ];
+            $logger('Überspringe Forge-Job #' . $jobId . ' wegen media_id mismatch: ' . ($jobMediaId ?? 'null'));
+            continue;
+        }
         try {
             $logger('Verarbeite Forge-Job #' . $jobId . ' (Media ' . (int)($jobRow['media_id'] ?? 0) . ')');
             $result = sv_process_single_forge_job($pdo, $config, $jobRow, $logger);
