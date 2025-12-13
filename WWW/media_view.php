@@ -133,7 +133,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'forge_regen') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
             try {
-                $result = sv_run_forge_regen_replace($pdo, $config, $id, $logger);
+                $manualPrompt  = sv_limit_string((string)($_POST['manual_prompt'] ?? ''), 2000);
+                $manualNegRaw  = sv_limit_string((string)($_POST['manual_negative_prompt'] ?? ''), 2000);
+                $overrides = [
+                    'manual_prompt'          => $manualPrompt !== '' ? $manualPrompt : null,
+                    'manual_negative_prompt' => isset($_POST['manual_negative_prompt']) ? $manualNegRaw : null,
+                    'use_hybrid'             => !empty($_POST['use_hybrid']),
+                    'allow_empty_negative'   => !empty($_POST['allow_empty_negative']),
+                ];
+
+                $result = sv_run_forge_regen_replace($pdo, $config, $id, $logger, $overrides);
                 $actionSuccess = true;
                 $jobId = (int)($result['job_id'] ?? 0);
                 $actionMessage = 'Forge-Regenerations-Job #' . $jobId . ' wurde in die Warteschlange gestellt.';
@@ -597,7 +606,7 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
 <div class="media-block">
     <?php if ($type === 'image'): ?>
         <div>
-            <img src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" style="max-width: 100%; height: auto;">
+        <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" style="max-width: 100%; height: auto;">
         </div>
     <?php else: ?>
         <div class="placeholder">
@@ -718,6 +727,18 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
             <form method="post" style="display:inline-block; margin-right:8px;">
                 <input type="hidden" name="media_id" value="<?= (int)$id ?>">
                 <input type="hidden" name="action" value="forge_regen">
+                <div style="margin-bottom:6px;">
+                    <label for="manual_prompt">Manueller Prompt (optional)</label><br>
+                    <textarea name="manual_prompt" id="manual_prompt" rows="2" cols="50" maxlength="2000"></textarea>
+                </div>
+                <div style="margin-bottom:6px;">
+                    <label for="manual_negative_prompt">Negativer Prompt (optional, leer = kein Block)</label><br>
+                    <textarea name="manual_negative_prompt" id="manual_negative_prompt" rows="2" cols="50" maxlength="2000"></textarea>
+                </div>
+                <div style="margin-bottom:6px;">
+                    <label><input type="checkbox" name="use_hybrid" value="1"> Hybrid (Prompt + Tags)</label><br>
+                    <label><input type="checkbox" name="allow_empty_negative" value="1"> Leeren negativen Prompt erlauben</label>
+                </div>
                 <button type="submit">Regen über Forge</button>
             </form>
             <?php if ($forgeInfoNotes !== []): ?>
@@ -837,10 +858,44 @@ $metaLabel      = $consistencyStatus['has_meta'] ? 'Metadaten vorhanden' : 'Meta
         jobs.forEach((job) => {
             const card = document.createElement('div');
             card.className = 'job-card';
-            const thumbMarkup = job.replaced ? '<div class="job-thumb"><img src="' + thumbUrl + '" alt="Thumbnail"></div>' : '';
+            const cacheBust = job.version_token || job.updated_at || job.id;
+            const thumbSrc = job.replaced ? (thumbUrl + (thumbUrl.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(cacheBust)) : thumbUrl;
+            const thumbMarkup = job.replaced ? '<div class="job-thumb"><img src="' + thumbSrc + '" alt="Thumbnail"></div>' : '';
             const attemptLabel = job.attempt_index ? ('Attempt ' + job.attempt_index + '/' + (job.attempt_chain ? job.attempt_chain.length : 3)) : 'Attempt –';
             const samplerLabel = (job.used_sampler || '–') + ' / ' + (job.used_scheduler || '–');
-            card.innerHTML = '\n                <div class="job-header">\n                    <div class="job-title">Job #' + job.id + '</div>\n                    <div class="job-status ' + statusClass(job.status) + '\">' + (job.status || '') + '</div>\n                </div>\n                <div class="job-meta">\n                    <div>Modell: ' + (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '') + '</div>\n                    <div>Mode: ' + (job.mode || 'txt2img') + ' | Seed: ' + (job.seed || '–') + '</div>\n                    <div>Sampler/Scheduler: ' + samplerLabel + '</div>\n                    <div>' + attemptLabel + '</div>\n                    <div>Aktualisiert: ' + (job.updated_at || job.created_at || '–') + '</div>\n                    <div>' + (job.replaced ? 'Medium ersetzt' : 'Noch in Bearbeitung') + '</div>\n                    ' + (job.error ? ('<div style="color:#c62828;">Fehler: ' + job.error + '</div>') : '') + '\n                </div>\n                ' + thumbMarkup + '\n            ';
+            const formatLine = 'Format: ' + (job.orig_w || '–') + '×' + (job.orig_h || '–') + ' ' + (job.orig_ext || '')
+                + ' → ' + (job.out_w || '–') + '×' + (job.out_h || '–') + ' ' + (job.out_ext || '–')
+                + ' [' + ((job.format_preserved === null) ? '–' : (job.format_preserved ? '1:1' : 'konvertiert')) + ']';
+            const hashLine = 'Hash: ' + (job.old_hash || '–') + ' → ' + (job.new_hash || '–');
+            const promptLine = 'Prompt: ' + (job.prompt_source || '–') + ' | Negativ: ' + (job.negative_mode || '–');
+            const versionLine = 'Version-Token: ' + (job.version_token || cacheBust || '–');
+            card.innerHTML = '
+                <div class="job-header">
+                    <div class="job-title">Job #' + job.id + '</div>
+                    <div class="job-status ' + statusClass(job.status) + '">' + (job.status || '') + '</div>
+                </div>
+                <div class="job-meta">
+                    <div>Modell: ' + (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '') + '</div>
+                    <div>Mode: ' + (job.mode || 'txt2img') + ' | Seed: ' + (job.seed || '–') + '</div>
+                    <div>Sampler/Scheduler: ' + samplerLabel + '</div>
+                    <div>' + attemptLabel + '</div>
+                    <div>' + formatLine + '</div>
+                    <div>' + hashLine + '</div>
+                    <div>Pfad: ' + (job.output_path || '–') + '</div>
+                    <div>' + promptLine + '</div>
+                    <div>' + versionLine + '</div>
+                    <div>Aktualisiert: ' + (job.updated_at || job.created_at || '–') + '</div>
+                    <div>' + (job.replaced ? 'Medium ersetzt' : 'Noch in Bearbeitung') + '</div>
+                    ' + (job.error ? ('<div style="color:#c62828;">Fehler: ' + job.error + '</div>') : '') + '
+                </div>
+                ' + thumbMarkup + '
+            ';
+            if (job.replaced) {
+                const preview = document.getElementById('media-preview-thumb');
+                if (preview) {
+                    preview.src = thumbSrc;
+                }
+            }
             card.addEventListener('click', function () { window.location.href = targetUrl; });
             container.appendChild(card);
         });

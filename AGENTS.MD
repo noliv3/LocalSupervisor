@@ -71,3 +71,7 @@
 ## Media-spezifische Operationen
 - Einzelaktionen auf Medien (Prompt-Rebuild, logisches Löschen, weitere Status-Umschaltungen) werden über `media_view.php` ausgelöst und nutzen zentrale Funktionen in `SCRIPTS/operations.php`.
 - Keine neuen Spezialskripte im Webroot anlegen; neue Media-Operationen gehören in `operations.php` und werden in bestehende Views eingebunden.
+
+- Output-Format und -Größe müssen 1:1 dem Original entsprechen; Worker erzwingt Originalmaße/-Ext (JPEG/PNG/WEBP) und markiert Konvertierungen, UI nutzt Version-Token/Caches-Busting.
+- Negative Prompts blocken nie: explizit leere Felder per allow_empty_negative oder Flux erlauben, sonst zentraler Fallback.
+- `media_view.php` bietet pro Job manuelle Prompt-/Negative-Overrides sowie Hybrid-Prompt (Stored + Tags); Eingaben werden serverseitig begrenzt.
