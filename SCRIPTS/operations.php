@@ -1015,12 +1015,42 @@ function sv_spawn_forge_worker_for_media(
         throw new RuntimeException('Internal-Key erforderlich, um Forge-Worker zu starten.');
     }
 
+    $cooldownSeconds = isset($config['forge']['spawn_cooldown']) ? max(1, (int)$config['forge']['spawn_cooldown']) : 15;
+    $lockPath        = sv_base_dir() . '/LOGS/forge_worker_spawn.lock';
+    $now             = time();
+    $lastSpawnAt     = is_file($lockPath) ? (int)@file_get_contents($lockPath) : null;
+    $cooldownActive  = $lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds;
+
+    if ($cooldownActive) {
+        $logger('Forge-Worker-Spawn übersprungen (Cooldown aktiv, letzter Start vor ' . ($now - $lastSpawnAt) . 's).');
+        if ($jobId !== null) {
+            sv_merge_job_response_metadata($pdo, $jobId, [
+                '_sv_worker_spawned'        => false,
+                '_sv_worker_spawn_skipped'  => true,
+                '_sv_worker_spawn_reason'   => 'cooldown',
+                '_sv_worker_spawn_error'    => null,
+                '_sv_worker_spawn_attempt'  => date('c', $now),
+            ]);
+        }
+
+        return [
+            'pid'      => null,
+            'started'  => date('c', $now),
+            'unknown'  => false,
+            'skipped'  => true,
+            'reason'   => 'cooldown',
+        ];
+    }
+
+    @file_put_contents($lockPath, (string)$now);
     $effectiveLimit = $limit === null ? 1 : max(1, (int)$limit);
     $baseDir        = sv_base_dir();
     $script         = $baseDir . '/SCRIPTS/forge_worker_cli.php';
     $startedAt      = date('c');
     $pid            = null;
     $unknown        = false;
+    $spawnError     = null;
+    $spawned        = false;
 
     $logger('Starte Forge-Worker (media_id=' . $mediaId . ', limit=' . $effectiveLimit . ')');
 
@@ -1031,6 +1061,7 @@ function sv_spawn_forge_worker_for_media(
             pclose($proc);
         }
         $unknown = true;
+        $spawned = true;
     } else {
         $cmd = 'php ' . escapeshellarg($script) . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
             . ' > /dev/null 2>&1 & echo $!';
@@ -1042,7 +1073,9 @@ function sv_spawn_forge_worker_for_media(
             }
         } else {
             $unknown = true;
+            $spawnError = 'Kein PID aus shell_exec';
         }
+        $spawned = $pid !== null || $unknown;
     }
 
     sv_record_forge_worker_meta($pdo, $mediaId, $pid, $startedAt);
@@ -1050,6 +1083,11 @@ function sv_spawn_forge_worker_for_media(
         sv_merge_job_response_metadata($pdo, $jobId, [
             '_sv_worker_pid'        => $pid,
             '_sv_worker_started_at' => $startedAt,
+            '_sv_worker_spawned'    => $spawned,
+            '_sv_worker_spawn_skipped' => false,
+            '_sv_worker_spawn_reason'  => $spawnError === null ? 'ok' : 'spawn_error',
+            '_sv_worker_spawn_error'   => $spawnError,
+            '_sv_worker_spawn_attempt' => $startedAt,
         ]);
     }
 
@@ -1057,6 +1095,8 @@ function sv_spawn_forge_worker_for_media(
         'pid'      => $pid,
         'started'  => $startedAt,
         'unknown'  => $unknown,
+        'skipped'  => false,
+        'reason'   => $spawnError,
     ];
 }
 
@@ -2790,13 +2830,21 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
 
     $pidStatus = $worker['pid'] !== null ? sv_is_pid_running((int)$worker['pid']) : ['running' => false, 'unknown' => $worker['unknown']];
     $status    = ($pidStatus['running'] ?? false) ? 'running' : ($queued['status'] ?? 'queued');
+    $spawnMessage = 'Job in Queue';
+    if (!empty($worker['skipped'])) {
+        $spawnMessage = 'Worker-Spawn übersprungen: ' . ((string)($worker['reason'] ?? 'cooldown'));
+    } elseif ($status === 'running') {
+        $spawnMessage = 'Worker läuft';
+    }
 
     return array_merge($queued, [
         'status'               => $status,
         'worker_pid'           => $worker['pid'],
         'worker_started_at'    => $worker['started'],
         'worker_status_unknown'=> (bool)($pidStatus['unknown'] ?? $worker['unknown']),
-        'message'              => $status === 'running' ? 'Worker läuft' : 'Job in Queue',
+        'worker_spawn_skipped' => (bool)($worker['skipped'] ?? false),
+        'worker_spawn_reason'  => $worker['reason'] ?? null,
+        'message'              => $spawnMessage,
     ]);
 }
 
