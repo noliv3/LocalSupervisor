@@ -26,6 +26,17 @@ foreach (array_slice($argv, 1) as $arg) {
     }
 }
 
+$runtimeLog = sv_base_dir() . '/LOGS/forge_worker_runtime.log';
+$runtimeLine = sprintf(
+    '[%s] pid=%d argv=%s media_id=%s limit=%s',
+    date('c'),
+    (int)getmypid(),
+    json_encode($argv, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+    $mediaId === null ? '-' : (string)$mediaId,
+    $limit === null ? '-' : (string)$limit
+);
+@file_put_contents($runtimeLog, $runtimeLine . PHP_EOL, FILE_APPEND);
+
 $logger = function (string $msg): void {
     fwrite(STDOUT, $msg . PHP_EOL);
 };
