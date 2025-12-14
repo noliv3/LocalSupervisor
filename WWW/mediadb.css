@@ -816,10 +816,28 @@ body.media-grid-page {
 .preview-placeholder { border:1px dashed rgba(255,255,255,0.3); padding:1rem; text-align:center; border-radius:0.75rem; background:rgba(255,255,255,0.03); }
 .placeholder-title { font-weight:700; }
 .placeholder-meta { color:#a0aec0; font-size:0.9rem; margin-top:0.25rem; }
+.preview-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:0.8rem; }
+.preview-card { position:relative; }
+.preview-label { position:absolute; top:0.6rem; left:0.6rem; padding:0.25rem 0.6rem; border-radius:0.45rem; font-weight:800; letter-spacing:0.02em; }
+.preview-label.original { background:rgba(255,255,255,0.1); color:#e5e7eb; }
+.preview-label.preview { background:rgba(125,211,252,0.2); color:#e0f2fe; }
+.preview-meta { display:flex; flex-wrap:wrap; gap:0.35rem; margin-top:0.4rem; color:#94a3b8; font-size:0.9rem; }
 
 .media-infobar { display:flex; flex-wrap:wrap; gap:0.4rem; margin-top:0.75rem; }
 
 .action-panel .button-stack { display:flex; flex-direction:column; gap:0.5rem; }
+.action-panel .button-stack.inline { flex-direction:row; flex-wrap:wrap; align-items:center; }
+.forge-control { display:flex; flex-direction:column; gap:0.65rem; margin-bottom:0.65rem; }
+.forge-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:0.6rem; }
+.form-block { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:0.55rem; padding:0.55rem; }
+.form-block.two-col { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:0.5rem; }
+.form-block label { font-size:0.9rem; color:#e5e7eb; display:flex; flex-direction:column; gap:0.2rem; }
+.forge-grid select, .forge-grid input[type="number"], .forge-grid input[type="text"] { width:100%; padding:0.45rem 0.55rem; border-radius:0.45rem; border:1px solid rgba(255,255,255,0.12); background:rgba(0,0,0,0.35); color:var(--text); }
+.prompt-chip { display:inline-block; padding:0.35rem 0.55rem; border-radius:0.45rem; background:rgba(125,211,252,0.12); color:#e0f2fe; margin-bottom:0.35rem; }
+.radio-row { display:flex; gap:0.8rem; flex-wrap:wrap; font-weight:700; }
+.checkbox-inline { display:flex; align-items:center; gap:0.4rem; font-size:0.9rem; color:#e2e8f0; }
+.prompt-input.compact { min-height:70px; }
+.hint { color:#a0aec0; font-size:0.85rem; margin-top:0.2rem; }
 .btn {
     border:none;
     border-radius:0.6rem;
