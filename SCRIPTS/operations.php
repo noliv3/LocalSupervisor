@@ -243,6 +243,77 @@ function sv_assert_backup_outside_media_roots(array $config, string $backupDir):
     }
 }
 
+function sv_resolve_preview_dir(array $config): string
+{
+    $baseDir  = sv_base_dir();
+    $pathsCfg = $config['paths'] ?? [];
+
+    $dir = '';
+    if (isset($pathsCfg['previews']) && is_string($pathsCfg['previews']) && trim((string)$pathsCfg['previews']) !== '') {
+        $dir = (string)$pathsCfg['previews'];
+    } else {
+        $dir = $baseDir . '/PREVIEWS';
+    }
+
+    $dir = str_replace('\\', '/', $dir);
+    if (!str_starts_with($dir, '/')) {
+        $dir = $baseDir . '/' . ltrim($dir, '/');
+    }
+
+    if (str_contains($dir, '..')) {
+        throw new RuntimeException('Preview-Verzeichnis enthält ungültige Traversalbestandteile.');
+    }
+
+    $dir = rtrim($dir, '/');
+    if ($dir === '') {
+        throw new RuntimeException('Preview-Verzeichnis kann nicht aufgelöst werden.');
+    }
+
+    $previewAbs = realpath($dir) ?: $dir;
+
+    $roots = sv_collect_media_roots($pathsCfg);
+    foreach ($roots as $root) {
+        $rootAbs = realpath($root) ?: $root;
+        $rootAbs = rtrim(str_replace('\\', '/', $rootAbs), '/');
+        if ($rootAbs === '') {
+            continue;
+        }
+        if (str_starts_with($previewAbs . '/', $rootAbs . '/')) {
+            throw new RuntimeException('Preview-Verzeichnis darf nicht innerhalb der Medien-Bibliothek liegen: ' . $previewAbs);
+        }
+    }
+
+    if (!is_dir($previewAbs)) {
+        if (!mkdir($previewAbs, 0777, true) && !is_dir($previewAbs)) {
+            throw new RuntimeException('Preview-Verzeichnis kann nicht angelegt werden: ' . $previewAbs);
+        }
+    }
+
+    return rtrim(str_replace('\\', '/', $previewAbs), '/');
+}
+
+function sv_is_suspicious_image(string $path): array
+{
+    $info = @getimagesize($path);
+    if ($info === false) {
+        return ['suspicious' => true, 'reason' => 'getimagesize failed'];
+    }
+
+    $filesize = @filesize($path);
+    if ($filesize !== false && $filesize < 10240) {
+        return ['suspicious' => true, 'reason' => 'filesize below 10KB'];
+    }
+
+    $width  = (int)($info[0] ?? 0);
+    $height = (int)($info[1] ?? 0);
+
+    if ($filesize !== false && ($width >= 2000 || $height >= 2000) && $filesize < 20000) {
+        return ['suspicious' => true, 'reason' => 'dimension/filesize mismatch'];
+    }
+
+    return ['suspicious' => false, 'reason' => null];
+}
+
 function sv_prompt_core_complete_condition(string $alias = 'p'): string
 {
     $alias = preg_replace('~[^a-zA-Z0-9_]+~', '', $alias);
@@ -878,9 +949,9 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         if (!isset($payload['denoising_strength']) || (float)$payload['denoising_strength'] <= 0) {
             $payload['denoising_strength'] = 0.25;
         }
-        $payload['_sv_mode'] = 'img2img';
+        $payload['_sv_generation_mode'] = 'img2img';
     } else {
-        $payload['_sv_mode'] = 'txt2img';
+        $payload['_sv_generation_mode'] = 'txt2img';
     }
 
     $origExt = strtolower(pathinfo($path, PATHINFO_EXTENSION));
@@ -910,6 +981,23 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
             : null,
         'use_hybrid'       => !empty($overrides['use_hybrid']),
     ];
+
+    $modeOverride = null;
+    if (isset($overrides['_sv_mode']) && is_string($overrides['_sv_mode'])) {
+        $modeOverride = $overrides['_sv_mode'];
+    } elseif (isset($overrides['mode']) && is_string($overrides['mode'])) {
+        $modeOverride = $overrides['mode'];
+    }
+
+    $resolvedMode = 'preview';
+    if (is_string($modeOverride)) {
+        $candidate = strtolower(trim($modeOverride));
+        if (in_array($candidate, ['preview', 'replace'], true)) {
+            $resolvedMode = $candidate;
+        }
+    }
+
+    $payload['_sv_mode'] = $resolvedMode;
 
     $payload['_sv_negative_mode'] = $negativePlan['negative_mode'];
     $payload['_sv_negative_len']  = $negativePlan['negative_len'];
@@ -2480,17 +2568,25 @@ function sv_build_temp_output_path(string $tmpDir, string $targetPath): string
     return $tmpFile;
 }
 
-function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = [], ?string $tempOutputPath = null): array
+function sv_write_forge_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = [], ?string $tempOutputPath = null): array
 {
     $pathsCfg = $config['paths'] ?? [];
-    sv_assert_media_path_allowed($targetPath, $pathsCfg, 'forge_regen_replace');
-
     $tmpDirRaw = $pathsCfg['tmp'] ?? null;
     $tmpDir = (is_string($tmpDirRaw) && trim($tmpDirRaw) !== '')
         ? rtrim(str_replace('\\', '/', (string)$tmpDirRaw), '/')
         : (sv_base_dir() . '/TMP');
     if (!is_dir($tmpDir)) {
         mkdir($tmpDir, 0777, true);
+    }
+
+    $targetDir = rtrim(str_replace('\\', '/', dirname($targetPath)), '/');
+    if ($targetDir === '') {
+        throw new RuntimeException('Ungültiger Zielpfad.');
+    }
+    if (!is_dir($targetDir)) {
+        if (!mkdir($targetDir, 0777, true) && !is_dir($targetDir)) {
+            throw new RuntimeException('Zielverzeichnis kann nicht angelegt werden: ' . $targetDir);
+        }
     }
 
     $tmpFile = $tempOutputPath !== null ? $tempOutputPath : sv_build_temp_output_path($tmpDir, $targetPath);
@@ -2567,6 +2663,14 @@ function sv_replace_media_file_with_image(array $config, string $targetPath, str
         'orig_ext'          => $targetExt,
         'out_ext'           => $outExt,
     ];
+}
+
+function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = [], ?string $tempOutputPath = null): array
+{
+    $pathsCfg = $config['paths'] ?? [];
+    sv_assert_media_path_allowed($targetPath, $pathsCfg, 'forge_regen_replace');
+
+    return sv_write_forge_image($config, $targetPath, $binary, $logger, $expectedMeta, $tempOutputPath);
 }
 
 function sv_forge_fetch_options(array $endpoint, callable $logger): ?array
@@ -2950,6 +3054,41 @@ function sv_log_forge_paths(array $paths): void
     );
 }
 
+function sv_log_forge_job_runtime(int $jobId, int $mediaId, string $mode, array $data = []): void
+{
+    $runtimeLog = sv_base_dir() . '/LOGS/forge_worker_runtime.log';
+    $payload = [
+        'job_id'   => $jobId,
+        'media_id' => $mediaId,
+        'mode'     => $mode,
+    ];
+
+    if (isset($data['preview_path'])) {
+        $payload['preview_path'] = mb_substr((string)$data['preview_path'], 0, 200);
+    }
+    if (array_key_exists('replaced', $data)) {
+        $payload['replaced'] = (bool)$data['replaced'];
+    }
+    if (isset($data['backup_path'])) {
+        $payload['backup_path'] = mb_substr((string)$data['backup_path'], 0, 200);
+    }
+    if (isset($data['error'])) {
+        $payload['error'] = mb_substr((string)$data['error'], 0, 200);
+    }
+    if (!empty($data['forced_preview'])) {
+        $payload['forced_preview'] = true;
+    }
+    if (isset($data['reason'])) {
+        $payload['reason'] = mb_substr((string)$data['reason'], 0, 200);
+    }
+
+    @file_put_contents(
+        $runtimeLog,
+        sprintf('[%s] forge_job %s', date('c'), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
+        FILE_APPEND
+    );
+}
+
 function sv_fail_job_on_empty_path(PDO $pdo, int $jobId, string $name, $value): void
 {
     if (!is_string($value) || trim($value) === '') {
@@ -3054,6 +3193,17 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         throw new RuntimeException('Forge-Job #' . $jobId . ' hat keine gültige Payload.');
     }
 
+    $regenMode = 'preview';
+    if (isset($payload['_sv_mode']) && is_string($payload['_sv_mode'])) {
+        $candidate = strtolower(trim((string)$payload['_sv_mode']));
+        if (in_array($candidate, ['preview', 'replace'], true)) {
+            $regenMode = $candidate;
+        }
+    }
+    $payload['_sv_mode'] = $regenMode;
+
+    $generationMode = $payload['_sv_generation_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
+
     $regenPlan = sv_extract_regen_plan_from_payload($payload);
     if (trim((string)$regenPlan['final_prompt']) === '') {
         sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job ohne finalen Prompt.');
@@ -3117,17 +3267,119 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
     sv_update_job_status($pdo, $jobId, 'running');
 
-    $backupPath    = null;
-    $newFileInfo   = null;
-    $forgeResponse = null;
+    $backupPath        = null;
+    $newFileInfo       = null;
+    $forgeResponse     = null;
+    $previewPath       = null;
+    $modeForcedPreview = false;
+    $forcedReason      = null;
 
     try {
         $forgeResponse = sv_call_forge_sync($config, $payload, $logger);
-        $backupPath    = sv_backup_media_file($config, $path, $logger, $backupDir, $plannedBackupPath);
-        $newFileInfo   = sv_replace_media_file_with_image($config, $path, $forgeResponse['binary'], $logger, [
+        $imageMeta     = sv_write_forge_image($config, $plannedTempOutputPath, $forgeResponse['binary'], $logger, [
             'width'  => $origWidth,
             'height' => $origHeight,
-        ], $plannedTempOutputPath);
+        ]);
+
+        $suspicious = sv_is_suspicious_image($plannedTempOutputPath);
+        if ($regenMode === 'replace' && ($suspicious['suspicious'] ?? false)) {
+            $modeForcedPreview = true;
+            $forcedReason      = $suspicious['reason'] ?? 'suspicious image output';
+            $regenMode         = 'preview';
+            $payload['_sv_mode'] = $regenMode;
+        }
+
+        if ($regenMode === 'preview') {
+            $previewDir = sv_resolve_preview_dir($config);
+            $previewExt = ($imageMeta['format_preserved'] ?? false) ? ($imageMeta['orig_ext'] ?? $origExt) : 'png';
+            if (!is_string($previewExt) || $previewExt === '') {
+                $previewExt = 'png';
+            }
+
+            $previewName = sprintf('preview_%d_%d_%s.%s', $mediaId, $jobId, date('Ymd_His'), $previewExt);
+            $previewPath = $previewDir . '/' . $previewName;
+
+            if (!rename($plannedTempOutputPath, $previewPath)) {
+                if (!@copy($plannedTempOutputPath, $previewPath)) {
+                    @unlink($plannedTempOutputPath);
+                    throw new RuntimeException('Preview-Datei konnte nicht geschrieben werden.');
+                }
+                @unlink($plannedTempOutputPath);
+            }
+
+            $previewHash     = @hash_file('md5', $previewPath) ?: null;
+            $previewFilesize = @filesize($previewPath);
+            $previewWidth    = $imageMeta['width'] ?? null;
+            $previewHeight   = $imageMeta['height'] ?? null;
+
+            $responsePayload = [
+                '_sv_worker_pid'        => $workerPid,
+                '_sv_worker_started_at' => $workerStart,
+                'forge_response'        => $forgeResponse['response_array'] ?? null,
+                'used_sampler'          => $forgeResponse['used_sampler'] ?? ($payload['sampler'] ?? null),
+                'used_scheduler'        => $forgeResponse['used_scheduler'] ?? ($payload['scheduler'] ?? null),
+                'attempt_index'         => $forgeResponse['attempt_index'] ?? null,
+                'attempt_chain'         => $forgeResponse['attempt_chain'] ?? null,
+                'mode'                  => $regenMode,
+                'generation_mode'       => $generationMode,
+                'denoise'               => isset($payload['denoising_strength']) ? (float)$payload['denoising_strength'] : null,
+                'negative_mode'         => $payload['_sv_negative_mode'] ?? null,
+                'negative_len'          => $payload['_sv_negative_len'] ?? null,
+                'mode_forced_preview'   => $modeForcedPreview,
+                'mode_forced_reason'    => $forcedReason,
+                'result' => [
+                    'replaced'         => false,
+                    'preview_path'     => $previewPath,
+                    'preview_hash'     => $previewHash,
+                    'preview_filesize' => $previewFilesize === false ? null : (int)$previewFilesize,
+                    'preview_width'    => $previewWidth,
+                    'preview_height'   => $previewHeight,
+                    'format_preserved' => (bool)($imageMeta['format_preserved'] ?? false),
+                    'orig_path'        => basename($path),
+                    'old_hash'         => $mediaRow['hash'] ?? null,
+                    'prompt_category'  => $regenPlan['category'],
+                    'fallback_used'    => $regenPlan['fallback_used'],
+                    'tag_prompt_used'  => $regenPlan['tag_prompt_used'],
+                    'model'            => $payload['model'] ?? null,
+                    'requested_model'  => $requestedModel,
+                    'orig_w'           => $origWidth,
+                    'orig_h'           => $origHeight,
+                    'out_w'            => $previewWidth,
+                    'out_h'            => $previewHeight,
+                    'orig_ext'         => $origExt,
+                    'out_ext'          => $imageMeta['out_ext'] ?? null,
+                ],
+            ];
+
+            $responseJson = json_encode($responsePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            sv_update_job_status($pdo, $jobId, 'done', $responseJson, null);
+            sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
+                'replaced'       => false,
+                'preview_path'   => $previewPath,
+                'error'          => null,
+                'forced_preview' => $modeForcedPreview,
+                'reason'         => $forcedReason,
+            ]);
+
+            return [
+                'job_id'   => $jobId,
+                'media_id' => $mediaId,
+                'status'   => 'done',
+                'mode'     => $regenMode,
+                'preview'  => $previewPath,
+            ];
+        }
+
+        $backupPath = sv_backup_media_file($config, $path, $logger, $backupDir, $plannedBackupPath);
+
+        if (!rename($plannedTempOutputPath, $path)) {
+            @unlink($plannedTempOutputPath);
+            throw new RuntimeException('Ersetzen der Zieldatei fehlgeschlagen.');
+        }
+
+        $newFileInfo = $imageMeta;
+        $newFileInfo['hash'] = @hash_file('md5', $path) ?: ($imageMeta['hash'] ?? null);
+        $newFileInfo['filesize'] = @filesize($path) ?: ($imageMeta['filesize'] ?? null);
 
         $update = $pdo->prepare(
             'UPDATE media SET hash = ?, width = ?, height = ?, filesize = ?, status = "active" WHERE id = ?'
@@ -3160,7 +3412,8 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'used_scheduler'        => $forgeResponse['used_scheduler'] ?? ($payload['scheduler'] ?? null),
             'attempt_index'         => $forgeResponse['attempt_index'] ?? null,
             'attempt_chain'         => $forgeResponse['attempt_chain'] ?? null,
-            'mode'                  => $payload['_sv_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img'),
+            'mode'                  => $regenMode,
+            'generation_mode'       => $generationMode,
             'denoise'               => isset($payload['denoising_strength']) ? (float)$payload['denoising_strength'] : null,
             'negative_mode'         => $payload['_sv_negative_mode'] ?? null,
             'negative_len'          => $payload['_sv_negative_len'] ?? null,
@@ -3212,6 +3465,12 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'backup_path'       => $backupPath,
         ]);
 
+        sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
+            'replaced'   => true,
+            'backup_path'=> $backupPath,
+            'error'      => null,
+        ]);
+
         return [
             'job_id'            => $jobId,
             'media_id'          => $mediaId,
@@ -3257,6 +3516,11 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
                 $logger('Restore nach Fehler fehlgeschlagen: ' . $restoreError->getMessage());
             }
         }
+
+        sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
+            'replaced' => false,
+            'error'    => $e->getMessage(),
+        ]);
 
         return [
             'job_id'   => $jobId,
@@ -3588,7 +3852,8 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
         $pidInfo      = is_numeric($workerPid) ? sv_is_pid_running((int)$workerPid) : ['running' => false, 'unknown' => $workerPid !== null];
         $promptInfo   = $response['result']['prompt_category'] ?? ($payload['_sv_regen_plan']['category'] ?? null);
 
-        $mode = $payload['_sv_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
+        $mode = $payload['_sv_mode'] ?? 'preview';
+        $generationMode = $payload['_sv_generation_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
         $usedSampler   = $response['used_sampler'] ?? ($payload['sampler'] ?? null);
         $usedScheduler = $response['used_scheduler'] ?? ($payload['scheduler'] ?? null);
         $attemptIndex  = $response['attempt_index'] ?? null;
@@ -3605,6 +3870,7 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
             'updated_at'         => (string)($row['updated_at'] ?? ''),
             'model'              => $resolvedModel,
             'mode'               => $mode,
+            'generation_mode'    => $generationMode,
             'seed'               => $payload['seed'] ?? null,
             'used_sampler'       => $usedSampler,
             'used_scheduler'     => $usedScheduler,
