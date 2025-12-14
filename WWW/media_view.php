@@ -98,7 +98,10 @@ if ($ajaxAction === 'forge_jobs') {
     header('Content-Type: application/json; charset=utf-8');
     try {
         $jobs = sv_fetch_forge_jobs_for_media($pdo, $id, 10, $config);
-        echo json_encode(['jobs' => $jobs], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        echo json_encode([
+            'server_time' => date('c'),
+            'jobs'        => $jobs,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()]);
@@ -392,9 +395,17 @@ if (!$consistencyStatus['prompt_complete']) {
     $forgeInfoNotes[] = 'Prompt unvollständig; Fallback/Tag-Rebuild greift in operations.php.';
 }
 $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
+$thumbVersion = (string)($media['hash'] ?? '');
+if ($thumbVersion === '' && is_file((string)($media['path'] ?? ''))) {
+    $thumbVersion = (string)@filemtime((string)$media['path']);
+}
+if ($thumbVersion !== '') {
+    $thumbUrl .= (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode($thumbVersion);
+}
 
 $latestPreview = null;
 $latestJobResponse = null;
+$latestJobRequest = null;
 $latestJobStmt = $pdo->prepare('SELECT id, status, forge_response_json, forge_request_json FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT 1');
 $latestJobStmt->execute([':type' => SV_FORGE_JOB_TYPE, ':media_id' => $id]);
 $latestJobRow = $latestJobStmt->fetch(PDO::FETCH_ASSOC);
@@ -414,6 +425,7 @@ if ($latestJobRow) {
         $previewAllowed = false;
         $previewDataUri = null;
         $previewError   = null;
+        $previewVersion = $latestJobResponse['preview_hash'] ?? null;
         if ($previewPath !== '') {
             try {
                 sv_assert_media_path_allowed($previewPath, $config['paths'] ?? [], 'forge_preview');
@@ -423,6 +435,9 @@ if ($latestJobRow) {
             }
 
             if ($previewAllowed && is_file($previewPath)) {
+                if ($previewVersion === null) {
+                    $previewVersion = @filemtime($previewPath) ?: null;
+                }
                 $maxSize = 6 * 1024 * 1024;
                 $fileSize = (int)@filesize($previewPath);
                 if ($fileSize > 0 && $fileSize <= $maxSize) {
@@ -433,9 +448,14 @@ if ($latestJobRow) {
                     }
                 } else {
                     $previewError = $fileSize > $maxSize ? 'Preview >6MB, nicht inline geladen.' : null;
-                }
-            }
         }
+    }
+}
+$manualOverrideActive = false;
+if (is_array($latestJobRequest)) {
+    $manualOverrideActive = (($latestJobRequest['_sv_prompt_source'] ?? '') === 'manual')
+        || (!empty($latestJobRequest['_sv_regen_plan']['manual_prompt']));
+}
 
         $latestPreview = [
             'path'     => $previewPath,
@@ -446,6 +466,10 @@ if ($latestJobRow) {
             'allowed'  => $previewAllowed,
             'data_uri' => $previewDataUri,
             'error'    => $previewError,
+            'version'  => $previewVersion,
+            'path'     => ($previewVersion !== null && $previewPath !== '')
+                ? ($previewPath . '?v=' . rawurlencode((string)$previewVersion))
+                : $previewPath,
         ];
     }
 }
@@ -528,7 +552,7 @@ if ($latestJobRow) {
                                         <?php if ($latestPreview['error']): ?>
                                             <div class="placeholder-meta">Hinweis: <?= htmlspecialchars((string)$latestPreview['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                         <?php elseif (!$latestPreview['allowed']): ?>
-                                            <div class="placeholder-meta">Preview liegt außerhalb der Media-Roots.</div>
+                                            <div class="placeholder-meta">Preview nicht streambar, Root nicht erlaubt.</div>
                                         <?php endif; ?>
                                     </div>
                                 <?php endif; ?>
@@ -591,6 +615,9 @@ if ($latestJobRow) {
                         <div class="form-block">
                             <div class="label-row">Prompt Quelle</div>
                             <div class="prompt-chip">Effektiv: <?= htmlspecialchars($promptText !== '' ? sv_meta_value($promptText, 160) : 'Kein Prompt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php if ($manualOverrideActive): ?>
+                                <div class="action-note highlight">Manual override aktiv (zuletzt genutzter Prompt).</div>
+                            <?php endif; ?>
                             <textarea class="prompt-input compact" name="_sv_manual_prompt" maxlength="2000" placeholder="Optionaler manueller Prompt"></textarea>
                         </div>
                         <div class="form-block">
@@ -849,6 +876,14 @@ if ($latestJobRow) {
             const cacheBust = job.version_token || job.updated_at || job.id;
             const thumbSrc = job.replaced ? (thumbUrl + (thumbUrl.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(cacheBust)) : thumbUrl;
             const samplerLabel = (job.used_sampler || '–') + ' / ' + (job.used_scheduler || '–');
+            const decidedMode = job.decided_mode || job.generation_mode || job.mode || 'txt2img';
+            const decidedReason = job.decided_reason || '–';
+            const promptSource = job.used_prompt_source || job.prompt_source || '–';
+            const negativeSource = job.used_negative_source || job.negative_mode || '–';
+            const usedSeed = job.used_seed || job.seed || '–';
+            const denoise = (job.decided_denoise !== null && job.decided_denoise !== undefined)
+                ? job.decided_denoise
+                : (job.denoise !== undefined ? job.denoise : '–');
             const modelLine = (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '');
             const formatLine = (job.orig_w || '–') + '×' + (job.orig_h || '–') + ' ' + (job.orig_ext || '–') + ' → ' + (job.out_w || '–') + '×' + (job.out_h || '–') + ' ' + (job.out_ext || '–');
             const attemptLine = job.attempt_index ? ('Attempt ' + job.attempt_index + '/' + (job.attempt_chain ? job.attempt_chain.length : 3)) : 'Attempt –';
@@ -862,13 +897,13 @@ if ($latestJobRow) {
                 </div>
                 <div class="timeline-meta">' + (job.created_at || '–') + ' • ' + (job.updated_at || '–') + '</div>
                 <div class="timeline-body">
-                    <div class="meta-line"><span>Mode</span><strong>' + (job.mode || 'txt2img') + '</strong></div>
-                    <div class="meta-line"><span>Seed</span><strong>' + (job.seed || '–') + '</strong></div>
+                    <div class="meta-line"><span>Mode</span><strong>' + decidedMode + ' (' + (job.mode || 'preview') + ')</strong><em class="small">' + decidedReason + '</em></div>
+                    <div class="meta-line"><span>Seed/Denoise</span><strong>' + usedSeed + ' / ' + ((denoise === undefined || denoise === null) ? '–' : denoise) + '</strong></div>
                     <div class="meta-line"><span>Model</span><strong>' + modelLine + '</strong></div>
                     <div class="meta-line"><span>Sampler/Scheduler</span><strong>' + samplerLabel + ' · ' + attemptLine + '</strong></div>
                     <div class="meta-line"><span>Format</span><strong>' + formatLine + ' [' + ((job.format_preserved === null) ? '–' : (job.format_preserved ? '1:1' : 'konvertiert')) + ']</strong></div>
-                    <div class="meta-line"><span>Prompt</span><strong>' + (job.prompt_source || '–') + '</strong></div>
-                    <div class="meta-line"><span>Negativ</span><strong>' + (job.negative_mode || '–') + '</strong></div>
+                    <div class="meta-line"><span>Prompt</span><strong>' + promptSource + '</strong></div>
+                    <div class="meta-line"><span>Negativ</span><strong>' + negativeSource + '</strong></div>
                     <div class="meta-line"><span>Output</span><strong>' + (job.output_path || '–') + '</strong></div>
                     <div class="meta-line"><span>Version</span><strong>' + (job.version_token || cacheBust || '–') + '</strong></div>
                     ' + errorBlock + '
@@ -891,15 +926,70 @@ if ($latestJobRow) {
         });
     }
 
+    const activeStatuses = ['queued', 'pending', 'created', 'running'];
+    let pollTimer = null;
+
+    function renderError(message) {
+        container.innerHTML = '<div class="job-hint error">' + message + '</div>';
+    }
+
+    function scheduleNext(active) {
+        if (pollTimer) {
+            clearTimeout(pollTimer);
+        }
+        if (active) {
+            pollTimer = setTimeout(loadJobs, 2000);
+        }
+    }
+
     function loadJobs() {
         fetch(endpoint, { headers: { 'Accept': 'application/json' } })
-            .then((resp) => resp.json())
-            .then((data) => renderJobs(data.jobs || []))
-            .catch(() => { container.innerHTML = '<div class="job-hint">Job-Status konnte nicht geladen werden.</div>'; });
+            .then((resp) => {
+                if (!resp.ok) {
+                    throw new Error('HTTP ' + resp.status);
+                }
+                return resp.json();
+            })
+            .then((data) => {
+                const jobs = data.jobs || [];
+                renderJobs(jobs);
+                const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
+                scheduleNext(active);
+            })
+            .catch((err) => {
+                renderError('Job-Status konnte nicht geladen werden (' + err.message + ').');
+                scheduleNext(true);
+            });
+    }
+
+    const forgeForm = document.getElementById('forge-form');
+    if (forgeForm) {
+        forgeForm.addEventListener('submit', () => {
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+            }
+            pollTimer = setTimeout(loadJobs, 2000);
+        });
     }
 
     loadJobs();
-    setInterval(loadJobs, 8000);
+})();
+
+(function() {
+    const inputs = document.querySelectorAll('textarea[name="_sv_manual_prompt"]');
+    inputs.forEach((el) => {
+        const indicator = document.createElement('div');
+        indicator.className = 'action-note highlight manual-indicator';
+        indicator.textContent = 'Manual override aktiv';
+        indicator.style.display = el.value.trim() ? 'block' : 'none';
+        if (el.parentElement) {
+            el.parentElement.appendChild(indicator);
+        }
+        const update = () => {
+            indicator.style.display = el.value.trim() ? 'block' : 'none';
+        };
+        el.addEventListener('input', update);
+    });
 })();
 
 (function() {

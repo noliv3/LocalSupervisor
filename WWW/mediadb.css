@@ -891,6 +891,9 @@ body.media-grid-page {
 .job-error { color:#fecdd3; font-weight:700; }
 .timeline-details { margin-top:0.4rem; color:#cbd5e1; }
 .job-hint { color:#94a3b8; font-size:0.85rem; margin-top:0.5rem; }
+.job-hint.error { color:var(--red); }
+.action-note.highlight { color:#fbbf24; font-weight:600; }
+.timeline-body .small { font-size:0.75rem; margin-left:0.4rem; color:#94a3b8; }
 
 .versions-panel .version-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:0.75rem; }
 .version-tile { text-decoration:none; color:var(--text); background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:0.6rem; padding:0.5rem; display:block; transition:transform 0.15s ease, border-color 0.15s ease; }

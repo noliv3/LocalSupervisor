@@ -861,6 +861,7 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
     $type     = (string)($mediaRow['type'] ?? '');
     $status   = (string)($mediaRow['status'] ?? '');
+    $normalizedOverrides = sv_normalize_forge_overrides($overrides);
 
     if ($type !== 'image') {
         throw new InvalidArgumentException('Nur Bildmedien können regeneriert werden.');
@@ -878,7 +879,7 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
 
     $tags       = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
-    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger, $overrides);
+    $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger, $normalizedOverrides);
     $promptId   = isset($mediaRow['prompt_id']) ? (int)$mediaRow['prompt_id'] : null;
 
     $imageInfo = @getimagesize($path);
@@ -920,41 +921,56 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         $payload['cfg_scale'] = 7.0;
     }
 
-    $seedInfo        = sv_ensure_media_seed($pdo, (int)$mediaRow['id'], $payload['seed'], $logger);
-    $payload['seed'] = $seedInfo['seed'];
+    if ($normalizedOverrides['seed'] !== null) {
+        $payload['seed'] = (string)$normalizedOverrides['seed'];
+        $seedInfo        = ['seed' => $payload['seed'], 'created' => false];
+    } else {
+        $seedInfo        = sv_ensure_media_seed($pdo, (int)$mediaRow['id'], $payload['seed'], $logger);
+        $payload['seed'] = $seedInfo['seed'];
+    }
 
-    $negativePlan = sv_resolve_negative_prompt($mediaRow, $overrides, $regenPlan, $tags);
+    $negativePlan = sv_resolve_negative_prompt($mediaRow, $normalizedOverrides, $regenPlan, $tags);
     $payload['negative_prompt'] = $negativePlan['negative_prompt'];
 
-    $requestedModel = (string)($payload['model'] ?? '');
+    if ($normalizedOverrides['sampler'] !== null) {
+        $payload['sampler'] = $normalizedOverrides['sampler'];
+    }
+    if ($normalizedOverrides['scheduler'] !== null) {
+        $payload['scheduler'] = $normalizedOverrides['scheduler'];
+    }
+    if ($normalizedOverrides['steps'] !== null) {
+        $payload['steps'] = (int)$normalizedOverrides['steps'];
+    }
+    if ($normalizedOverrides['denoising_strength'] !== null) {
+        $payload['denoising_strength'] = (float)$normalizedOverrides['denoising_strength'];
+    }
+    $requestedModel = $normalizedOverrides['model'] ?? (string)($payload['model'] ?? '');
     $resolvedModel  = sv_resolve_forge_model($config, $requestedModel, $logger);
     $payload['model'] = $resolvedModel;
     $payload['_sv_requested_model'] = $requestedModel;
 
-    $missingCritical = [];
-    foreach (['model', 'sampler', 'scheduler', 'cfg_scale', 'steps', 'seed', 'width', 'height'] as $field) {
-        $value = $payload[$field] ?? null;
-        $isEmpty = is_string($value) ? trim($value) === '' : ($value === null || (is_numeric($value) && (float)$value <= 0));
-        if ($isEmpty) {
-            $missingCritical[] = $field;
-        }
-    }
-
-    $forceImg2Img = $regenPlan['prompt_missing']
-        || $regenPlan['category'] === 'C'
-        || $missingCritical !== [];
-
-    if ($forceImg2Img) {
+    $decision = sv_decide_forge_mode($mediaRow, $regenPlan, $normalizedOverrides, $payload);
+    $generationMode = $decision['mode'] ?? 'img2img';
+    if ($generationMode === 'img2img') {
         $payload['init_images'] = [sv_encode_init_image($path)];
-        if (!isset($payload['denoising_strength']) || (float)$payload['denoising_strength'] <= 0) {
-            $payload['denoising_strength'] = 0.25;
+        if (!isset($payload['denoising_strength']) && isset($decision['params']['denoising_strength'])) {
+            $payload['denoising_strength'] = (float)$decision['params']['denoising_strength'];
         }
-        $payload['_sv_generation_mode'] = 'img2img';
-    } else {
-        $payload['_sv_generation_mode'] = 'txt2img';
     }
+    $payload['_sv_generation_mode'] = $generationMode;
+    $payload['_sv_decided_mode']    = $generationMode;
+    $payload['_sv_decided_reason']  = $decision['reason'] ?? null;
+    $payload['_sv_decided_denoise'] = isset($payload['denoising_strength']) ? (float)$payload['denoising_strength'] : null;
 
     $origExt = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    $negativeSource = match ($negativePlan['negative_mode']) {
+        'manual', 'manual_empty' => 'manual',
+        'fallback'               => 'fallback',
+        default                  => 'empty',
+    };
+    $payload['_sv_prompt_source']   = $regenPlan['prompt_source'] ?? null;
+    $payload['_sv_negative_source'] = $negativeSource;
+
     $payload['_sv_regen_plan'] = [
         'category'         => $regenPlan['category'],
         'final_prompt'     => $regenPlan['final_prompt'],
@@ -974,20 +990,18 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         'orig_width'       => $origWidth,
         'orig_height'      => $origHeight,
         'orig_ext'         => $origExt,
-        'allow_empty_neg'  => !empty($overrides['allow_empty_negative']),
-        'manual_prompt'    => $overrides['manual_prompt'] ?? null,
-        'manual_negative'  => array_key_exists('manual_negative_prompt', $overrides)
-            ? ($overrides['manual_negative_prompt'] ?? '')
+        'allow_empty_neg'  => !empty($normalizedOverrides['negative_allow_empty']),
+        'manual_prompt'    => $normalizedOverrides['manual_prompt'] ?? null,
+        'manual_negative'  => $normalizedOverrides['manual_negative_set']
+            ? ($normalizedOverrides['manual_negative'] ?? '')
             : null,
-        'use_hybrid'       => !empty($overrides['use_hybrid']),
+        'use_hybrid'       => !empty($normalizedOverrides['use_hybrid']),
+        'decided_mode'     => $generationMode,
+        'decided_reason'   => $decision['reason'] ?? null,
+        'decided_denoise'  => $payload['_sv_decided_denoise'],
     ];
 
-    $modeOverride = null;
-    if (isset($overrides['_sv_mode']) && is_string($overrides['_sv_mode'])) {
-        $modeOverride = $overrides['_sv_mode'];
-    } elseif (isset($overrides['mode']) && is_string($overrides['mode'])) {
-        $modeOverride = $overrides['mode'];
-    }
+    $modeOverride = $normalizedOverrides['mode'];
 
     $resolvedMode = 'preview';
     if (is_string($modeOverride)) {
@@ -998,6 +1012,7 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     }
 
     $payload['_sv_mode'] = $resolvedMode;
+    $payload['_sv_force_txt2img'] = $normalizedOverrides['force_txt2img'] ?? false;
 
     $payload['_sv_negative_mode'] = $negativePlan['negative_mode'];
     $payload['_sv_negative_len']  = $negativePlan['negative_len'];
@@ -2304,19 +2319,142 @@ function sv_normalize_manual_field(?string $value, int $maxLen): string
     return mb_substr($trimmed, 0, $maxLen);
 }
 
+function sv_normalize_forge_overrides(array $overrides): array
+{
+    $manualPromptRaw   = $overrides['_sv_manual_prompt'] ?? $overrides['manual_prompt'] ?? null;
+    $manualNegativeSet = array_key_exists('_sv_manual_negative', $overrides)
+        || array_key_exists('manual_negative_prompt', $overrides);
+    $manualNegativeRaw = $overrides['_sv_manual_negative'] ?? $overrides['manual_negative_prompt'] ?? null;
+
+    $normalizeString = static function ($value, int $maxLen = 2000): ?string {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return '';
+        }
+
+        return mb_substr($trimmed, 0, $maxLen);
+    };
+
+    $normalized = [
+        'mode'                 => is_string($overrides['_sv_mode'] ?? null) ? (string)$overrides['_sv_mode'] : null,
+        'force_txt2img'        => (isset($overrides['_sv_force_txt2img']) && (string)$overrides['_sv_force_txt2img'] === '1'),
+        'manual_prompt'        => sv_normalize_manual_field($manualPromptRaw, 2000),
+        'manual_prompt_set'    => $manualPromptRaw !== null && trim((string)$manualPromptRaw) !== '',
+        'manual_negative_set'  => $manualNegativeSet,
+        'manual_negative'      => $manualNegativeSet ? $normalizeString($manualNegativeRaw, 2000) ?? '' : null,
+        'negative_allow_empty' => !empty($overrides['_sv_negative_allow_empty']),
+        'seed'                 => isset($overrides['_sv_seed']) && trim((string)$overrides['_sv_seed']) !== ''
+            ? (string)trim((string)$overrides['_sv_seed'])
+            : null,
+        'steps' => isset($overrides['_sv_steps']) && is_numeric($overrides['_sv_steps'])
+            ? (int)$overrides['_sv_steps']
+            : null,
+        'denoising_strength' => isset($overrides['_sv_denoise']) && is_numeric($overrides['_sv_denoise'])
+            ? (float)$overrides['_sv_denoise']
+            : null,
+        'sampler' => $normalizeString($overrides['_sv_sampler'] ?? null, 200),
+        'scheduler' => $normalizeString($overrides['_sv_scheduler'] ?? null, 200),
+        'model' => $normalizeString($overrides['_sv_model'] ?? null, 200),
+        'use_hybrid' => !empty($overrides['_sv_use_hybrid'] ?? $overrides['use_hybrid'] ?? null),
+    ];
+
+    return $normalized;
+}
+
+function sv_is_i2i_unsuitable(string $path, array $forgePayload = []): array
+{
+    if (!is_file($path)) {
+        return ['unsuitable' => true, 'reason' => 'source image missing'];
+    }
+
+    $info = @getimagesize($path);
+    if ($info === false) {
+        return ['unsuitable' => true, 'reason' => 'getimagesize failed'];
+    }
+
+    $filesize = @filesize($path);
+    if ($filesize !== false && $filesize < 8192) {
+        return ['unsuitable' => true, 'reason' => 'source image too small/blank'];
+    }
+
+    $width  = (int)($info[0] ?? 0);
+    $height = (int)($info[1] ?? 0);
+    if ($width <= 32 || $height <= 32) {
+        return ['unsuitable' => true, 'reason' => 'source dimensions extremely small'];
+    }
+
+    $aspect = ($width > 0 && $height > 0) ? max($width / $height, $height / $width) : 0.0;
+    $attempts = isset($forgePayload['attempt_index']) ? (int)$forgePayload['attempt_index'] : null;
+    if ($aspect > 10 && $attempts !== null && $attempts > 1) {
+        return ['unsuitable' => true, 'reason' => 'extreme aspect after repeated i2i failures'];
+    }
+
+    return ['unsuitable' => false, 'reason' => null];
+}
+
+function sv_decide_forge_mode(array $mediaRow, array $regenPlan, array $overrides, array $forgePayload): array
+{
+    $mode   = 'img2img';
+    $reason = 'original image available';
+    $params = [];
+
+    $path = (string)($mediaRow['path'] ?? '');
+    $type = (string)($mediaRow['type'] ?? '');
+
+    if ($type !== 'image' || $path === '' || !is_file($path)) {
+        return [
+            'mode'   => 'txt2img',
+            'reason' => 'no source image for img2img',
+            'params' => $params,
+        ];
+    }
+
+    if (!empty($overrides['force_txt2img'])) {
+        return [
+            'mode'   => 'txt2img',
+            'reason' => 'override _sv_force_txt2img',
+            'params' => $params,
+        ];
+    }
+
+    $unsuitable = sv_is_i2i_unsuitable($path, $forgePayload);
+    if (!empty($unsuitable['unsuitable'])) {
+        return [
+            'mode'   => 'txt2img',
+            'reason' => (string)($unsuitable['reason'] ?? 'input unsuitable for img2img'),
+            'params' => $params,
+        ];
+    }
+
+    if (!isset($overrides['denoising_strength']) || $overrides['denoising_strength'] === null) {
+        $params['denoising_strength'] = 0.25;
+    }
+
+    return [
+        'mode'   => $mode,
+        'reason' => $reason,
+        'params' => $params,
+    ];
+}
+
 function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $logger, array $overrides = []): array
 {
-    $manualPrompt = sv_normalize_manual_field($overrides['manual_prompt'] ?? null, 2000);
-    $useHybrid    = !empty($overrides['use_hybrid']);
-    $noHumans       = sv_tag_has_no_humans_flag($tags);
-    $tagPromptData  = sv_build_grouped_tag_prompt($tags, $noHumans);
-    $tagPrompt      = is_array($tagPromptData) ? ($tagPromptData['prompt'] ?? null) : null;
+    $manualPrompt     = sv_normalize_manual_field($overrides['manual_prompt'] ?? null, 2000);
+    $manualPromptSet  = !empty($overrides['manual_prompt_set']);
+    $useHybrid        = !empty($overrides['use_hybrid']);
+    $noHumans         = sv_tag_has_no_humans_flag($tags);
+    $tagPromptData    = sv_build_grouped_tag_prompt($tags, $noHumans);
+    $tagPrompt        = is_array($tagPromptData) ? ($tagPromptData['prompt'] ?? null) : null;
 
-    $originalPrompt = trim((string)($mediaRow['prompt'] ?? ''));
-    $effectivePrompt = $manualPrompt !== '' ? $manualPrompt : $originalPrompt;
+    $originalPrompt  = trim((string)($mediaRow['prompt'] ?? ''));
+    $effectivePrompt = ($manualPromptSet && $manualPrompt !== '') ? $manualPrompt : $originalPrompt;
     $tagPromptUsed   = false;
     $fallbackUsed    = false;
-    $promptSource    = $manualPrompt !== '' ? 'manual' : 'stored_prompt';
+    $promptSource    = ($manualPromptSet && $manualPrompt !== '') ? 'manual' : 'stored_prompt';
     $assessment      = null;
 
     if ($manualPrompt === '' && $effectivePrompt === '' && $tagPrompt !== null) {
@@ -2427,18 +2565,17 @@ function sv_ensure_media_seed(PDO $pdo, int $mediaId, ?string $existingSeed, cal
 
 function sv_resolve_negative_prompt(array $mediaRow, array $overrides, array $regenPlan, array $tags): array
 {
-    $manualNegative = array_key_exists('manual_negative_prompt', $overrides)
-        ? sv_normalize_manual_field((string)$overrides['manual_negative_prompt'], 2000)
-        : null;
-    $allowEmpty     = !empty($overrides['allow_empty_negative']);
-    $fallback       = 'low quality, blurry, watermark, jpeg artifacts, extra limbs';
-    $isFlux         = sv_is_flux_media($mediaRow);
+    $manualNegativeSet = !empty($overrides['manual_negative_set']);
+    $manualNegative    = $manualNegativeSet ? sv_normalize_manual_field((string)$overrides['manual_negative'], 2000) : null;
+    $allowEmpty        = !empty($overrides['negative_allow_empty']);
+    $fallback          = 'low quality, blurry, watermark, jpeg artifacts, extra limbs';
+    $isFlux            = sv_is_flux_media($mediaRow);
 
-    if ($manualNegative !== null) {
+    if ($manualNegativeSet) {
         if ($manualNegative === '') {
             return [
                 'negative_prompt' => '',
-                'negative_mode'   => 'empty_allowed',
+                'negative_mode'   => 'manual_empty',
                 'negative_len'    => 0,
             ];
         }
@@ -3202,15 +3339,21 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     }
     $payload['_sv_mode'] = $regenMode;
 
-    $generationMode = $payload['_sv_generation_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
+    $generationMode = $payload['_sv_decided_mode']
+        ?? $payload['_sv_generation_mode']
+        ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
 
     $regenPlan = sv_extract_regen_plan_from_payload($payload);
-    if (trim((string)$regenPlan['final_prompt']) === '') {
+    $payloadPrompt = isset($payload['prompt']) ? (string)$payload['prompt'] : '';
+    if (trim($payloadPrompt) === '' && trim((string)$regenPlan['final_prompt']) !== '') {
+        $payloadPrompt = (string)$regenPlan['final_prompt'];
+    }
+    if (trim($payloadPrompt) === '') {
         sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job ohne finalen Prompt.');
         throw new RuntimeException('Forge-Job #' . $jobId . ' hat keinen finalen Prompt.');
     }
 
-    $payload['prompt'] = $regenPlan['final_prompt'];
+    $payload['prompt'] = $payloadPrompt;
 
     $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
     $pathsCfg = $config['paths'] ?? [];
@@ -3239,6 +3382,22 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     $origImageInfo = @getimagesize($path);
     $origWidth = $origImageInfo !== false ? (int)$origImageInfo[0] : (int)($mediaRow['width'] ?? 0);
     $origHeight = $origImageInfo !== false ? (int)$origImageInfo[1] : (int)($mediaRow['height'] ?? 0);
+
+    $promptSource   = $payload['_sv_prompt_source'] ?? ($regenPlan['prompt_source'] ?? null);
+    $negativeSource = $payload['_sv_negative_source'] ?? ($payload['_sv_negative_mode'] ?? $regenPlan['negative_mode'] ?? null);
+    $decidedReason  = $payload['_sv_decided_reason'] ?? ($regenPlan['decided_reason'] ?? null);
+    $decidedDenoise = isset($payload['_sv_decided_denoise'])
+        ? (float)$payload['_sv_decided_denoise']
+        : (isset($payload['denoising_strength']) ? (float)$payload['denoising_strength'] : null);
+    if ($decidedReason === null || $decidedReason === '') {
+        $decidedReason = 'auto img2img default';
+    }
+    if ($negativeSource === 'manual_empty') {
+        $negativeSource = 'manual';
+    } elseif ($negativeSource === 'empty_allowed' || $negativeSource === 'empty_flux') {
+        $negativeSource = 'empty';
+    }
+    $payload['_sv_generation_mode'] = $generationMode;
 
     $backupDir        = sv_resolve_backup_dir($config);
     $tmpDirRaw        = $pathsCfg['tmp'] ?? null;
@@ -3275,7 +3434,20 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     $forcedReason      = null;
 
     try {
+        $logger(sprintf(
+            'Forge-Request: mode=%s regen_mode=%s sampler=%s scheduler=%s seed=%s steps=%s denoise=%s model=%s',
+            $generationMode,
+            $regenMode,
+            (string)($payload['sampler'] ?? 'auto'),
+            (string)($payload['scheduler'] ?? 'auto'),
+            (string)($payload['seed'] ?? 'auto'),
+            (string)($payload['steps'] ?? 'auto'),
+            isset($payload['denoising_strength']) ? (string)$payload['denoising_strength'] : 'auto',
+            (string)($payload['model'] ?? 'auto')
+        ));
+
         $forgeResponse = sv_call_forge_sync($config, $payload, $logger);
+        $logger('Forge response binary: ' . ((isset($forgeResponse['binary']) && $forgeResponse['binary'] !== '') ? 'yes' : 'no'));
         $imageMeta     = sv_write_forge_image($config, $plannedTempOutputPath, $forgeResponse['binary'], $logger, [
             'width'  => $origWidth,
             'height' => $origHeight,
@@ -3311,6 +3483,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             $previewFilesize = @filesize($previewPath);
             $previewWidth    = $imageMeta['width'] ?? null;
             $previewHeight   = $imageMeta['height'] ?? null;
+            $logger('Preview geschrieben: ' . ($previewPath !== null ? 'yes' : 'no'));
 
             $responsePayload = [
                 '_sv_worker_pid'        => $workerPid,
@@ -3376,6 +3549,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             @unlink($plannedTempOutputPath);
             throw new RuntimeException('Ersetzen der Zieldatei fehlgeschlagen.');
         }
+        $logger('Replace erfolgreich geschrieben.');
 
         $newFileInfo = $imageMeta;
         $newFileInfo['hash'] = @hash_file('md5', $path) ?: ($imageMeta['hash'] ?? null);
@@ -3410,11 +3584,17 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'forge_response'        => $forgeResponse['response_array'] ?? null,
             'used_sampler'          => $forgeResponse['used_sampler'] ?? ($payload['sampler'] ?? null),
             'used_scheduler'        => $forgeResponse['used_scheduler'] ?? ($payload['scheduler'] ?? null),
+            'used_prompt_source'    => $promptSource,
+            'used_negative_source'  => $negativeSource,
+            'used_seed'             => $payload['seed'] ?? null,
             'attempt_index'         => $forgeResponse['attempt_index'] ?? null,
             'attempt_chain'         => $forgeResponse['attempt_chain'] ?? null,
             'mode'                  => $regenMode,
             'generation_mode'       => $generationMode,
             'denoise'               => isset($payload['denoising_strength']) ? (float)$payload['denoising_strength'] : null,
+            'decided_mode'          => $generationMode,
+            'decided_reason'        => $decidedReason,
+            'decided_denoise'       => $decidedDenoise,
             'negative_mode'         => $payload['_sv_negative_mode'] ?? null,
             'negative_len'          => $payload['_sv_negative_len'] ?? null,
             'result' => [
@@ -3585,6 +3765,11 @@ function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callab
         $jobType = (string)($jobRow['type'] ?? '');
         $jobStatus = (string)($jobRow['status'] ?? '');
         $jobMediaId = isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : null;
+        $jobPayload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true);
+        $decidedMode = is_array($jobPayload)
+            ? ($jobPayload['_sv_decided_mode'] ?? ($jobPayload['_sv_generation_mode'] ?? null))
+            : null;
+        $regenMode = is_array($jobPayload) ? ($jobPayload['_sv_mode'] ?? 'preview') : 'preview';
 
         if (!in_array($jobType, SV_FORGE_JOB_TYPES, true)) {
             $summary['skipped']++;
@@ -3619,7 +3804,13 @@ function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callab
             continue;
         }
         try {
-            $logger('Verarbeite Forge-Job #' . $jobId . ' (Media ' . (int)($jobRow['media_id'] ?? 0) . ')');
+            $logger(sprintf(
+                'Verarbeite Forge-Job #%d (Media %d) decided_mode=%s regen_mode=%s',
+                $jobId,
+                (int)($jobRow['media_id'] ?? 0),
+                $decidedMode ?? 'n/a',
+                $regenMode
+            ));
             $result = sv_process_single_forge_job($pdo, $config, $jobRow, $logger);
             if (($result['status'] ?? '') === 'done') {
                 $summary['done']++;
@@ -3846,14 +4037,20 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
     foreach ($rows as $row) {
         $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+        $regenPlan = is_array($payload['_sv_regen_plan'] ?? null) ? $payload['_sv_regen_plan'] : [];
 
         $workerPid    = $response['_sv_worker_pid'] ?? ($workerMeta['worker_pid'] ?? null);
         $workerStart  = $response['_sv_worker_started_at'] ?? ($workerMeta['worker_started_at'] ?? null);
         $pidInfo      = is_numeric($workerPid) ? sv_is_pid_running((int)$workerPid) : ['running' => false, 'unknown' => $workerPid !== null];
-        $promptInfo   = $response['result']['prompt_category'] ?? ($payload['_sv_regen_plan']['category'] ?? null);
+        $promptInfo   = $response['result']['prompt_category'] ?? ($regenPlan['category'] ?? null);
 
         $mode = $payload['_sv_mode'] ?? 'preview';
-        $generationMode = $payload['_sv_generation_mode'] ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
+        $generationMode = $payload['_sv_decided_mode']
+            ?? $payload['_sv_generation_mode']
+            ?? (isset($payload['init_images']) ? 'img2img' : 'txt2img');
+        $decidedMode   = $response['decided_mode'] ?? $generationMode;
+        $decidedReason = $response['decided_reason'] ?? ($payload['_sv_decided_reason'] ?? ($regenPlan['decided_reason'] ?? null));
+        $decidedDenoise = $response['decided_denoise'] ?? ($payload['_sv_decided_denoise'] ?? ($regenPlan['decided_denoise'] ?? null));
         $usedSampler   = $response['used_sampler'] ?? ($payload['sampler'] ?? null);
         $usedScheduler = $response['used_scheduler'] ?? ($payload['scheduler'] ?? null);
         $attemptIndex  = $response['attempt_index'] ?? null;
@@ -3861,6 +4058,8 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
         $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
         $resolvedModel  = $payload['model'] ?? null;
         $fallbackUsed   = $resolvedModel === $fallbackModel && $requestedModel !== null && $requestedModel !== $resolvedModel;
+        $usedPromptSource = $response['used_prompt_source'] ?? ($payload['_sv_prompt_source'] ?? ($regenPlan['prompt_source'] ?? null));
+        $usedNegativeSource = $response['used_negative_source'] ?? ($payload['_sv_negative_source'] ?? ($regenPlan['negative_mode'] ?? null));
 
         $resultMeta = is_array($response['result'] ?? null) ? $response['result'] : [];
         $jobs[] = [
@@ -3871,9 +4070,15 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
             'model'              => $resolvedModel,
             'mode'               => $mode,
             'generation_mode'    => $generationMode,
+            'decided_mode'       => $decidedMode,
+            'decided_reason'     => $decidedReason,
+            'decided_denoise'    => $decidedDenoise,
             'seed'               => $payload['seed'] ?? null,
             'used_sampler'       => $usedSampler,
             'used_scheduler'     => $usedScheduler,
+            'used_prompt_source' => $usedPromptSource,
+            'used_negative_source' => $usedNegativeSource,
+            'used_seed'          => $response['used_seed'] ?? ($payload['seed'] ?? null),
             'attempt_index'      => $attemptIndex,
             'attempt_chain'      => $attemptChain,
             'fallback_model'     => $fallbackUsed,
