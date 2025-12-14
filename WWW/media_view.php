@@ -4,6 +4,7 @@ declare(strict_types=1);
 $config = require __DIR__ . '/../CONFIG/config.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+require_once __DIR__ . '/../SCRIPTS/paths.php';
 $hasInternalAccess = sv_validate_internal_access($config, 'media_view', false);
 
 $dsn      = $config['db']['dsn'];
@@ -133,14 +134,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'forge_regen') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
             try {
-                $manualPrompt  = sv_limit_string((string)($_POST['manual_prompt'] ?? ''), 2000);
-                $manualNegRaw  = sv_limit_string((string)($_POST['manual_negative_prompt'] ?? ''), 2000);
-                $overrides = [
-                    'manual_prompt'          => $manualPrompt !== '' ? $manualPrompt : null,
-                    'manual_negative_prompt' => isset($_POST['manual_negative_prompt']) ? $manualNegRaw : null,
-                    'use_hybrid'             => !empty($_POST['use_hybrid']),
-                    'allow_empty_negative'   => !empty($_POST['allow_empty_negative']),
-                ];
+                $overrides = [];
+
+                $modeValue = $_POST['_sv_mode'] ?? '';
+                if (is_array($modeValue)) {
+                    $modeValue = end($modeValue) ?: '';
+                }
+                $modeRaw = is_string($modeValue) ? trim($modeValue) : '';
+                if ($modeRaw !== '') {
+                    $overrides['_sv_mode'] = $modeRaw;
+                }
+
+                $manualPrompt  = sv_limit_string((string)($_POST['_sv_manual_prompt'] ?? ''), 2000);
+                $manualNegRaw  = sv_limit_string((string)($_POST['_sv_manual_negative'] ?? ''), 2000);
+                if ($manualPrompt !== '') {
+                    $overrides['_sv_manual_prompt'] = $manualPrompt;
+                    $overrides['manual_prompt']      = $manualPrompt; // kompatibel zum bestehenden Pfad
+                }
+                if (array_key_exists('_sv_manual_negative', $_POST)) {
+                    $overrides['_sv_manual_negative'] = $manualNegRaw;
+                    $overrides['manual_negative_prompt'] = $manualNegRaw;
+                }
+
+                if (!empty($_POST['_sv_use_hybrid'])) {
+                    $overrides['use_hybrid'] = true;
+                }
+
+                if (!empty($_POST['_sv_negative_allow_empty'])) {
+                    $overrides['_sv_negative_allow_empty'] = true;
+                    $overrides['allow_empty_negative']     = true;
+                }
+
+                $seedRaw = isset($_POST['_sv_seed']) ? trim((string)$_POST['_sv_seed']) : '';
+                if ($seedRaw !== '' && is_numeric($seedRaw)) {
+                    $overrides['_sv_seed'] = (string)$seedRaw;
+                    $overrides['seed']     = $seedRaw;
+                }
+
+                $stepsRaw = isset($_POST['_sv_steps']) ? trim((string)$_POST['_sv_steps']) : '';
+                if ($stepsRaw !== '' && ctype_digit($stepsRaw)) {
+                    $overrides['_sv_steps'] = $stepsRaw;
+                    $overrides['steps']     = (int)$stepsRaw;
+                }
+
+                $denoiseRaw = isset($_POST['_sv_denoise']) ? trim((string)$_POST['_sv_denoise']) : '';
+                if ($denoiseRaw !== '' && is_numeric($denoiseRaw)) {
+                    $overrides['_sv_denoise'] = $denoiseRaw;
+                    $overrides['denoising_strength'] = (float)$denoiseRaw;
+                }
+
+                $samplerRaw = sv_limit_string((string)($_POST['_sv_sampler'] ?? ''), 100);
+                if ($samplerRaw !== '') {
+                    $overrides['_sv_sampler'] = $samplerRaw;
+                    $overrides['sampler']     = $samplerRaw;
+                }
+
+                $schedulerRaw = sv_limit_string((string)($_POST['_sv_scheduler'] ?? ''), 100);
+                if ($schedulerRaw !== '') {
+                    $overrides['_sv_scheduler'] = $schedulerRaw;
+                    $overrides['scheduler']     = $schedulerRaw;
+                }
+
+                $modelRaw = sv_limit_string((string)($_POST['_sv_model'] ?? ''), 200);
+                if ($modelRaw !== '') {
+                    $overrides['_sv_model'] = $modelRaw;
+                    $overrides['model']     = $modelRaw;
+                }
 
                 $result = sv_run_forge_regen_replace($pdo, $config, $id, $logger, $overrides);
                 $actionSuccess = true;
@@ -333,6 +392,63 @@ if (!$consistencyStatus['prompt_complete']) {
     $forgeInfoNotes[] = 'Prompt unvollständig; Fallback/Tag-Rebuild greift in operations.php.';
 }
 $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
+
+$latestPreview = null;
+$latestJobResponse = null;
+$latestJobStmt = $pdo->prepare('SELECT id, status, forge_response_json, forge_request_json FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT 1');
+$latestJobStmt->execute([':type' => SV_FORGE_JOB_TYPE, ':media_id' => $id]);
+$latestJobRow = $latestJobStmt->fetch(PDO::FETCH_ASSOC);
+if ($latestJobRow) {
+    $latestJobResponse = json_decode((string)($latestJobRow['forge_response_json'] ?? ''), true) ?: [];
+    $latestJobRequest  = json_decode((string)($latestJobRow['forge_request_json'] ?? ''), true) ?: [];
+
+    $responseMode = (string)($latestJobResponse['mode'] ?? $latestJobRequest['_sv_mode'] ?? '');
+    $responseResult = is_array($latestJobResponse['result'] ?? null) ? $latestJobResponse['result'] : [];
+    $newHash = $responseResult['new_hash'] ?? null;
+    if ($responseMode === 'replace' && $newHash) {
+        $thumbUrl .= (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode((string)$newHash);
+    }
+
+    if ((string)($latestJobRow['status'] ?? '') === 'done' && $responseMode === 'preview') {
+        $previewPath = (string)($latestJobResponse['preview_path'] ?? '');
+        $previewAllowed = false;
+        $previewDataUri = null;
+        $previewError   = null;
+        if ($previewPath !== '') {
+            try {
+                sv_assert_media_path_allowed($previewPath, $config['paths'] ?? [], 'forge_preview');
+                $previewAllowed = true;
+            } catch (Throwable $e) {
+                $previewError = $e->getMessage();
+            }
+
+            if ($previewAllowed && is_file($previewPath)) {
+                $maxSize = 6 * 1024 * 1024;
+                $fileSize = (int)@filesize($previewPath);
+                if ($fileSize > 0 && $fileSize <= $maxSize) {
+                    $raw = @file_get_contents($previewPath);
+                    if ($raw !== false) {
+                        $mime = @mime_content_type($previewPath) ?: 'image/jpeg';
+                        $previewDataUri = 'data:' . $mime . ';base64,' . base64_encode($raw);
+                    }
+                } else {
+                    $previewError = $fileSize > $maxSize ? 'Preview >6MB, nicht inline geladen.' : null;
+                }
+            }
+        }
+
+        $latestPreview = [
+            'path'     => $previewPath,
+            'hash'     => $latestJobResponse['preview_hash'] ?? null,
+            'width'    => $latestJobResponse['preview_width'] ?? null,
+            'height'   => $latestJobResponse['preview_height'] ?? null,
+            'filesize' => $latestJobResponse['preview_filesize'] ?? null,
+            'allowed'  => $previewAllowed,
+            'data_uri' => $previewDataUri,
+            'error'    => $previewError,
+        ];
+    }
+}
 ?>
 <!doctype html>
 <html lang="de">
@@ -389,8 +505,40 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
         <div class="media-left">
             <div class="panel media-visual" id="visual">
                 <?php if ($type === 'image'): ?>
-                    <div class="preview-frame">
-                        <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau">
+                    <div class="preview-grid">
+                        <div class="preview-card">
+                            <div class="preview-label original">ORIGINAL</div>
+                            <div class="preview-frame">
+                                <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau">
+                            </div>
+                        </div>
+                        <?php if ($latestPreview !== null): ?>
+                            <div class="preview-card">
+                                <div class="preview-label preview">PREVIEW</div>
+                                <?php if ($latestPreview['data_uri']): ?>
+                                    <div class="preview-frame">
+                                        <img src="<?= htmlspecialchars((string)$latestPreview['data_uri'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Preview">
+                                    </div>
+                                <?php else: ?>
+                                    <div class="preview-placeholder">
+                                        <div class="placeholder-title">Keine Inline-Vorschau</div>
+                                        <?php if ($latestPreview['path'] !== ''): ?>
+                                            <div class="placeholder-meta">Pfad: <?= htmlspecialchars((string)$latestPreview['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                        <?php endif; ?>
+                                        <?php if ($latestPreview['error']): ?>
+                                            <div class="placeholder-meta">Hinweis: <?= htmlspecialchars((string)$latestPreview['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                        <?php elseif (!$latestPreview['allowed']): ?>
+                                            <div class="placeholder-meta">Preview liegt außerhalb der Media-Roots.</div>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                                <div class="preview-meta">
+                                    <span><?= htmlspecialchars((string)($latestPreview['width'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($latestPreview['height'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                    <span>Hash: <?= htmlspecialchars((string)($latestPreview['hash'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                    <?php if ($latestPreview['filesize']): ?><span><?= htmlspecialchars((string)$latestPreview['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
+                                </div>
+                            </div>
+                        <?php endif; ?>
                     </div>
                 <?php else: ?>
                     <div class="preview-placeholder">
@@ -428,10 +576,65 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
                     </div>
                 <?php endif; ?>
 
-                <div class="button-stack">
-                    <button class="btn primary" type="submit" form="forge-form" <?= $forgeDisabled ? 'disabled' : '' ?>>Forge Regen</button>
-                    <?php if ($forgeReason): ?><div class="btn-reason"><?= htmlspecialchars($forgeReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                <form id="forge-form" class="forge-control" method="post">
+                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                    <input type="hidden" name="action" value="forge_regen">
+                    <div class="forge-grid">
+                        <div class="form-block">
+                            <div class="label-row">Mode</div>
+                            <div class="radio-row">
+                                <label><input type="radio" name="_sv_mode" value="preview" checked> Preview (Standard)</label>
+                                <label><input type="radio" name="_sv_mode" value="replace"> Replace sofort</label>
+                            </div>
+                            <div class="hint">Replace schreibt sofort zurück, Preview bleibt isoliert.</div>
+                        </div>
+                        <div class="form-block">
+                            <div class="label-row">Prompt Quelle</div>
+                            <div class="prompt-chip">Effektiv: <?= htmlspecialchars($promptText !== '' ? sv_meta_value($promptText, 160) : 'Kein Prompt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <textarea class="prompt-input compact" name="_sv_manual_prompt" maxlength="2000" placeholder="Optionaler manueller Prompt"></textarea>
+                        </div>
+                        <div class="form-block">
+                            <div class="label-row">Negativer Prompt</div>
+                            <textarea class="prompt-input compact" name="_sv_manual_negative" maxlength="2000" placeholder="Optionaler negativer Prompt"></textarea>
+                            <label class="checkbox-inline"><input type="checkbox" name="_sv_negative_allow_empty" value="1"> Leeren negativen Prompt erlauben</label>
+                        </div>
+                        <div class="form-block two-col">
+                            <label>Seed (optional)<input type="number" name="_sv_seed" min="0" step="1" placeholder="Auto"></label>
+                            <label>Steps<input type="number" name="_sv_steps" min="1" max="150" step="1" placeholder="auto"></label>
+                        </div>
+                        <div class="form-block two-col">
+                            <label>Denoise<input type="number" name="_sv_denoise" min="0" max="1" step="0.01" placeholder="auto"></label>
+                            <label>Sampler
+                                <select name="_sv_sampler">
+                                    <option value="">Auto</option>
+                                    <option value="DPM++ 2M Karras">DPM++ 2M Karras</option>
+                                    <option value="Euler a">Euler a</option>
+                                    <option value="DPM++ SDE Karras">DPM++ SDE Karras</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="form-block two-col">
+                            <label>Scheduler
+                                <select name="_sv_scheduler">
+                                    <option value="">Auto</option>
+                                    <option value="Karras">Karras</option>
+                                    <option value="Normal">Normal</option>
+                                    <option value="Exponential">Exponential</option>
+                                </select>
+                            </label>
+                            <label>Model Override<input type="text" name="_sv_model" maxlength="200" placeholder="leer = Default/Fallback"></label>
+                        </div>
+                        <div class="form-block">
+                            <label class="checkbox-inline"><input type="checkbox" name="_sv_use_hybrid" value="1"> Hybrid (Prompt + Tags)</label>
+                        </div>
+                    </div>
+                    <div class="button-stack inline">
+                        <button class="btn primary" type="submit" name="_sv_mode" value="preview" <?= $forgeDisabled ? 'disabled' : '' ?>>Preview starten</button>
+                        <button class="btn danger" type="submit" name="_sv_mode" value="replace" <?= $forgeDisabled ? 'disabled' : '' ?>>Replace sofort</button>
+                    </div>
+                </form>
 
+                <div class="button-stack">
                     <button class="btn secondary" type="button" <?= $overrideDisabled ? 'disabled' : '' ?> onclick="document.getElementById('prompt-panel')?.scrollIntoView({ behavior: 'smooth' });">Prompt bearbeiten</button>
                     <?php if ($overrideReason): ?><div class="btn-reason"><?= htmlspecialchars($overrideReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
 
@@ -535,12 +738,12 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
         </div>
         <div class="tab-content" id="tab-manual">
             <div class="label-row">Manueller Prompt (optional)</div>
-            <textarea class="prompt-input" name="manual_prompt" form="forge-form" maxlength="2000" placeholder="Manueller Prompt eintragen"></textarea>
+            <textarea class="prompt-input" name="_sv_manual_prompt" form="forge-form" maxlength="2000" placeholder="Manueller Prompt eintragen"></textarea>
             <div class="label-row">Negativer Prompt (optional)</div>
-            <textarea class="prompt-input" name="manual_negative_prompt" form="forge-form" maxlength="2000" placeholder="Negativer Prompt oder leer lassen"></textarea>
+            <textarea class="prompt-input" name="_sv_manual_negative" form="forge-form" maxlength="2000" placeholder="Negativer Prompt oder leer lassen"></textarea>
             <div class="checkbox-row">
-                <label><input type="checkbox" name="use_hybrid" value="1" form="forge-form"> Hybrid (Prompt + Tags)</label>
-                <label><input type="checkbox" name="allow_empty_negative" value="1" form="forge-form"> Leeren negativen Prompt erlauben</label>
+                <label><input type="checkbox" name="_sv_use_hybrid" value="1" form="forge-form"> Hybrid (Prompt + Tags)</label>
+                <label><input type="checkbox" name="_sv_negative_allow_empty" value="1" form="forge-form"> Leeren negativen Prompt erlauben</label>
             </div>
             <div class="tab-hint">Absenden über „Forge Regen“.</div>
         </div>
@@ -608,10 +811,6 @@ $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult 
         <?php endif; ?>
     </details>
 
-    <form id="forge-form" method="post">
-        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-        <input type="hidden" name="action" value="forge_regen">
-    </form>
     <form id="rebuild-form" method="post">
         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
         <input type="hidden" name="action" value="rebuild_prompt">
