@@ -1,0 +1,39 @@
+# Laufzeitumgebung
+PHP >= 8.1
+Webserver (Apache, nginx oder PHP Built-in Server)
+
+# PHP-Extensions (empfohlen)
+ext-pdo
+ext-pdo_mysql oder ext-pdo_sqlite
+ext-json
+ext-mbstring
+ext-fileinfo
+ext-gd oder ext-imagick          # Thumbnails / Bildinfos
+ext-exif                         # EXIF/PNG-Metadaten (falls nötig)
+ext-curl                         # REST-Calls an Scanner / FORGE
+
+# Datenbank
+MySQL >= 5.7 oder MariaDB >= 10.x
+ODER
+SQLite3 (Dateibasierte DB)
+
+# Externe Tools (optional, aber sinnvoll)
+ffmpeg                           # Videometadaten + Thumbnails
+exiftool                         # erweiterte Metadaten-Extraktion
+
+# Externe Dienste / APIs (lokal oder remote)
+Eigener Tag-/NSFW-Scanner mit HTTP-API
+- Endpunkte: /check, /batch (oder ähnlich)
+- Authentifizierung: API-Key/Token
+
+FORGE-Server (Bild-/Video-Nachgenerierung)
+- HTTP-API erreichbar
+- Authentifizierung: API-Key/Token
+
+# Sicherheit
+Konfigurierbare API-Keys für:
+- internen Media-API-Zugriff
+- Scanner-API
+- FORGE-API
+
+Optionale IP-Whitelist-Unterstützung (z. B. nur 127.0.0.1 / internes Netz)

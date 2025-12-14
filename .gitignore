@@ -1,0 +1,36 @@
+# lokale DB
+DB/*.sqlite
+DB/*.db
+DB/*.sqlite3
+
+# Logs und Runtime
+LOGS/
+TMP/
+BACKUPS/
+CACHE/
+TEMP/
+scanned/
+thumbs/
+uploads/
+*.lock
+
+# lokale Tools
+TOOLS/
+!TOOLS/readme*.md
+
+# lokale Web-Daten
+WWW/bilder
+WWW/fsk18
+WWW/videos
+WWW/videos18
+
+# Secrets / Config
+.env
+**/*.env
+CONFIG/config.php
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
