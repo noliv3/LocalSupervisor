@@ -2421,10 +2421,32 @@ function sv_store_forge_regen_meta(PDO $pdo, int $mediaId, array $info): void
     }
 }
 
-function sv_backup_media_file(array $config, string $path, callable $logger): string
+function sv_resolve_backup_dir(array $config): string
 {
-    $baseDir   = sv_base_dir();
-    $backupDir = (string)($config['paths']['backups'] ?? ($baseDir . '/BACKUPS'));
+    $baseDir      = sv_base_dir();
+    $configured   = $config['paths']['backups'] ?? null;
+    $fallbackPath = $baseDir . '/BACKUPS';
+
+    if (!is_string($configured) || trim($configured) === '') {
+        return $fallbackPath;
+    }
+
+    $normalized = rtrim(str_replace('\\', '/', (string)$configured), '/');
+
+    return $normalized === '' ? $fallbackPath : $normalized;
+}
+
+function sv_build_backup_path(string $backupDir, string $sourcePath): string
+{
+    $timestamp = date('Ymd_His');
+    $fileName  = basename($sourcePath);
+
+    return rtrim($backupDir, '/') . '/forge_regen_' . $timestamp . '_' . $fileName;
+}
+
+function sv_backup_media_file(array $config, string $path, callable $logger, ?string $backupDir = null, ?string $backupPath = null): string
+{
+    $backupDir = $backupDir ?? sv_resolve_backup_dir($config);
     $backupDir = rtrim(str_replace('\\', '/', $backupDir), '/');
     sv_assert_backup_outside_media_roots($config, $backupDir);
     if (!is_dir($backupDir)) {
@@ -2433,9 +2455,7 @@ function sv_backup_media_file(array $config, string $path, callable $logger): st
         }
     }
 
-    $timestamp  = date('Ymd_His');
-    $fileName   = basename($path);
-    $backupPath = $backupDir . '/forge_regen_' . $timestamp . '_' . $fileName;
+    $backupPath = $backupPath ?? sv_build_backup_path($backupDir, $path);
 
     if (!copy($path, $backupPath)) {
         throw new RuntimeException('Backup fehlgeschlagen: ' . $backupPath);
@@ -2446,17 +2466,34 @@ function sv_backup_media_file(array $config, string $path, callable $logger): st
     return $backupPath;
 }
 
-function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = []): array
+function sv_build_temp_output_path(string $tmpDir, string $targetPath): string
+{
+    $tmpDir   = rtrim($tmpDir, '/');
+    $tmpFile  = $tmpDir . '/forge_regen_' . md5($targetPath) . '_' . basename($targetPath);
+    $suffix   = 0;
+
+    while (file_exists($tmpFile)) {
+        $suffix++;
+        $tmpFile = $tmpDir . '/forge_regen_' . md5($targetPath) . '_' . $suffix . '_' . basename($targetPath);
+    }
+
+    return $tmpFile;
+}
+
+function sv_replace_media_file_with_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = [], ?string $tempOutputPath = null): array
 {
     $pathsCfg = $config['paths'] ?? [];
     sv_assert_media_path_allowed($targetPath, $pathsCfg, 'forge_regen_replace');
 
-    $tmpDir = isset($pathsCfg['tmp']) && is_string($pathsCfg['tmp']) && trim($pathsCfg['tmp']) !== ''
-        ? rtrim(str_replace('\\', '/', (string)$pathsCfg['tmp']), '/')
+    $tmpDirRaw = $pathsCfg['tmp'] ?? null;
+    $tmpDir = (is_string($tmpDirRaw) && trim($tmpDirRaw) !== '')
+        ? rtrim(str_replace('\\', '/', (string)$tmpDirRaw), '/')
         : (sv_base_dir() . '/TMP');
     if (!is_dir($tmpDir)) {
         mkdir($tmpDir, 0777, true);
     }
+
+    $tmpFile = $tempOutputPath !== null ? $tempOutputPath : sv_build_temp_output_path($tmpDir, $targetPath);
 
     $image = @imagecreatefromstring($binary);
     if ($image === false) {
@@ -2491,12 +2528,6 @@ function sv_replace_media_file_with_image(array $config, string $targetPath, str
     $targetFormat = $formatMap[$targetExt] ?? 'jpeg';
     $formatPreserved = isset($formatMap[$targetExt]);
     $outExt = $formatMap[$targetExt] ?? 'jpeg';
-
-    $tmpFile = tempnam($tmpDir, 'forge_regen_');
-    if ($tmpFile === false) {
-        imagedestroy($image);
-        throw new RuntimeException('Temporäre Datei konnte nicht angelegt werden.');
-    }
 
     $writeOk = false;
     if ($targetFormat === 'jpeg') {
@@ -2903,6 +2934,31 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
     ]);
 }
 
+function sv_log_forge_paths(array $paths): void
+{
+    $runtimeLog = sv_base_dir() . '/LOGS/forge_worker_runtime.log';
+    $shortened  = [];
+
+    foreach ($paths as $key => $value) {
+        $shortened[$key] = mb_substr((string)$value, 0, 200);
+    }
+
+    @file_put_contents(
+        $runtimeLog,
+        sprintf('[%s] forge_paths %s', date('c'), json_encode($shortened, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
+        FILE_APPEND
+    );
+}
+
+function sv_fail_job_on_empty_path(PDO $pdo, int $jobId, string $name, $value): void
+{
+    if (!is_string($value) || trim($value) === '') {
+        $message = 'empty path: ' . $name;
+        sv_update_job_status($pdo, $jobId, 'error', null, $message);
+        throw new RuntimeException($message);
+    }
+}
+
 function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, callable $logger, array $overrides = []): array
 {
     $logger('Forge-Regeneration wird in V3 asynchron über die Job-Queue abgewickelt.');
@@ -2999,11 +3055,6 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     }
 
     $regenPlan = sv_extract_regen_plan_from_payload($payload);
-    $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
-    $origExt = strtolower(pathinfo($mediaRow['path'] ?? '', PATHINFO_EXTENSION));
-    $origImageInfo = @getimagesize((string)$mediaRow['path']);
-    $origWidth = $origImageInfo !== false ? (int)$origImageInfo[0] : (int)($mediaRow['width'] ?? 0);
-    $origHeight = $origImageInfo !== false ? (int)$origImageInfo[1] : (int)($mediaRow['height'] ?? 0);
     if (trim((string)$regenPlan['final_prompt']) === '') {
         sv_update_job_status($pdo, $jobId, 'error', null, 'Forge-Job ohne finalen Prompt.');
         throw new RuntimeException('Forge-Job #' . $jobId . ' hat keinen finalen Prompt.');
@@ -3012,6 +3063,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     $payload['prompt'] = $regenPlan['final_prompt'];
 
     $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
+    $pathsCfg = $config['paths'] ?? [];
     $type     = (string)($mediaRow['type'] ?? '');
     $status   = (string)($mediaRow['status'] ?? '');
     if ($type !== 'image') {
@@ -3024,13 +3076,44 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     }
 
     $path = (string)($mediaRow['path'] ?? '');
-    if ($path === '' || !is_file($path)) {
+    sv_fail_job_on_empty_path($pdo, $jobId, 'original_media_path', $path);
+    if (!is_file($path)) {
         sv_update_job_status($pdo, $jobId, 'error', null, 'Dateipfad nicht vorhanden.');
         throw new RuntimeException('Dateipfad nicht vorhanden.');
     }
 
-    $pathsCfg = $config['paths'] ?? [];
     sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
+
+    $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
+    $origExt = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    $origImageInfo = @getimagesize($path);
+    $origWidth = $origImageInfo !== false ? (int)$origImageInfo[0] : (int)($mediaRow['width'] ?? 0);
+    $origHeight = $origImageInfo !== false ? (int)$origImageInfo[1] : (int)($mediaRow['height'] ?? 0);
+
+    $backupDir        = sv_resolve_backup_dir($config);
+    $tmpDirRaw        = $pathsCfg['tmp'] ?? null;
+    $tmpDir           = (is_string($tmpDirRaw) && trim($tmpDirRaw) !== '')
+        ? rtrim(str_replace('\\', '/', (string)$tmpDirRaw), '/')
+        : (sv_base_dir() . '/TMP');
+    if (!is_dir($tmpDir)) {
+        mkdir($tmpDir, 0777, true);
+    }
+
+    $plannedBackupPath     = sv_build_backup_path($backupDir, $path);
+    $plannedTempOutputPath = sv_build_temp_output_path($tmpDir, $path);
+    $finalTargetPath       = $path;
+
+    sv_fail_job_on_empty_path($pdo, $jobId, 'backup_path', $plannedBackupPath);
+    sv_fail_job_on_empty_path($pdo, $jobId, 'temp_output_path', $plannedTempOutputPath);
+    sv_fail_job_on_empty_path($pdo, $jobId, 'final_target_path', $finalTargetPath);
+
+    sv_log_forge_paths([
+        'job_id'             => $jobId,
+        'original_media_path'=> $path,
+        'backup_path'        => $plannedBackupPath,
+        'temp_output_path'   => $plannedTempOutputPath,
+        'final_target_path'  => $finalTargetPath,
+    ]);
 
     sv_update_job_status($pdo, $jobId, 'running');
 
@@ -3040,11 +3123,11 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
     try {
         $forgeResponse = sv_call_forge_sync($config, $payload, $logger);
-        $backupPath    = sv_backup_media_file($config, $path, $logger);
+        $backupPath    = sv_backup_media_file($config, $path, $logger, $backupDir, $plannedBackupPath);
         $newFileInfo   = sv_replace_media_file_with_image($config, $path, $forgeResponse['binary'], $logger, [
             'width'  => $origWidth,
             'height' => $origHeight,
-        ]);
+        ], $plannedTempOutputPath);
 
         $update = $pdo->prepare(
             'UPDATE media SET hash = ?, width = ?, height = ?, filesize = ?, status = "active" WHERE id = ?'
