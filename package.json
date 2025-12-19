@@ -1,0 +1,24 @@
+{
+  "name": "localsupervisor",
+  "version": "1.0.0",
+  "description": "VA setup utilities and VIDAX server",
+  "main": "src/vidax/server.js",
+  "type": "commonjs",
+  "bin": {
+    "va": "bin/va.js"
+  },
+  "scripts": {
+    "start:vidax": "node src/vidax/server.js",
+    "va:doctor": "node bin/va.js doctor",
+    "va:install": "node bin/va.js install"
+  },
+  "dependencies": {
+    "commander": "^11.1.0",
+    "express": "^4.19.2",
+    "extract-zip": "^2.0.1",
+    "fs-extra": "^11.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

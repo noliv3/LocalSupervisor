@@ -1,0 +1,8 @@
+{
+  "policy": {
+    "on_missing": "download",
+    "on_hash_mismatch": "fail"
+  },
+  "workflows": [],
+  "models": []
+}

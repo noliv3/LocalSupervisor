@@ -46,6 +46,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
 
+### Quickstart (VA/VIDAX)
+- `npm install`
+- `npx va doctor` (prüft node/ffmpeg/ffprobe, python optional)
+- `npx va install` (legt `<VA_STATE_DIR>/state/...` an, kopiert Beispiel-Configs, lädt Assets lt. Manifest)
+- `VIDAX_CONFIG=<pfad>/vidax.json node src/vidax/server.js` (API-Key Pflicht; Install-Endpoints erreichbar)
+
 ## Asynchrone Scans
 
 - Web-Trigger für Scans legen ausschließlich Jobs vom Typ `scan_path` in der Queue an und starten automatisch einen dedizierten Worker im Hintergrund.

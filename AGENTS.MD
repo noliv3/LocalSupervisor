@@ -29,6 +29,7 @@
 - Prompt-Qualität wird zentral in `SCRIPTS/operations.php` bewertet; Web-Views und Forge-Fallbacks nutzen ausschließlich diese
   Funktionen (keine eigenen Heuristiken in den PHP-Views).
 - Internal-Key kann einmalig per `?internal_key=` gesetzt werden; bei gültigem Key (IP-Whitelist vorausgesetzt) wird er für die Session/als HttpOnly-Cookie gemerkt, ohne den Wert in Klartext zu loggen.
+- Neuer VA/VIDAX-Setup-Flow: `va doctor` (Runtime-Checks), `va install` (StateDir + Assets), VIDAX-Install-Endpunkte (`/install`, `/install/status`, `/jobs/:id/start` blockiert ohne Assets). Änderungen daran immer in README + docs/SETUP.md + docs/ASSETS.md festhalten.
 - Forge-Regen-Buttons werden bei allen Bildmedien angezeigt; Ausführung erfordert weiterhin Internal-Key/IP-Whitelist, Hinweise zum Zustand genügen.
 
 ## Hashbasierte Library / Dupes
