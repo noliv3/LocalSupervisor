@@ -34,3 +34,7 @@ CONFIG/config.php
 Thumbs.db
 .vscode/
 .idea/
+
+# Node
+node_modules/
+npm-debug.log

@@ -1,0 +1,8 @@
+{
+  "apiKey": "CHANGE_ME",
+  "port": 4111,
+  "comfyui": {
+    "workingDir": "~/comfyui",
+    "command": "python main.py"
+  }
+}
