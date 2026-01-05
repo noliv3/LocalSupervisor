@@ -3,6 +3,11 @@
 ## Projektüberblick
 SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bild- und Video-Sammlungen. Es kombiniert Scanner-gestützten Import, Prompt-Pipeline, Tagging und eine Weboberfläche zur Anzeige und Steuerung wiederkehrender Abläufe. Ziel ist eine konsistente Datenbasis aus Dateien, Prompts und Metadaten ohne Abhängigkeit von Cloud-Diensten.
 
+## Dokumentationsstruktur
+- **README.md** (dieses Dokument): Projektbeschreibung, Architektur, Setup und Betriebsabläufe.
+- **AGENTS.md**: Verbindliche Anforderungen, Prozesse, Sicherheits- und Architekturregeln.
+- **Log.md**: Änderungs- und Revisionsprotokoll.
+
 ## Systemarchitektur
 - **Kernel-Logik (SCRIPTS/)**: Zentrale Funktionen in `scan_core` (Dateierkennung, Hashing, Pfadvalidierung, Logging, DB-Writes), `prompt_parser` (EXIF/PNG/JSON-Kandidaten sammeln, priorisieren, normalisieren), `operations` (einheitliche Einstiegspunkte für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz), `logging` (kanalisiertes Logging mit Rotation), `security` (Internal-Key + IP-Whitelist), `paths` (Pfadkonfiguration und Validierung).
 - **Webschicht (WWW/)**: Dashboard `index.php` (Formulare für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz), Listenansicht `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
@@ -46,6 +51,13 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
     - Scanner-Auth unterstützt entweder `scanner.token` (Header `Authorization: <token>`) oder das Legacy-Paar `scanner.api_key` + `scanner.api_key_header`. Die Datei wird als `image` und `file` gesendet, `autorefresh=1` bleibt erhalten.
 - **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
+
+### Setup & Assets (VA/VIDAX)
+- **State-Verzeichnis**: Standard `~/.va`, anpassbar über `VA_STATE_DIR`; `va install` legt u. a. `state/comfyui/workflows`, `state/comfyui/models` und `state/config` an.
+- **Asset-Manifest-Suche**: Reihenfolge `VIDAX_ASSETS_CONFIG` → `<VA_STATE_DIR>/state/config/assets.json` → `config/assets.json`; dieselbe Reihenfolge gilt für `vidax.json` (umgebungsvariable `VIDAX_CONFIG` zuerst).
+- **Asset-Schema**: Einträge mit `id`, `url`, `sha256`, `dest` (relativ zu `<VA_STATE_DIR>/state/`), optional `unpack`/`strip_root`; `policy.on_missing` und `policy.on_hash_mismatch` steuern Download/Abbruch.
+- **CLI-Fluss**: `npx va doctor` prüft node/ffmpeg/ffprobe/python (optional); `npx va install` erzeugt das State-Layout, kopiert Beispielconfigs und lädt/verifiziert Assets gemäß Manifest.
+- **VIDAX-Serverstart**: `VIDAX_CONFIG=<pfad> node src/vidax/server.js`; ComfyUI-Pfade werden aus dem State-Verzeichnis abgeleitet. Install-Endpunkte (`/install`, `/install/status`) verlangen ein gültiges Manifest; `/jobs/:id/start` blockt bei fehlenden Assets.
 
 ### Quickstart (VA/VIDAX)
 - `npm install`
