@@ -9,6 +9,64 @@ declare(strict_types=1);
 require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/prompt_parser.php';
 
+function sv_next_prompt_version(PDO $pdo, int $mediaId): int
+{
+    $stmt = $pdo->prepare('SELECT COALESCE(MAX(version), 0) AS max_version FROM prompt_history WHERE media_id = ?');
+    try {
+        $stmt->execute([$mediaId]);
+        $max = (int)($stmt->fetchColumn() ?: 0);
+        return $max + 1;
+    } catch (Throwable $e) {
+        // Fallback wenn Tabelle nicht existiert (Migration fehlt)
+        return 1;
+    }
+}
+
+function sv_record_prompt_history(
+    PDO $pdo,
+    int $mediaId,
+    ?int $promptId,
+    array $normalized,
+    ?string $rawText,
+    string $sourceLabel
+): void {
+    if ($sourceLabel === '') {
+        $sourceLabel = 'unknown';
+    }
+
+    try {
+        $version = sv_next_prompt_version($pdo, $mediaId);
+        $stmt = $pdo->prepare(
+            "INSERT INTO prompt_history (media_id, prompt_id, version, source, created_at, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata, raw_text)"
+            . " VALUES (:media_id, :prompt_id, :version, :source, :created_at, :prompt, :negative_prompt, :model, :sampler, :cfg_scale, :steps, :seed, :width, :height, :scheduler, :sampler_settings, :loras, :controlnet, :source_metadata, :raw_text)"
+        );
+        $stmt->execute([
+            ':media_id'        => $mediaId,
+            ':prompt_id'       => $promptId,
+            ':version'         => $version,
+            ':source'          => $sourceLabel,
+            ':created_at'      => date('c'),
+            ':prompt'          => $normalized['prompt'] ?? null,
+            ':negative_prompt' => $normalized['negative_prompt'] ?? null,
+            ':model'           => $normalized['model'] ?? null,
+            ':sampler'         => $normalized['sampler'] ?? null,
+            ':cfg_scale'       => $normalized['cfg_scale'] ?? null,
+            ':steps'           => $normalized['steps'] ?? null,
+            ':seed'            => $normalized['seed'] ?? null,
+            ':width'           => $normalized['width'] ?? null,
+            ':height'          => $normalized['height'] ?? null,
+            ':scheduler'       => $normalized['scheduler'] ?? null,
+            ':sampler_settings'=> $normalized['sampler_settings'] ?? null,
+            ':loras'           => $normalized['loras'] ?? null,
+            ':controlnet'      => $normalized['controlnet'] ?? null,
+            ':source_metadata' => $normalized['source_metadata'] ?? null,
+            ':raw_text'        => $rawText,
+        ]);
+    } catch (Throwable $e) {
+        // Historisierung nicht blockieren, wenn Tabelle fehlt.
+    }
+}
+
 /**
  * Wert über mehrere Pfadvarianten (dotted oder verschachtelt) finden.
  */
@@ -760,6 +818,8 @@ function sv_store_extracted_metadata(
             $normalized['controlnet'],
             $normalized['source_metadata'],
         ]);
+        $newPromptId = (int)$pdo->lastInsertId();
+        sv_record_prompt_history($pdo, $mediaId, $newPromptId, $normalized, $rawBlock, $sourceLabel);
     } elseif ($existingPromptId !== false && $hasNormalized) {
         $updatePrompt = $pdo->prepare(
             "UPDATE prompts SET"
@@ -796,6 +856,7 @@ function sv_store_extracted_metadata(
             $normalized['source_metadata'],
             $existingPromptId,
         ]);
+        sv_record_prompt_history($pdo, $mediaId, (int)$existingPromptId, $normalized, $rawBlock, $sourceLabel);
     }
 
     if ($rawBlock !== null) {

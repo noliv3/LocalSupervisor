@@ -25,6 +25,14 @@ const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
+const SV_LIFECYCLE_ACTIVE         = 'active';
+const SV_LIFECYCLE_REVIEW         = 'review';
+const SV_LIFECYCLE_PENDING_DELETE = 'pending_delete';
+const SV_LIFECYCLE_DELETED        = 'deleted_logical';
+const SV_QUALITY_UNKNOWN          = 'unknown';
+const SV_QUALITY_OK               = 'ok';
+const SV_QUALITY_REVIEW           = 'review';
+const SV_QUALITY_BLOCKED          = 'blocked';
 
 class SvForgeHttpException extends RuntimeException
 {
@@ -403,6 +411,172 @@ function sv_validate_forge_prompt_payload(array $mediaRow): array
         'payload'   => $payload,
         'prompt_id' => (int)$promptId,
     ];
+}
+
+function sv_record_lifecycle_event(PDO $pdo, int $mediaId, string $eventType, array $payload = []): void
+{
+    try {
+        $stmt = $pdo->prepare(
+            'INSERT INTO media_lifecycle_events (media_id, event_type, from_status, to_status, quality_status, quality_score, rule, reason, actor, created_at)'
+            . ' VALUES (:media_id, :event_type, :from_status, :to_status, :quality_status, :quality_score, :rule, :reason, :actor, :created_at)'
+        );
+        $stmt->execute([
+            ':media_id'       => $mediaId,
+            ':event_type'     => $eventType,
+            ':from_status'    => $payload['from_status'] ?? null,
+            ':to_status'      => $payload['to_status'] ?? null,
+            ':quality_status' => $payload['quality_status'] ?? null,
+            ':quality_score'  => $payload['quality_score'] ?? null,
+            ':rule'           => $payload['rule'] ?? null,
+            ':reason'         => $payload['reason'] ?? null,
+            ':actor'          => $payload['actor'] ?? 'internal',
+            ':created_at'     => date('c'),
+        ]);
+    } catch (Throwable $e) {
+        // Protokollierung darf Ablauf nicht blockieren (Migration optional).
+    }
+}
+
+function sv_set_media_lifecycle_status(
+    PDO $pdo,
+    int $mediaId,
+    string $newStatus,
+    ?string $reason,
+    string $actor,
+    ?callable $logger = null
+): array {
+    $newStatus = trim($newStatus) === '' ? SV_LIFECYCLE_REVIEW : $newStatus;
+    $stmt = $pdo->prepare('SELECT lifecycle_status, status FROM media WHERE id = ?');
+    $stmt->execute([$mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+    $prevLifecycle = (string)($row['lifecycle_status'] ?? SV_LIFECYCLE_ACTIVE);
+
+    $now = date('c');
+    try {
+        $update = $pdo->prepare('UPDATE media SET lifecycle_status = ?, lifecycle_reason = ?, deleted_at = CASE WHEN ? = ? THEN COALESCE(deleted_at, ?) ELSE deleted_at END WHERE id = ?');
+        $update->execute([
+            $newStatus,
+            $reason,
+            $newStatus,
+            SV_LIFECYCLE_DELETED,
+            $now,
+            $mediaId,
+        ]);
+    } catch (Throwable $e) {
+        // Spalten ggf. nicht vorhanden, Migration noch nicht gelaufen.
+        if ($logger) {
+            $logger('Lifecycle-Status konnte nicht geschrieben werden (Migration erforderlich): ' . $e->getMessage());
+        }
+        return [
+            'previous' => $prevLifecycle,
+            'current'  => $prevLifecycle,
+        ];
+    }
+
+    sv_record_lifecycle_event($pdo, $mediaId, 'status_change', [
+        'from_status' => $prevLifecycle,
+        'to_status'   => $newStatus,
+        'reason'      => $reason,
+        'actor'       => $actor,
+    ]);
+
+    if ($logger) {
+        $logger('Lifecycle-Status aktualisiert: ' . $prevLifecycle . ' -> ' . $newStatus);
+    }
+
+    return [
+        'previous' => $prevLifecycle,
+        'current'  => $newStatus,
+    ];
+}
+
+function sv_set_media_quality_status(
+    PDO $pdo,
+    int $mediaId,
+    string $qualityStatus,
+    ?float $qualityScore,
+    ?string $notes,
+    ?string $rule,
+    string $actor,
+    ?callable $logger = null
+): array {
+    $qualityStatus = trim($qualityStatus) === '' ? SV_QUALITY_REVIEW : $qualityStatus;
+    $stmt = $pdo->prepare('SELECT quality_status FROM media WHERE id = ?');
+    $stmt->execute([$mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+    $prevStatus = (string)($row['quality_status'] ?? SV_QUALITY_UNKNOWN);
+
+    try {
+        $update = $pdo->prepare('UPDATE media SET quality_status = ?, quality_score = ?, quality_notes = ? WHERE id = ?');
+        $update->execute([
+            $qualityStatus,
+            $qualityScore,
+            $notes,
+            $mediaId,
+        ]);
+    } catch (Throwable $e) {
+        if ($logger) {
+            $logger('Quality-Status konnte nicht geschrieben werden (Migration erforderlich): ' . $e->getMessage());
+        }
+        return [
+            'previous' => $prevStatus,
+            'current'  => $prevStatus,
+        ];
+    }
+
+    sv_record_lifecycle_event($pdo, $mediaId, 'quality_eval', [
+        'quality_status' => $qualityStatus,
+        'quality_score'  => $qualityScore,
+        'reason'         => $notes,
+        'rule'           => $rule,
+        'actor'          => $actor,
+    ]);
+
+    if ($logger) {
+        $logger('Quality-Status aktualisiert: ' . $prevStatus . ' -> ' . $qualityStatus);
+    }
+
+    return [
+        'previous' => $prevStatus,
+        'current'  => $qualityStatus,
+    ];
+}
+
+function sv_fetch_prompt_snapshot(PDO $pdo, int $mediaId): ?array
+{
+    try {
+        $stmt = $pdo->prepare("SELECT meta_value, source FROM media_meta WHERE media_id = :media_id AND meta_key = 'prompt_raw' ORDER BY id DESC LIMIT 1");
+        $stmt->execute([':media_id' => $mediaId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return null;
+        }
+        $raw = (string)($row['meta_value'] ?? '');
+        if (trim($raw) === '') {
+            return null;
+        }
+        return [
+            'meta_pairs'        => [],
+            'prompt_candidates' => [
+                [
+                    'source'    => (string)($row['source'] ?? 'snapshot'),
+                    'key'       => 'prompt_raw',
+                    'short_key' => 'snapshot',
+                    'text'      => $raw,
+                    'type'      => 'snapshot',
+                ],
+            ],
+            'raw_block' => $raw,
+        ];
+    } catch (Throwable $e) {
+        return null;
+    }
 }
 
 function sv_create_forge_job(PDO $pdo, int $mediaId, array $payload, ?int $promptId, callable $logger): int
@@ -3223,6 +3397,31 @@ function sv_refresh_media_after_regen(
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
     ]);
 
+    $promptId = (int)$pdo->lastInsertId();
+    sv_record_prompt_history(
+        $pdo,
+        $mediaId,
+        $promptId,
+        [
+            'prompt'           => $regenPlan['final_prompt'],
+            'negative_prompt'  => (string)($payload['negative_prompt'] ?? ''),
+            'model'            => (string)($payload['model'] ?? ''),
+            'sampler'          => (string)($payload['sampler'] ?? ''),
+            'cfg_scale'        => isset($payload['cfg_scale']) ? (float)$payload['cfg_scale'] : null,
+            'steps'            => isset($payload['steps']) ? (int)$payload['steps'] : null,
+            'seed'             => isset($payload['seed']) ? (string)$payload['seed'] : null,
+            'width'            => isset($payload['width']) ? (int)$payload['width'] : null,
+            'height'           => isset($payload['height']) ? (int)$payload['height'] : null,
+            'scheduler'        => isset($payload['scheduler']) ? (string)$payload['scheduler'] : null,
+            'sampler_settings' => isset($payload['sampler_settings']) ? (is_string($payload['sampler_settings']) ? $payload['sampler_settings'] : json_encode($payload['sampler_settings'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) : null,
+            'loras'            => isset($payload['loras']) ? (is_string($payload['loras']) ? $payload['loras'] : json_encode($payload['loras'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) : null,
+            'controlnet'       => isset($payload['controlnet']) ? (is_string($payload['controlnet']) ? $payload['controlnet'] : json_encode($payload['controlnet'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) : null,
+            'source_metadata'  => null,
+        ],
+        $regenPlan['original_prompt'] ?? null,
+        SV_FORGE_SCAN_SOURCE_LABEL
+    );
+
     $result['prompt_created'] = true;
 
     return $result;
@@ -4384,14 +4583,18 @@ function sv_run_prompts_rebuild_operation(
 
         $logger("Media ID {$mediaId}: {$path}");
 
-        if (!is_file($path)) {
-            $logger('  -> Datei nicht gefunden, übersprungen.');
-            $skipped++;
-            continue;
-        }
-
         try {
-            $metadata = sv_extract_metadata($path, $type, 'prompts_rebuild', $logger);
+            if (is_file($path)) {
+                $metadata = sv_extract_metadata($path, $type, 'prompts_rebuild', $logger);
+            } else {
+                $metadata = sv_fetch_prompt_snapshot($pdo, $mediaId);
+                if ($metadata === null) {
+                    $logger('  -> Datei nicht gefunden und kein Snapshot vorhanden, übersprungen.');
+                    $skipped++;
+                    continue;
+                }
+                $logger('  -> Nutze gespeicherten Prompt-Snapshot.');
+            }
             sv_store_extracted_metadata($pdo, $mediaId, $type, $metadata, 'prompts_rebuild', $logger);
             $processed++;
         } catch (Throwable $e) {
@@ -4467,17 +4670,21 @@ function sv_run_prompt_rebuild_single(PDO $pdo, array $config, int $mediaId, cal
         ];
     }
 
-    if (!is_file($path)) {
-        $logger('  -> Datei nicht gefunden, Status prüfen (Filesync?).');
-        return [
-            'processed' => 0,
-            'skipped'   => 1,
-            'errors'    => 0,
-        ];
-    }
-
     try {
-        $metadata = sv_extract_metadata($path, $type, 'prompts_rebuild_single', $logger);
+        if (is_file($path)) {
+            $metadata = sv_extract_metadata($path, $type, 'prompts_rebuild_single', $logger);
+        } else {
+            $metadata = sv_fetch_prompt_snapshot($pdo, $mediaId);
+            if ($metadata === null) {
+                $logger('  -> Datei nicht gefunden und kein Snapshot vorhanden, Status prüfen (Filesync?).');
+                return [
+                    'processed' => 0,
+                    'skipped'   => 1,
+                    'errors'    => 0,
+                ];
+            }
+            $logger('  -> Nutze gespeicherten Prompt-Snapshot.');
+        }
         sv_store_extracted_metadata($pdo, $mediaId, $type, $metadata, 'prompts_rebuild_single', $logger);
         $logger('  -> Rebuild abgeschlossen.');
         sv_audit_log($pdo, 'prompt_rebuild_single', 'media', $mediaId, [
@@ -4557,6 +4764,8 @@ function sv_mark_media_missing(PDO $pdo, int $mediaId, callable $logger): array
 
     $update = $pdo->prepare("UPDATE media SET status = 'missing' WHERE id = ?");
     $update->execute([$mediaId]);
+
+    sv_set_media_lifecycle_status($pdo, $mediaId, SV_LIFECYCLE_PENDING_DELETE, 'missing flag set', 'internal', $logger);
 
     sv_audit_log($pdo, 'media_mark_missing', 'media', $mediaId, [
         'previous_status' => $currentStatus,
