@@ -125,7 +125,7 @@ $promptQualityFilter = $_GET['prompt_quality'] ?? 'all';
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
 $allowedMeta      = ['all', 'with', 'without'];
-$allowedStatus    = ['all', 'active', 'archived', 'deleted'];
+$allowedStatus    = ['all', 'active', 'archived', 'deleted', 'missing', 'deleted_logical'];
 $allowedIncomplete= ['none', 'prompt', 'tags', 'meta', 'any'];
 $allowedQuality   = ['all', 'A', 'B', 'C', 'critical'];
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
@@ -236,7 +236,7 @@ if ($issueFilter) {
         $rows = [];
     } else {
         $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
-        $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
+        $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
@@ -261,7 +261,7 @@ ORDER BY m.id DESC';
         }
     }
 } elseif ($promptQualityFilter !== 'all') {
-$qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
+$qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            m.width, m.height, m.duration, m.fps, m.filesize,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
@@ -303,7 +303,7 @@ ORDER BY m.id DESC';
     $countStmt->execute($params);
     $total = (int)$countStmt->fetchColumn();
 
-    $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
+    $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            m.width, m.height, m.duration, m.fps, m.filesize,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
@@ -581,6 +581,8 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
             $rating  = (int)($row['rating'] ?? 0);
             $status  = (string)($row['status'] ?? '');
+            $lifecycleStatus = (string)($row['lifecycle_status'] ?? '');
+            $qualityStatus = (string)($row['quality_status'] ?? '');
             $hash    = (string)($row['hash'] ?? '');
             $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
             $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
@@ -607,6 +609,11 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             }
             if ($status !== '' && $status !== 'active') {
                 $statusVariant = 'bad';
+            }
+            if ($qualityStatus === SV_QUALITY_BLOCKED) {
+                $statusVariant = 'bad';
+            } elseif ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE) {
+                $statusVariant = 'warn';
             }
 
             $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
@@ -640,6 +647,12 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                     <?php endif; ?>
                     <?php if ($status !== '' && $status !== 'active'): ?>
                         <span class="pill pill-bad">Status <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <?php endif; ?>
+                    <?php if ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE): ?>
+                        <span class="pill pill-warn" title="Lifecycle"><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <?php endif; ?>
+                    <?php if ($qualityStatus !== '' && $qualityStatus !== SV_QUALITY_UNKNOWN): ?>
+                        <span class="pill pill-muted" title="Quality"><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <?php if ($rating > 0): ?>
                         <span class="pill">Rating <?= $rating ?></span>

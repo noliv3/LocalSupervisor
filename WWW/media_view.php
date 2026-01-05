@@ -231,6 +231,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $actionSuccess = false;
                 $actionMessage = 'Forge-Regeneration nicht möglich: ' . $e->getMessage();
             }
+        } elseif ($action === 'quality_flag') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'quality_flag', $actionLogs, 5);
+            $allowedQuality = [SV_QUALITY_OK, SV_QUALITY_REVIEW, SV_QUALITY_BLOCKED, SV_QUALITY_UNKNOWN];
+            $requested = sv_limit_string((string)($_POST['quality_status'] ?? ''), 32);
+            if (!in_array($requested, $allowedQuality, true)) {
+                $requested = SV_QUALITY_REVIEW;
+            }
+            $score = isset($_POST['quality_score']) && is_numeric($_POST['quality_score']) ? (float)$_POST['quality_score'] : null;
+            $notes = sv_limit_string((string)($_POST['quality_notes'] ?? ''), 500);
+            $rule  = sv_limit_string((string)($_POST['quality_rule'] ?? ''), 120);
+            $result = sv_set_media_quality_status($pdo, $id, $requested, $score, $notes, $rule, 'internal', $logger);
+            $actionSuccess = true;
+            $actionMessage = 'Quality-Status gesetzt: ' . $result['previous'] . ' → ' . $result['current'];
+        } elseif ($action === 'request_delete') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'request_delete', $actionLogs, 5);
+            $reason = sv_limit_string((string)($_POST['delete_reason'] ?? ''), 240);
+            $result = sv_set_media_lifecycle_status($pdo, $id, SV_LIFECYCLE_PENDING_DELETE, $reason, 'internal', $logger);
+            $actionSuccess = true;
+            $actionMessage = 'Lifecycle-Status aktualisiert: ' . $result['previous'] . ' → ' . $result['current'];
         } elseif ($action === 'logical_delete') {
             $logger       = sv_operation_logger(null, $actionLogs);
             $result       = sv_mark_media_missing($pdo, $id, $logger);
@@ -266,6 +285,16 @@ if (!$showAdult && (int)($media['has_nsfw'] ?? 0) === 1) {
 $promptStmt = $pdo->prepare('SELECT * FROM prompts WHERE media_id = :id ORDER BY id DESC LIMIT 1');
 $promptStmt->execute([':id' => $id]);
 $prompt = $promptStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+
+$promptHistory   = [];
+$promptHistoryErr = null;
+try {
+    $histStmt = $pdo->prepare('SELECT * FROM prompt_history WHERE media_id = :id ORDER BY version DESC, id DESC');
+    $histStmt->execute([':id' => $id]);
+    $promptHistory = $histStmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $promptHistoryErr = $e->getMessage();
+}
 
 $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta WHERE media_id = :id ORDER BY source, meta_key');
 $metaStmt->execute([':id' => $id]);
@@ -352,6 +381,29 @@ function sv_date_field($value): string
     return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
+function sv_simple_line_diff(string $old, string $new): array
+{
+    $oldLines = explode("\n", str_replace(["\r\n", "\r"], "\n", $old));
+    $newLines = explode("\n", str_replace(["\r\n", "\r"], "\n", $new));
+    $max = max(count($oldLines), count($newLines));
+    $diff = [];
+    for ($i = 0; $i < $max; $i++) {
+        $o = $oldLines[$i] ?? '';
+        $n = $newLines[$i] ?? '';
+        if ($o === $n) {
+            $diff[] = ['type' => 'same', 'value' => $o];
+        } else {
+            if ($o !== '') {
+                $diff[] = ['type' => 'remove', 'value' => $o];
+            }
+            if ($n !== '') {
+                $diff[] = ['type' => 'add', 'value' => $n];
+            }
+        }
+    }
+    return $diff;
+}
+
 $promptExists   = $prompt !== null;
 $promptText     = trim((string)($prompt['prompt'] ?? ''));
 $needsRebuild   = !$consistencyStatus['prompt_complete'];
@@ -384,6 +436,44 @@ if ($promptExists) {
 }
 $promptQuality = sv_analyze_prompt_quality($prompt, $tags);
 $promptQualityIssues = array_slice($promptQuality['issues'] ?? [], 0, 3);
+
+$lifecycleStatus = (string)($media['lifecycle_status'] ?? SV_LIFECYCLE_ACTIVE);
+$lifecycleReason = (string)($media['lifecycle_reason'] ?? '');
+$qualityStatus   = (string)($media['quality_status'] ?? SV_QUALITY_UNKNOWN);
+$qualityScore    = $media['quality_score'] ?? null;
+$qualityNotes    = (string)($media['quality_notes'] ?? '');
+
+$compareFromId = (int)($_GET['compare_from'] ?? 0);
+$compareToId   = (int)($_GET['compare_to'] ?? 0);
+$compareResult = null;
+if ($compareFromId > 0 && $compareToId > 0 && $promptHistory !== []) {
+    $from = null;
+    $to   = null;
+    foreach ($promptHistory as $entry) {
+        $entryId = (int)($entry['id'] ?? 0);
+        if ($entryId === $compareFromId) {
+            $from = $entry;
+        }
+        if ($entryId === $compareToId) {
+            $to = $entry;
+        }
+    }
+    if ($from && $to) {
+        $fromText = (string)($from['prompt'] ?? '');
+        if (trim($from['raw_text'] ?? '') !== '') {
+            $fromText = (string)$from['raw_text'];
+        }
+        $toText = (string)($to['prompt'] ?? '');
+        if (trim($to['raw_text'] ?? '') !== '') {
+            $toText = (string)$to['raw_text'];
+        }
+        $compareResult = [
+            'from' => $from,
+            'to'   => $to,
+            'diff' => sv_simple_line_diff($fromText, $toText),
+        ];
+    }
+}
 
 $type = (string)$media['type'];
 $isMissing = (int)($media['is_missing'] ?? 0) === 1 || (string)($media['status'] ?? '') === 'missing';
@@ -604,6 +694,8 @@ if (is_array($latestJobRequest)) {
                     <?php if (!empty($media['fps'])): ?><span class="pill">FPS: <?= htmlspecialchars((string)$media['fps'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                     <?php if (!empty($media['filesize'])): ?><span class="pill">Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
                     <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="pill">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 </div>
             </div>
         </div>
@@ -698,6 +790,35 @@ if (is_array($latestJobRequest)) {
                     <button class="btn danger" type="submit" form="missing-form">Missing markieren</button>
                     <div class="btn-reason">Status wird nur auf missing gesetzt.</div>
                 </div>
+                <div class="panel-subsection">
+                    <div class="subheader">Quality-Status</div>
+                    <form method="post" class="stacked">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="quality_flag">
+                        <label>Status
+                            <select name="quality_status">
+                                <option value="<?= SV_QUALITY_OK ?>" <?= $qualityStatus === SV_QUALITY_OK ? 'selected' : '' ?>>OK</option>
+                                <option value="<?= SV_QUALITY_REVIEW ?>" <?= $qualityStatus === SV_QUALITY_REVIEW ? 'selected' : '' ?>>Review</option>
+                                <option value="<?= SV_QUALITY_BLOCKED ?>" <?= $qualityStatus === SV_QUALITY_BLOCKED ? 'selected' : '' ?>>Blocked</option>
+                                <option value="<?= SV_QUALITY_UNKNOWN ?>" <?= $qualityStatus === SV_QUALITY_UNKNOWN ? 'selected' : '' ?>>Unknown</option>
+                            </select>
+                        </label>
+                        <label>Score (optional)<input type="number" step="0.01" name="quality_score" value="<?= htmlspecialchars((string)($qualityScore ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
+                        <label>Regel/Quelle<input type="text" name="quality_rule" maxlength="120" placeholder="Policy/Regel"></label>
+                        <label>Notiz<textarea name="quality_notes" maxlength="500" placeholder="Begründung/Review-Hinweis"><?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
+                        <button class="btn secondary" type="submit">Quality speichern</button>
+                    </form>
+                </div>
+
+                <div class="panel-subsection">
+                    <div class="subheader">Delete/Review</div>
+                    <form method="post" class="stacked">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="request_delete">
+                        <label>Grund<textarea name="delete_reason" maxlength="240" placeholder="Warum pending_delete?"><?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
+                        <button class="btn danger" type="submit">Lifecycle auf pending_delete setzen</button>
+                    </form>
+                </div>
                 <?php if ($forgeInfoNotes !== []): ?>
                     <div class="action-note">Hinweise: <?= htmlspecialchars(implode(' ', $forgeInfoNotes), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 <?php endif; ?>
@@ -714,6 +835,14 @@ if (is_array($latestJobRequest)) {
                 <div class="quality-row">
                     <span class="quality-pill">Prompt-Qualität: <strong><?= htmlspecialchars((string)$promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></span>
                     <span class="quality-score">Score <?= (int)$promptQuality['score'] ?></span>
+                </div>
+                <div class="lifecycle-row">
+                    <div>Lifecycle: <strong><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <?php if ($lifecycleReason !== ''): ?><div class="hint">Grund: <?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                </div>
+                <div class="lifecycle-row">
+                    <div>Quality: <strong><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if ($qualityScore !== null): ?> (Score <?= htmlspecialchars((string)$qualityScore, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?></div>
+                    <?php if ($qualityNotes !== ''): ?><div class="hint">Notiz: <?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                 </div>
                 <?php if ($mediaIssues !== []): ?>
                     <div class="issues-list">
@@ -765,6 +894,74 @@ if (is_array($latestJobRequest)) {
                             </a>
                         <?php endforeach; ?>
                     </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="panel history-panel">
+                <div class="panel-header">Prompt-Historie</div>
+                <?php if ($promptHistoryErr !== null): ?>
+                    <div class="action-note">Historie nicht verfügbar: <?= htmlspecialchars($promptHistoryErr, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php elseif ($promptHistory === []): ?>
+                    <div class="job-hint">Keine Historie gefunden.</div>
+                <?php else: ?>
+                    <div class="history-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Version</th>
+                                    <th>Quelle</th>
+                                    <th>Zeit</th>
+                                    <th>Modell</th>
+                                    <th>Sampler</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($promptHistory as $entry): ?>
+                                    <tr>
+                                        <td>#<?= (int)($entry['version'] ?? 0) ?></td>
+                                        <td><?= htmlspecialchars((string)($entry['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                        <td><?= htmlspecialchars((string)($entry['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                        <td><?= htmlspecialchars((string)($entry['model'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                        <td><?= htmlspecialchars((string)($entry['sampler'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                        <td class="history-actions">
+                                            <a class="btn tiny" href="#history-<?= (int)$entry['id'] ?>">anzeigen</a>
+                                            <a class="btn tiny secondary" href="<?= htmlspecialchars('media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => $id, 'compare_from' => (int)$entry['id'], 'compare_to' => $compareToId > 0 ? $compareToId : $entry['id']])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">als A vergleichen</a>
+                                            <a class="btn tiny secondary" href="<?= htmlspecialchars('media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => $id, 'compare_from' => $compareFromId > 0 ? $compareFromId : $entry['id'], 'compare_to' => (int)$entry['id']])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">als B vergleichen</a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <?php if ($compareResult): ?>
+                        <div class="panel-subsection">
+                            <div class="subheader">Vergleich</div>
+                            <div class="hint">Von #<?= (int)($compareResult['from']['version'] ?? 0) ?> nach #<?= (int)($compareResult['to']['version'] ?? 0) ?></div>
+                            <pre class="diff-view"><?php foreach ($compareResult['diff'] as $line):
+                                $prefix = $line['type'] === 'add' ? '+' : ($line['type'] === 'remove' ? '-' : ' ');
+                                ?>
+<?= htmlspecialchars($prefix . ' ' . $line['value'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n" ?>
+<?php endforeach; ?></pre>
+                        </div>
+                    <?php endif; ?>
+                    <?php foreach ($promptHistory as $entry): ?>
+                        <details class="history-entry" id="history-<?= (int)$entry['id'] ?>">
+                            <summary>Version #<?= (int)($entry['version'] ?? 0) ?> • <?= htmlspecialchars((string)($entry['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($entry['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></summary>
+                            <div class="history-meta">Modell: <?= htmlspecialchars((string)($entry['model'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Sampler: <?= htmlspecialchars((string)($entry['sampler'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Steps: <?= htmlspecialchars((string)($entry['steps'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <div class="history-meta">Seed: <?= htmlspecialchars((string)($entry['seed'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Size: <?= htmlspecialchars((string)($entry['width'] ?? '-') . '×' . (string)($entry['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php if (!empty($entry['negative_prompt'])): ?>
+                                <div class="history-negative"><strong>Negative</strong><br><?= nl2br(htmlspecialchars((string)$entry['negative_prompt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?></div>
+                            <?php endif; ?>
+                            <div class="history-positive"><strong>Prompt</strong><br><?= nl2br(htmlspecialchars((string)($entry['prompt'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?></div>
+                            <?php if (!empty($entry['raw_text'])): ?>
+                                <details><summary>Raw</summary><pre><?= htmlspecialchars((string)$entry['raw_text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre></details>
+                            <?php endif; ?>
+                            <?php if (!empty($entry['source_metadata'])): ?>
+                                <details><summary>Source Metadata</summary><pre><?= htmlspecialchars((string)$entry['source_metadata'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre></details>
+                            <?php endif; ?>
+                        </details>
+                    <?php endforeach; ?>
                 <?php endif; ?>
             </div>
         </div>

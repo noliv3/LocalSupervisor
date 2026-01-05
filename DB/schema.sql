@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS media (
     has_nsfw        INTEGER NOT NULL DEFAULT 0,
     parent_media_id INTEGER,
     status          TEXT NOT NULL DEFAULT 'active', -- active, archived, deleted_logical
+    lifecycle_status TEXT NOT NULL DEFAULT 'active', -- active, review, pending_delete, deleted_logical
+    lifecycle_reason TEXT,
+    quality_status   TEXT NOT NULL DEFAULT 'unknown', -- unknown, ok, review, blocked
+    quality_score    REAL,
+    quality_notes    TEXT,
+    deleted_at       TEXT,
 
     FOREIGN KEY (parent_media_id) REFERENCES media(id) ON DELETE SET NULL
 );
@@ -35,6 +41,12 @@ CREATE INDEX IF NOT EXISTS idx_media_rating
 
 CREATE INDEX IF NOT EXISTS idx_media_status
     ON media(status);
+
+CREATE INDEX IF NOT EXISTS idx_media_lifecycle_status
+    ON media(lifecycle_status);
+
+CREATE INDEX IF NOT EXISTS idx_media_quality_status
+    ON media(quality_status);
 
 CREATE INDEX IF NOT EXISTS idx_media_imported_at
     ON media(imported_at);
@@ -111,6 +123,43 @@ CREATE INDEX IF NOT EXISTS idx_prompts_media
     ON prompts(media_id);
 
 
+CREATE TABLE IF NOT EXISTS prompt_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id         INTEGER NOT NULL,
+    prompt_id        INTEGER,
+    version          INTEGER NOT NULL,
+    source           TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    prompt           TEXT,
+    negative_prompt  TEXT,
+    model            TEXT,
+    sampler          TEXT,
+    cfg_scale        REAL,
+    steps            INTEGER,
+    seed             TEXT,
+    width            INTEGER,
+    height           INTEGER,
+    scheduler        TEXT,
+    sampler_settings TEXT,
+    loras            TEXT,
+    controlnet       TEXT,
+    source_metadata  TEXT,
+    raw_text         TEXT,
+
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+    FOREIGN KEY (prompt_id) REFERENCES prompts(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_history_media
+    ON prompt_history(media_id);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_history_prompt
+    ON prompt_history(prompt_id);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_history_version
+    ON prompt_history(media_id, version DESC);
+
+
 
 CREATE TABLE IF NOT EXISTS jobs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +182,29 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status
 
 CREATE INDEX IF NOT EXISTS idx_jobs_media
     ON jobs(media_id);
+
+
+CREATE TABLE IF NOT EXISTS media_lifecycle_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id       INTEGER NOT NULL,
+    event_type     TEXT NOT NULL, -- status_change, delete_request, quality_eval
+    from_status    TEXT,
+    to_status      TEXT,
+    quality_status TEXT,
+    quality_score  REAL,
+    rule           TEXT,
+    reason         TEXT,
+    actor          TEXT,
+    created_at     TEXT NOT NULL,
+
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_lifecycle_events_media
+    ON media_lifecycle_events(media_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_lifecycle_events_type
+    ON media_lifecycle_events(event_type);
 
 
 

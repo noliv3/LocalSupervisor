@@ -32,6 +32,8 @@
 - Internal-Key kann einmalig per `?internal_key=` gesetzt werden; bei gültigem Key (IP-Whitelist vorausgesetzt) wird er für die Session/als HttpOnly-Cookie gemerkt, ohne den Wert in Klartext zu loggen.
 - Neuer VA/VIDAX-Setup-Flow: `va doctor` (Runtime-Checks), `va install` (StateDir + Assets, kopiert fehlende Example-Configs nach `state/config`), VIDAX-Install-Endpunkte (`/install`, `/install/status`, `/jobs/:id/start` blockiert ohne Assets). Änderungen daran immer in README + docs/SETUP.md + docs/ASSETS.md festhalten.
 - Forge-Regen-Buttons werden bei allen Bildmedien angezeigt; Ausführung erfordert weiterhin Internal-Key/IP-Whitelist, Hinweise zum Zustand genügen.
+- Prompt-Historie und Snapshot-Rebuild: `prompt_history` hält Versionen inkl. Raw-Text, Schreibpfade (Scan/Rescan/Forge/Snapshot-Rebuild) müssen die Historie füllen. Prompt-Rebuild nutzt vorhandene `media_meta.prompt_raw`-Snapshots, wenn Originaldateien fehlen, sonst Originaldatei. UI zeigt Timeline + einfachen Diff; keine Restore-Funktion.
+- Lifecycle/Quality: `media.lifecycle_status` (`active/review/pending_delete/deleted_logical`) und `media.quality_status` (`unknown/ok/review/blocked`) dürfen nur über bestehende Operations-/Web-Formulare gesetzt werden, immer auditierbar (Eintrag in `media_lifecycle_events`). Keine stillen Deletes; `missing` bleibt Status-Flag ohne Dateilöschung.
 
 ## Hashbasierte Library / Dupes
 - Importiert wird nur noch in das Schema `<hh>/<hash>.<ext>` innerhalb der konfigurierten Roots (`sv_resolve_library_path`).
