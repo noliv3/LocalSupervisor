@@ -1,10 +1,20 @@
 <?php
 declare(strict_types=1);
 
-$config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+
+try {
+    $config = sv_load_config();
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo '<pre>CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
+    exit;
+}
+
+$configWarning     = $config['_config_warning'] ?? null;
 $hasInternalAccess = sv_validate_internal_access($config, 'media_view', false);
 
 $dsn      = $config['db']['dsn'];
@@ -494,6 +504,12 @@ if (is_array($latestJobRequest)) {
             <a class="nav-link" href="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$nextId])) ?>">Nächstes »</a>
         <?php endif; ?>
     </div>
+
+    <?php if (!empty($configWarning)): ?>
+        <div class="alert-warning" style="margin: 0.5rem 0; padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba;">
+            <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </div>
+    <?php endif; ?>
 
     <header class="media-header">
         <div class="title-wrap">

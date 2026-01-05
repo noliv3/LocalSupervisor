@@ -1,8 +1,18 @@
 <?php
 declare(strict_types=1);
 
-$config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+
+try {
+    $config = sv_load_config();
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo '<pre>CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
+    exit;
+}
+
+$configWarning     = $config['_config_warning'] ?? null;
 $hasInternalAccess = sv_validate_internal_access($config, 'media_grid', false);
 
 $dsn      = $config['db']['dsn'];
@@ -318,6 +328,11 @@ function sv_tab_active(array $current, array $expected): bool
         </div>
     </div>
 </header>
+<?php if (!empty($configWarning)): ?>
+    <div style="margin: 0.5rem 1rem; padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba;">
+        <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+    </div>
+<?php endif; ?>
 
 <div class="quick-filters">
     <?php

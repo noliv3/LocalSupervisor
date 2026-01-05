@@ -11,20 +11,23 @@ if ($baseDir === false) {
     exit(1);
 }
 
-$configFile    = $baseDir . '/CONFIG/config.php';
 $migrationDir  = $baseDir . '/SCRIPTS/migrations';
 $securityFile  = $baseDir . '/SCRIPTS/security.php';
 
-if (!is_file($configFile)) {
-    fwrite(STDERR, "Fehler: CONFIG/config.php nicht gefunden.\n");
-    exit(1);
-}
 if (!is_dir($migrationDir)) {
     fwrite(STDERR, "Fehler: Migrationsverzeichnis fehlt: {$migrationDir}\n");
     exit(1);
 }
 
-$config = require $configFile;
+require_once __DIR__ . '/common.php';
+
+try {
+    $config = sv_load_config($baseDir);
+} catch (Throwable $e) {
+    fwrite(STDERR, "Config-Fehler: " . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
+
 require_once $securityFile;
 
 if (!isset($config['db']['dsn'])) {
@@ -43,6 +46,10 @@ try {
 } catch (Throwable $e) {
     fwrite(STDERR, "Fehler beim Verbindungsaufbau zur DB: " . $e->getMessage() . "\n");
     exit(1);
+}
+
+if (!empty($config['_config_warning'])) {
+    fwrite(STDOUT, $config['_config_warning'] . "\n");
 }
 
 ensureSchemaMigrationsTable($pdo);

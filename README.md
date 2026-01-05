@@ -13,6 +13,13 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Webschicht (WWW/)**: Dashboard `index.php` (Formulare für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz), Listenansicht `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
 - **Persistenz (DB/)**: SQLite/MySQL-Schema aus `DB/schema.sql`, Migrationen in `SCRIPTS/migrations/`, Konfiguration in `CONFIG/config.php`.
 
+## Baseline (V1)
+- Fallback-Konfiguration: Der Loader nutzt bevorzugt `CONFIG/config.php` und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück, damit Web/CLI auf frischem Checkout ohne Fatal Error starten.
+- Schema-Sync: `DB/schema.sql` enthält das Flag `media_tags.locked`; die Migration `20260105_001_add_media_tags_locked.php` bleibt idempotent und füllt fehlende Spalten nach.
+- Locked-Tag-Schutz: Cleanup/Repair entfernen keine gesperrten Tags; fehlende Dateien werden gemeldet, ohne manuelle Tagging-Daten zu löschen.
+- VA/VIDAX-State: `va install` legt das State-Layout an und kopiert Beispielconfigs in `state/config`, falls dort noch nichts liegt.
+- Optionale Tools: ffmpeg/ffprobe/exiftool sind optional; fehlende Tools führen zu klaren Hinweisen statt fatalen Fehlern (Video-Tests werden übersprungen, wenn ffmpeg fehlt).
+
 ### Datenbankschema (Strukturüberblick)
 | Tabelle | Zweck | Kernfelder/Indizes |
 | --- | --- | --- |
@@ -48,6 +55,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Installation / Setup
 - **Voraussetzungen**: PHP 8.1+ mit PDO (SQLite/MySQL), JSON, mbstring, fileinfo, gd/imagick; ffmpeg/ffprobe für Videometadaten, Video-Thumbnails und den Selftest; optional exiftool für Metadaten. Datenbank per SQLite-File oder MySQL/MariaDB.
 - **Konfiguration**: `CONFIG/config.php` definiert DB-DSN, Pfade für SFW/NSFW-Bild/Video, Logs/Temp/Backups, optionale Tool-Pfade (ffmpeg/exiftool), Scanner-Endpunkte (Base-URL, Token ODER api_key/api_key_header, Timeout, NSFW-Schwelle), Sicherheitsparameter (internal_api_key, ip_whitelist).
+    - Fehlt `CONFIG/config.php`, nutzt der Loader `CONFIG/config.example.php` mit Warnhinweis im UI/CLI; für Deployments die Example-Datei kopieren und insbesondere `internal_api_key`/Pfad-Settings anpassen.
     - Scanner-Auth unterstützt entweder `scanner.token` (Header `Authorization: <token>`) oder das Legacy-Paar `scanner.api_key` + `scanner.api_key_header`. Die Datei wird als `image` und `file` gesendet, `autorefresh=1` bleibt erhalten.
 - **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
@@ -62,7 +70,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ### Quickstart (VA/VIDAX)
 - `npm install`
 - `npx va doctor` (prüft node/ffmpeg/ffprobe, python optional)
-- `npx va install` (legt `<VA_STATE_DIR>/state/...` an, kopiert Beispiel-Configs, lädt Assets lt. Manifest)
+- `npx va install` (legt `<VA_STATE_DIR>/state/...` an, kopiert fehlende Beispiel-Configs nach `state/config`, lädt Assets lt. Manifest)
 - `VIDAX_CONFIG=<pfad>/vidax.json node src/vidax/server.js` (API-Key Pflicht; Install-Endpoints erreichbar)
 
 ## Asynchrone Scans
@@ -98,7 +106,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Integritätsanalyse und einfache Reparatur
 - **Analyse (read-only)**: `SCRIPTS/operations.php` stellt Prüfungen bereit, die fehlende Hashes, fehlende Dateien (Status `active`), Prompts ohne Roh-Metadaten und Tag-Zuordnungen ohne Confidence erkennen. Ergebnisse werden strukturiert pro Medium/Typ zurückgegeben.
 - **UI-Anzeigen**: `media_view.php` listet konkrete Probleme des Mediums (erste drei Zeilen, Rest aufklappbar). `mediadb.php` bietet einen Filter `?issues=1` und markiert betroffene Medien in der Grid-Ansicht. Das Dashboard (`index.php`) zeigt die Anzahl der problematischen Medien im Abschnitt „Integritätsstatus“.
-- **Einfache Reparatur**: Über das Dashboard (Internal-Key/IP-Whitelist erforderlich) kann eine minimale Reparatur ausgelöst werden. Sie setzt nur den Status auf `missing`, wenn Dateien fehlen, entfernt `media_tags`-Einträge ohne Confidence und löscht komplett leere Prompt-Objekte. Alle Schritte laufen über `SCRIPTS/operations.php` und werden auditgeloggt.
+- **Einfache Reparatur**: Über das Dashboard (Internal-Key/IP-Whitelist erforderlich) kann eine minimale Reparatur ausgelöst werden. Sie setzt nur den Status auf `missing`, wenn Dateien fehlen, entfernt `media_tags`-Einträge ohne Confidence (locked-Einträge bleiben erhalten) und löscht komplett leere Prompt-Objekte. Alle Schritte laufen über `SCRIPTS/operations.php` und werden auditgeloggt.
 
 ## Prompt-Qualität (A/B/C)
 - **Zentrale Bewertung**: `SCRIPTS/operations.php` stellt eine Heuristik bereit (`sv_analyze_prompt_quality`), die Prompts in A/B/C klassifiziert, Score/Issues liefert und Tag-basierte bzw. hybride Vorschläge generiert.
@@ -149,3 +157,9 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - Automatische Regeneration aus bestehenden `media_meta`-Snapshots existiert nicht; Rebuild liest immer von der Quelldatei.
 - Delete-/Qualitätsmechanik (automatisches Löschen/Retagging) ist nicht implementiert; Status-Flag `missing` ersetzt Löschungen.
 - UI-Modernisierung teilweise umgesetzt: Die Media-Detailansicht nutzt bereits das neue Workbench-Layout; Dashboard und Listenansicht bleiben funktional, aber ohne moderne UX/JS-Verbesserungen.
+
+## Rauchtests (ohne externe Dienste)
+- Syntaxcheck: `find SCRIPTS WWW -name '*.php' -maxdepth 3 -print0 | xargs -0 -n1 php -l`
+- Minimal-DB-Init (nutzt Beispielkonfiguration, falls keine eigene vorhanden): `php SCRIPTS/init_db.php`
+- Scan ohne Scanner-HTTP-Calls: `php SCRIPTS/scan_path_cli.php /tmp/import --limit=1` (leere `scanner.base_url` überspringt den externen Request)
+- Thumbnail/Video-Selbsttest (ffmpeg optional, Status wird klar ausgegeben): `php SCRIPTS/selftest_cli.php`

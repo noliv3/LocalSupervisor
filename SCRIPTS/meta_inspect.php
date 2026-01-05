@@ -14,13 +14,15 @@ if ($baseDir === false) {
     exit(1);
 }
 
-$configFile = $baseDir . '/CONFIG/config.php';
-if (!is_file($configFile)) {
-    fwrite(STDERR, "CONFIG/config.php fehlt.\n");
+require_once __DIR__ . '/common.php';
+
+try {
+    $config = sv_load_config($baseDir);
+} catch (Throwable $e) {
+    fwrite(STDERR, "Config-Fehler: " . $e->getMessage() . PHP_EOL);
     exit(1);
 }
 
-$config = require $configFile;
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
 $password = $config['db']['password'] ?? null;
@@ -45,6 +47,10 @@ for ($i = 1; $i < $argc; $i++) {
         $i++;
         continue;
     }
+}
+
+if (!empty($config['_config_warning'])) {
+    fwrite(STDOUT, $config['_config_warning'] . PHP_EOL . PHP_EOL);
 }
 
 function sv_meta_inspect_truncate(?string $text, int $max = 120): string

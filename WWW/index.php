@@ -1,17 +1,26 @@
 <?php
 declare(strict_types=1);
 
-$config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 
-$dsn      = $config['db']['dsn'];
-$user     = $config['db']['user']     ?? null;
-$password = $config['db']['password'] ?? null;
-$options  = $config['db']['options']  ?? [];
+try {
+    $config = sv_load_config();
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo "<pre>CONFIG-Fehler: " . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</pre>";
+    exit;
+}
+
+$configWarning = $config['_config_warning'] ?? null;
+$dsn           = $config['db']['dsn']        ?? '';
+$user          = $config['db']['user']       ?? null;
+$password      = $config['db']['password']   ?? null;
+$options       = $config['db']['options']    ?? [];
 
 try {
-    $pdo = new PDO($dsn, $user, $password, $options);
+    $pdo = new PDO((string)$dsn, $user, $password, $options);
     $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name");
     $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
 } catch (Throwable $e) {
@@ -552,6 +561,12 @@ $cliEntries = [
         <a href="index.php">Dashboard</a>
         <a href="mediadb.php">Media-Datenbank</a>
     </nav>
+
+    <?php if (!empty($configWarning)): ?>
+        <div style="padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba; margin-top: 0.6rem;">
+            <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </div>
+    <?php endif; ?>
 
     <p style="color: #555; font-size: 0.9rem;">Hinweis: Das neue Card-Grid liegt unter <code>mediadb.php</code>; die alte Grid-Ansicht (<code>media.php</code>) bleibt nur als Legacy-Option bestehen.</p>
 
