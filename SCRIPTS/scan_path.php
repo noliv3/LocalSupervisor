@@ -6,21 +6,15 @@ if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 
-$baseDir = realpath(__DIR__ . '/..');
-if ($baseDir === false) {
-    fwrite(STDERR, "Basisverzeichnis nicht gefunden.\n");
-    exit(1);
-}
-
-$configFile = $baseDir . '/CONFIG/config.php';
-if (!is_file($configFile)) {
-    fwrite(STDERR, "CONFIG/config.php fehlt.\n");
-    exit(1);
-}
-
+require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/scan_core.php';
 
-$config = require $configFile;
+try {
+    $config = sv_load_config();
+} catch (Throwable $e) {
+    fwrite(STDERR, "Config-Fehler: " . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -65,6 +59,9 @@ if (empty($pathsCfg)) {
 if (empty($scannerCfg['base_url'])) {
     $logger('Hinweis: Scanner base_url nicht gesetzt, Scan wird übersprungen.');
 }
+if (!empty($config['_config_warning'])) {
+    $logger($config['_config_warning']);
+}
 
 try {
     $result = sv_run_scan_path(
@@ -85,4 +82,3 @@ try {
     fwrite(STDERR, "Scan-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 }
-

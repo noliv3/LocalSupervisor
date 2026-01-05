@@ -8,8 +8,15 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
-$config = require $root . DIRECTORY_SEPARATOR . 'CONFIG' . DIRECTORY_SEPARATOR . 'config.php';
+require_once __DIR__ . '/common.php';
 require __DIR__ . '/scan_core.php';
+
+try {
+    $config = sv_load_config($root);
+} catch (Throwable $e) {
+    fwrite(STDERR, "Config-Fehler: " . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
 
 $dsn      = $config['db']['dsn'] ?? null;
 $user     = $config['db']['user'] ?? null;
@@ -34,6 +41,10 @@ if (!is_string($dsn) || $dsn === '') {
 
 echo "SuperVisOr EXIF/Prompt-Scan (Legacy)\n";
 echo "=================================\n\n";
+
+if (!empty($config['_config_warning'])) {
+    echo $config['_config_warning'] . "\n\n";
+}
 
 try {
     $pdo = new PDO($dsn, $user, $password, $options);

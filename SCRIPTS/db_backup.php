@@ -6,33 +6,28 @@ if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 
-$baseDir = realpath(__DIR__ . '/..');
-if ($baseDir === false) {
-    fwrite(STDERR, "Basisverzeichnis nicht gefunden.\n");
-    exit(1);
-}
+require_once __DIR__ . '/operations.php';
 
-$configFile   = $baseDir . '/CONFIG/config.php';
-$securityFile = $baseDir . '/SCRIPTS/security.php';
-if (!is_file($configFile)) {
-    fwrite(STDERR, "CONFIG/config.php fehlt.\n");
-    exit(1);
-}
-
-$config = require $configFile;
-require_once $securityFile;
-$dsn    = (string)($config['db']['dsn'] ?? '');
-
-$pdo = null;
 try {
-    $pdo = new PDO(
-        $dsn,
-        $config['db']['user'] ?? null,
-        $config['db']['password'] ?? null,
-        $config['db']['options'] ?? []
-    );
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $config = sv_load_config();
 } catch (Throwable $e) {
+    fwrite(STDERR, "Config-Fehler: " . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
+
+$dsn = (string)($config['db']['dsn'] ?? '');
+if ($dsn === '') {
+    fwrite(STDERR, "DB-DSN in config.php fehlt.\n");
+    exit(1);
+}
+
+$baseDir = sv_base_dir();
+$pdo     = null;
+try {
+    $pdo = sv_open_pdo($config);
+} catch (Throwable $e) {
+    // Optional: Backup kann auch ohne offene PDO-Verbindung erstellt werden.
+    fwrite(STDOUT, "Warnung: DB-Verbindung konnte nicht geöffnet werden: " . $e->getMessage() . PHP_EOL);
     $pdo = null;
 }
 
@@ -51,6 +46,10 @@ $log = function (string $message) use ($logFile): void {
 };
 
 $log('Starte DB-Backup.');
+
+if (!empty($config['_config_warning'])) {
+    $log($config['_config_warning']);
+}
 
 if (strpos($dsn, 'sqlite:') !== 0) {
     $log('Backup-CLI aktuell nur für SQLite implementiert.');

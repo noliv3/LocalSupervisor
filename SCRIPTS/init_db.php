@@ -9,19 +9,21 @@ if ($baseDir === false) {
     exit(1);
 }
 
-$configFile = $baseDir . '/CONFIG/config.php';
+require_once __DIR__ . '/common.php';
+
 $schemaFile = $baseDir . '/DB/schema.sql';
 
-if (!is_file($configFile)) {
-    fwrite(STDERR, "Fehler: CONFIG/config.php nicht gefunden.\n");
-    exit(1);
-}
 if (!is_file($schemaFile)) {
     fwrite(STDERR, "Fehler: DB/schema.sql nicht gefunden.\n");
     exit(1);
 }
 
-$config = require $configFile;
+try {
+    $config = sv_load_config($baseDir);
+} catch (Throwable $e) {
+    fwrite(STDERR, "Config-Fehler: " . $e->getMessage() . PHP_EOL);
+    exit(1);
+}
 
 if (!isset($config['db']['dsn'])) {
     fwrite(STDERR, "Fehler: DB-DSN in config.php fehlt.\n");
@@ -51,6 +53,9 @@ try {
     $pdo->exec($schemaSql);
     $pdo->commit();
     fwrite(STDOUT, "Datenbank initialisiert.\n");
+    if (!empty($config['_config_warning'])) {
+        fwrite(STDOUT, $config['_config_warning'] . PHP_EOL);
+    }
 } catch (Throwable $e) {
     $pdo->rollBack();
     fwrite(STDERR, "Fehler beim Ausführen des Schemas: " . $e->getMessage() . "\n");

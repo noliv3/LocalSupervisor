@@ -1,8 +1,16 @@
 <?php
 declare(strict_types=1);
 
-$config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+
+try {
+    $config = sv_load_config();
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo 'CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    exit;
+}
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;

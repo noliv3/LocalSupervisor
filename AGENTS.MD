@@ -11,6 +11,7 @@
 - Keine Phantom-Dateien oder temporären Ablagen anlegen; bestehende Dateien weiterverwenden.
 - Keine Duplikate von CLIs, Views oder Parsern; Erweiterungen gehören in die bestehenden zentralen Komponenten.
 - Keine Eingriffe ohne expliziten Auftrag; Dokumentation immer in README und AGENTS aktualisieren, wenn Abläufe/Schnittstellen betroffen sind.
+- Config-Zugriff immer über `sv_load_config()`; der Loader fällt bei fehlender `CONFIG/config.php` mit Warnung auf `CONFIG/config.example.php` zurück. Keine direkten `require` auf `CONFIG/config.php` hinzufügen.
 
 ## Strukturregeln
 - Kernel-Logik liegt in `SCRIPTS/` (scan_core, prompt_parser, operations, logging, security, paths); Web-spezifische Logik bleibt in `WWW/`.
@@ -29,7 +30,7 @@
 - Prompt-Qualität wird zentral in `SCRIPTS/operations.php` bewertet; Web-Views und Forge-Fallbacks nutzen ausschließlich diese
   Funktionen (keine eigenen Heuristiken in den PHP-Views).
 - Internal-Key kann einmalig per `?internal_key=` gesetzt werden; bei gültigem Key (IP-Whitelist vorausgesetzt) wird er für die Session/als HttpOnly-Cookie gemerkt, ohne den Wert in Klartext zu loggen.
-- Neuer VA/VIDAX-Setup-Flow: `va doctor` (Runtime-Checks), `va install` (StateDir + Assets), VIDAX-Install-Endpunkte (`/install`, `/install/status`, `/jobs/:id/start` blockiert ohne Assets). Änderungen daran immer in README + docs/SETUP.md + docs/ASSETS.md festhalten.
+- Neuer VA/VIDAX-Setup-Flow: `va doctor` (Runtime-Checks), `va install` (StateDir + Assets, kopiert fehlende Example-Configs nach `state/config`), VIDAX-Install-Endpunkte (`/install`, `/install/status`, `/jobs/:id/start` blockiert ohne Assets). Änderungen daran immer in README + docs/SETUP.md + docs/ASSETS.md festhalten.
 - Forge-Regen-Buttons werden bei allen Bildmedien angezeigt; Ausführung erfordert weiterhin Internal-Key/IP-Whitelist, Hinweise zum Zustand genügen.
 
 ## Hashbasierte Library / Dupes
@@ -95,5 +96,5 @@
 - **Repository-Landkarte**: `CONFIG/` bündelt zentrale Konfigurationen, `DB/` enthält das Referenzschema, `SCRIPTS/` bildet Kernel/CLIs/Migrationen ab, `WWW/` deckt Dashboard, Listen, Detailansichten sowie Stream/Thumb ab; Laufzeitpfade `LOGS/`, `BACKUPS/`, `TOOLS/` entstehen im Betrieb.
 - **Sicherheitslage**: Web-Schreibpfade verlangen Internal-Key + IP-Whitelist und Audit-Logs; Pfadvalidierung in `media_stream.php`/`thumb.php` ist kritisch, Symlinks bleiben verboten. Scanner-Antworten gelten als untrusted; optionales Rate-Limiting kann ergänzt werden.
 - **CLI-Aufräumplan**: Kern-CLIs (`scan_path_cli.php`, `rescan_cli.php`, `filesync_cli.php`, `migrate.php`, `db_backup.php`, `consistency_check.php`, `cleanup_missing_cli.php`, `init_db.php`) bleiben bestehen. Read-only-Metatools (`exif_prompts_cli.php`, `meta_inspect.php`, `db_inspect.php`, `show_prompts_columns.php`) sind optional. Legacy-Wrapper (`scan_path.php`, `sync_media_cli.php`) nur mit klarer Deprecation/Entfernung anfassen. Parameterkonvention: `path`, `--limit`, `--offset`, `--dry-run` (wo sinnvoll), `--repair` für Reparaturläufe.
-- **Pipeline-Snapshot**: Scan/Rescan/Filesync laufen über `operations.php` + Worker (`scan_worker_cli.php`), Import nutzt `sv_import_file` und schreibt `media`/`scan_results`/`tags`/`media_meta`/`prompts`. Tagging ersetzt nur `locked=0`; Legacy-Löschpfade wie `cleanup_missing_cli` und einfache Konsistenz-Reparaturen respektieren Locks derzeit nicht. Video-Pfad liefert ffmpeg-Thumbnails, HTTP-Range-Streaming und Grid-/Detailanzeigen.
-- **Gaps/Prioritäten**: (1) `media_tags.locked`-Migration sicherstellen, damit Upserts greifen; (2) Tag-Löschpfade (`cleanup_missing_cli`, Konsistenz-Reparatur, Orphan-Cleanup) um Locked-Respekt erweitern; (3) Weitere Skripte auf fehlende Locked-Filter prüfen. UI-Modernisierung und Prompt-Historie bleiben offen.
+- **Pipeline-Snapshot**: Scan/Rescan/Filesync laufen über `operations.php` + Worker (`scan_worker_cli.php`), Import nutzt `sv_import_file` und schreibt `media`/`scan_results`/`tags`/`media_meta`/`prompts`. Tagging ersetzt nur `locked=0`; Cleanup Missing und einfache Konsistenz-Reparaturen lassen `locked=1` unangetastet. Video-Pfad liefert ffmpeg-Thumbnails, HTTP-Range-Streaming und Grid-/Detailanzeigen.
+- **Gaps/Prioritäten**: (1) `media_tags.locked` bleibt Pflichtfeld im Schema/Migration; (2) Weitere Skripte auf Config-Fallback (`sv_load_config`) und Lock-Respekt prüfen; (3) UI-Modernisierung und Prompt-Historie bleiben offen.

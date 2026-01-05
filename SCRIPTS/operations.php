@@ -42,22 +42,6 @@ class SvForgeHttpException extends RuntimeException
     }
 }
 
-function sv_load_config(?string $baseDir = null): array
-{
-    $baseDir = $baseDir ?? sv_base_dir();
-    $configFile = $baseDir . '/CONFIG/config.php';
-    if (!is_file($configFile)) {
-        throw new RuntimeException('CONFIG/config.php fehlt.');
-    }
-
-    $config = require $configFile;
-    if (!is_array($config)) {
-        throw new RuntimeException('CONFIG/config.php liefert keine Konfiguration.');
-    }
-
-    return $config;
-}
-
 function sv_sanitize_url(string $url): string
 {
     $parts = @parse_url($url);
@@ -4713,11 +4697,11 @@ function sv_run_simple_integrity_repair(PDO $pdo, callable $logLine): array
         }
     }
 
-    $deleteTags = $pdo->prepare('DELETE FROM media_tags WHERE confidence IS NULL');
+    $deleteTags = $pdo->prepare('DELETE FROM media_tags WHERE confidence IS NULL AND locked = 0');
     $deleteTags->execute();
     $changes['tag_rows_removed'] = (int)$deleteTags->rowCount();
     if ($changes['tag_rows_removed'] > 0) {
-        $logLine('Tag-Zuordnungen ohne Confidence entfernt: ' . $changes['tag_rows_removed']);
+        $logLine('Tag-Zuordnungen ohne Confidence entfernt (locked ausgenommen): ' . $changes['tag_rows_removed']);
     }
 
     $promptIdsStmt = $pdo->query(
@@ -4824,7 +4808,7 @@ function sv_has_consistency_log_table(PDO $pdo): bool
 function sv_check_orphans(PDO $pdo, callable $logFinding, string $repairMode): void
 {
     $mtStmt = $pdo->query(
-        'SELECT mt.media_id, mt.tag_id FROM media_tags mt ' .
+        'SELECT mt.media_id, mt.tag_id, mt.locked FROM media_tags mt ' .
         'LEFT JOIN media m ON m.id = mt.media_id ' .
         'LEFT JOIN tags t ON t.id = mt.tag_id ' .
         'WHERE m.id IS NULL OR t.id IS NULL'
@@ -4832,12 +4816,17 @@ function sv_check_orphans(PDO $pdo, callable $logFinding, string $repairMode): v
     $mtRows = $mtStmt->fetchAll(PDO::FETCH_ASSOC);
 
     foreach ($mtRows as $row) {
-        $logFinding('media_tags_orphan', 'warn', 'Media_ID=' . $row['media_id'] . ', Tag_ID=' . $row['tag_id']);
+        $suffix = ((int)($row['locked'] ?? 0) === 1) ? ' (locked)' : '';
+        $logFinding('media_tags_orphan', 'warn', 'Media_ID=' . $row['media_id'] . ', Tag_ID=' . $row['tag_id'] . $suffix);
     }
 
     if ($repairMode === 'simple' && !empty($mtRows)) {
-        $deleteStmt = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ? AND tag_id = ?');
+        $deleteStmt = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ? AND tag_id = ? AND locked = 0');
         foreach ($mtRows as $row) {
+            if ((int)($row['locked'] ?? 0) === 1) {
+                $logFinding('media_tags_orphan', 'info', 'locked übersprungen: Media_ID=' . $row['media_id'] . ', Tag_ID=' . $row['tag_id']);
+                continue;
+            }
             $deleteStmt->execute([$row['media_id'], $row['tag_id']]);
             $logFinding('media_tags_orphan', 'info', 'gelöscht: Media_ID=' . $row['media_id'] . ', Tag_ID=' . $row['tag_id']);
         }

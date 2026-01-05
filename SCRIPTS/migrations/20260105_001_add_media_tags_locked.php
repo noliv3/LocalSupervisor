@@ -30,6 +30,11 @@ $migration['run'] = function (PDO $pdo) use (&$migration): void {
 
     if (!$hasLocked) {
         $pdo->exec('ALTER TABLE media_tags ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;');
+        $hasLocked = true;
+    }
+
+    if ($hasLocked) {
+        $pdo->exec('UPDATE media_tags SET locked = 0 WHERE locked IS NULL;');
     }
 
     $stmt = $pdo->prepare('SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1');

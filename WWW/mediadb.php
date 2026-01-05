@@ -1,14 +1,23 @@
 <?php
 declare(strict_types=1);
 
-$config = require __DIR__ . '/../CONFIG/config.php';
+require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 
-$dsn      = $config['db']['dsn'];
-$user     = $config['db']['user']     ?? null;
-$password = $config['db']['password'] ?? null;
-$options  = $config['db']['options']  ?? [];
+try {
+    $config = sv_load_config();
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo '<pre>CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
+    exit;
+}
+
+$configWarning = $config['_config_warning'] ?? null;
+$dsn           = $config['db']['dsn'];
+$user          = $config['db']['user']     ?? null;
+$password      = $config['db']['password'] ?? null;
+$options       = $config['db']['options']  ?? [];
 
 try {
     $pdo = new PDO($dsn, $user, $password, $options);
@@ -448,6 +457,12 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
         </div>
     </div>
 </header>
+
+<?php if (!empty($configWarning)): ?>
+    <div style="margin: 0.5rem 1rem; padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba;">
+        <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+    </div>
+<?php endif; ?>
 
 <div class="quick-filters">
     <?php foreach ($tabConfigs as $tab):
