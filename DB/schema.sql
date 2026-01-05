@@ -159,6 +159,9 @@ CREATE INDEX IF NOT EXISTS idx_prompt_history_prompt
 CREATE INDEX IF NOT EXISTS idx_prompt_history_version
     ON prompt_history(media_id, version DESC);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_history_media_version
+    ON prompt_history(media_id, version);
+
 
 
 CREATE TABLE IF NOT EXISTS jobs (

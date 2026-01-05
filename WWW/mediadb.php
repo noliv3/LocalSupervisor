@@ -241,7 +241,8 @@ if ($issueFilter) {
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \"scan_stale\") AS scan_stale
 FROM media m
 LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1)
 WHERE m.id IN (' . $placeholders . ')
@@ -267,7 +268,8 @@ $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.li
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \"scan_stale\") AS scan_stale
 FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
@@ -309,7 +311,8 @@ ORDER BY m.id DESC';
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \"scan_stale\") AS scan_stale
 FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
@@ -589,6 +592,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
             $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
             $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
+            $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
             $hasIssues = isset($issuesByMedia[$id]);
 
             $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
@@ -654,6 +658,9 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                     <?php if ($qualityStatus !== '' && $qualityStatus !== SV_QUALITY_UNKNOWN): ?>
                         <span class="pill pill-muted" title="Quality"><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php endif; ?>
+                    <?php if ($scanStale): ?>
+                        <span class="pill pill-warn" title="Scanner nicht erreichbar, Tags/Rating veraltet">Scan stale</span>
+                    <?php endif; ?>
                     <?php if ($rating > 0): ?>
                         <span class="pill">Rating <?= $rating ?></span>
                     <?php endif; ?>
@@ -682,6 +689,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
                         <?php if ($hasPrompt && !$promptComplete): ?><span class="info-chip chip-warn">Prompt unvollständig</span><?php endif; ?>
                         <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
+                        <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan stale</span><?php endif; ?>
                     </div>
                     <div class="info-path" title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         ID <?= $id ?> · <?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
@@ -726,6 +734,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
                         $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
                         $hasIssues = isset($issuesByMedia[$id]);
+                        $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
                         $rating  = (int)($row['rating'] ?? 0);
                         $status  = (string)($row['status'] ?? '');
                         $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
@@ -739,7 +748,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <td><?= $hasTags ? 'ja' : 'nein' ?></td>
                             <td><?= $hasIssues ? 'ja' : '—' ?></td>
                             <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
-                            <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?></td>
+                            <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?><?= $scanStale ? ' (stale)' : '' ?></td>
                             <td><a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a></td>
                         </tr>
                     <?php endforeach; ?>

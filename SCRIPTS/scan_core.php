@@ -9,19 +9,6 @@ declare(strict_types=1);
 require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/prompt_parser.php';
 
-function sv_next_prompt_version(PDO $pdo, int $mediaId): int
-{
-    $stmt = $pdo->prepare('SELECT COALESCE(MAX(version), 0) AS max_version FROM prompt_history WHERE media_id = ?');
-    try {
-        $stmt->execute([$mediaId]);
-        $max = (int)($stmt->fetchColumn() ?: 0);
-        return $max + 1;
-    } catch (Throwable $e) {
-        // Fallback wenn Tabelle nicht existiert (Migration fehlt)
-        return 1;
-    }
-}
-
 function sv_record_prompt_history(
     PDO $pdo,
     int $mediaId,
@@ -34,8 +21,30 @@ function sv_record_prompt_history(
         $sourceLabel = 'unknown';
     }
 
+    [$limitedRaw, $wasTruncated] = sv_limit_prompt_raw($rawText);
+    if ($wasTruncated && $rawText !== null) {
+        sv_audit_log($pdo, 'prompt_history_raw_truncated', 'media', $mediaId, [
+            'source'     => $sourceLabel,
+            'max_bytes'  => 20000,
+            'orig_bytes' => strlen($rawText),
+        ]);
+    }
+
+    $normalized = $normalized ?? [];
+
+    $started = false;
+    $externalTx = $pdo->inTransaction();
+
     try {
-        $version = sv_next_prompt_version($pdo, $mediaId);
+        if (!$externalTx) {
+            $pdo->beginTransaction();
+            $started = true;
+        }
+
+        $versionStmt = $pdo->prepare('SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM prompt_history WHERE media_id = ?');
+        $versionStmt->execute([$mediaId]);
+        $version = (int)($versionStmt->fetchColumn() ?: 1);
+
         $stmt = $pdo->prepare(
             "INSERT INTO prompt_history (media_id, prompt_id, version, source, created_at, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata, raw_text)"
             . " VALUES (:media_id, :prompt_id, :version, :source, :created_at, :prompt, :negative_prompt, :model, :sampler, :cfg_scale, :steps, :seed, :width, :height, :scheduler, :sampler_settings, :loras, :controlnet, :source_metadata, :raw_text)"
@@ -60,11 +69,33 @@ function sv_record_prompt_history(
             ':loras'           => $normalized['loras'] ?? null,
             ':controlnet'      => $normalized['controlnet'] ?? null,
             ':source_metadata' => $normalized['source_metadata'] ?? null,
-            ':raw_text'        => $rawText,
+            ':raw_text'        => $limitedRaw,
         ]);
+
+        if ($started) {
+            $pdo->commit();
+        }
     } catch (Throwable $e) {
-        // Historisierung nicht blockieren, wenn Tabelle fehlt.
+        if ($started && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
     }
+}
+
+function sv_limit_prompt_raw(?string $rawText, int $maxBytes = 20000): array
+{
+    if ($rawText === null) {
+        return [null, false];
+    }
+
+    $rawBytes = strlen($rawText);
+    if ($rawBytes <= $maxBytes) {
+        return [$rawText, false];
+    }
+
+    $truncated = substr($rawText, 0, $maxBytes);
+    return [$truncated . "\n\n[truncated]", true];
 }
 
 /**
@@ -709,6 +740,23 @@ function sv_store_extracted_metadata(
 
     $selectedCandidate = sv_select_prompt_candidate($promptCandidates);
     $rawBlock          = is_string($selectedCandidate['text'] ?? null) ? (string)$selectedCandidate['text'] : null;
+    [$limitedRawBlock, $wasTruncated] = sv_limit_prompt_raw($rawBlock);
+    if ($wasTruncated && $rawBlock !== null) {
+        sv_audit_log($pdo, 'prompt_raw_truncated', 'media', $mediaId, [
+            'source'     => $sourceLabel,
+            'max_bytes'  => 20000,
+            'orig_bytes' => strlen($rawBlock),
+        ]);
+    }
+    $rawBlock = $limitedRawBlock;
+    if (!empty($metadata['snapshot_incomplete'])) {
+        sv_audit_log($pdo, 'prompt_snapshot_incomplete', 'media', $mediaId, [
+            'source' => $sourceLabel,
+        ]);
+        if ($logger) {
+            $logger('Snapshot unvollständig: nur prompt_raw verfügbar.');
+        }
+    }
     $normalized        = sv_empty_normalized_prompt();
 
     if ($rawBlock !== null) {

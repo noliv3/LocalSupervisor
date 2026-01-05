@@ -92,6 +92,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `php SCRIPTS/migrate.php` | Führt fehlende Migrationen aus | Keine Auto-Migrationen |
 | `php SCRIPTS/meta_inspect.php [--limit=N] [--offset=N]` | Text-Inspektor für Prompts/Metadaten | Batches |
 | `php SCRIPTS/selftest_cli.php` | Lokaler Smoke-Test (PNG/MP4/Scanner-Parser, Video-Thumb) | ffmpeg/ffprobe empfohlen; Exit 2 wenn ffmpeg fehlt |
+| `php SCRIPTS/cleanup_missing_cli.php [--confirm] [--no-dry-run]` | Löscht nur nach explizitem `--confirm`; Default ist Dry-Run mit ID-Listing | Locked-Tags bleiben geschützt, jede Löschung wird auditiert |
 | `WWW/index.php` | Dashboard: Start Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz | Internal-Key + IP-Whitelist für Write-Actions |
 | `WWW/mediadb.php` | Listenansicht mit Filtern | type, prompt, meta, status, rating_min, path_substring, adult |
 | `WWW/media_view.php?id=...` | Detailansicht eines Mediums | id (Integer), optional adult |
@@ -102,6 +103,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **UI-Indikatoren**: `mediadb.php` und `media_view.php` zeigen Badges für Prompt-Vollständigkeit, Tags und Metadaten an. Filter `incomplete=` (prompt/tags/meta/any) erleichtern die Suche nach Lücken.
 - **Mini-Konsistenzcheck**: Direkt in der Detailansicht werden pro Medium die Stati (Prompt vollständig, Tags, Metadaten) angezeigt.
 - **Komfort-Rebuild**: Im Dashboard steht ein Button „Rebuild fehlender Prompts“, der nur Medien mit fehlenden Prompt-Kernfeldern (internes Limit 100) per Einzel-Rebuild anstößt und Audit-Log-Einträge schreibt.
+- **Stale-Scan-Indikator**: Wenn beim Forge-Refresh kein Scanner erreichbar war, wird ein `scan_stale`-Flag in `media_meta` hinterlegt und als Badge in `mediadb.php` sowie der Detailansicht angezeigt.
 
 ## Integritätsanalyse und einfache Reparatur
 - **Analyse (read-only)**: `SCRIPTS/operations.php` stellt Prüfungen bereit, die fehlende Hashes, fehlende Dateien (Status `active`), Prompts ohne Roh-Metadaten und Tag-Zuordnungen ohne Confidence erkennen. Ergebnisse werden strukturiert pro Medium/Typ zurückgegeben.
@@ -117,7 +119,8 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Forge-Regeneration
 - **Async-Flow**:
   1. In der Detailansicht (`media_view.php`) „Regen über Forge“ klicken: Prompt-Heuristik (A/B/C + Tag-Fallback) läuft im Web-Request, Modell wird gegen Forge gelöst, anschließend wird nur ein Job (`jobs.type=forge_regen`) im Status `queued` angelegt.
-  2. Der Web-Request stößt einen Hintergrund-Worker an (`php SCRIPTS/forge_worker_cli.php --limit=1 --media-id=<id>`), ohne auf dessen Laufzeit zu warten. Ein Cooldown-Lock (`LOGS/forge_worker_spawn.lock`, Standard 15s) verhindert Spawn-Stürme; Spawn-Ergebnis (skipped/ok/PID/Fehler) landet in `jobs.forge_response_json`.
+  2. Vor dem Enqueue läuft ein synchroner Forge-Healthcheck; ist Forge nicht erreichbar, wird der Start blockiert und im Audit vermerkt.
+  3. Der Web-Request stößt einen Hintergrund-Worker an (`php SCRIPTS/forge_worker_cli.php --limit=1 --media-id=<id>`), ohne auf dessen Laufzeit zu warten. Ein Cooldown-Lock (`LOGS/forge_worker_spawn.lock`, Standard 15s) verhindert Spawn-Stürme; Spawn-Ergebnis (skipped/ok/PID/Fehler) landet in `jobs.forge_response_json`.
   3. UI-Feedback: `media_view.php` blendet ein Forge-Job-Panel ein und pollt den Status per AJAX; das Dashboard (`index.php`) zeigt eine Übersicht offener/erfolgreicher/fehlerhafter Jobs. Keine Web-Requests warten auf Forge.
 4. In der Grid-Ansicht (`media.php`) gibt es einen Button „Forge Regen“ pro Medium. Der Klick legt einen Job an, stößt sofort einen dedizierten Worker (`php SCRIPTS/forge_worker_cli.php --limit=1 --media-id=<ID>`) an und zeigt Job-ID, Status und Worker-PID direkt im UI (Live-Polling, keine Wartezeit im Request).
 5. CLI-Worker separat/regelmäßig per Cron (`php SCRIPTS/forge_worker_cli.php --limit=1`) ausführen: Der Worker lädt Jobs der Typen `forge_regen`, `forge_regen_replace` und `forge_regen_v3` in den Status `queued`/`pending`/`created`, ruft Forge und wertet `_sv_mode` aus. Standard ist `preview` (Ergebnis landet nur als Preview-Datei), `replace` schreibt nach Backup in die Bibliothek und stößt Re-Scan/Prompt/Tag-Refresh an. Audit-/Job-Response werden in beiden Fällen gepflegt.
@@ -160,10 +163,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## V2-Design (Kurzspezifikation)
 - **Prompt-Historie**: Neue Tabelle `prompt_history` mit Versionierung pro `media_id`, referenziert `prompts.id` und speichert Raw-Text plus Normalisierung. Schreibpunkte (Scan/Rescan/Forge/Manual/Snapshot) erzeugen Versionen.
+- **Prompt-Rohdaten**: `prompt_raw` wird auf 20kB begrenzt; Trunkierungen werden auditiert, Versionierung erfolgt transaktional.
 - **Snapshot-Rebuild**: `prompts_rebuild` nutzt bevorzugt gespeicherte `media_meta.prompt_raw`, fallback auf Quelldatei. Ohne Datei und Snapshot bleibt der Eintrag unverändert.
 - **Lifecycle/Quality**: Erweiterte Felder auf `media` für `lifecycle_status`, `quality_status`, `quality_score/-notes`, `deleted_at` sowie Event-Log `media_lifecycle_events` (Statuswechsel, Delete-Requests, Quality-Evals). Kein automatisches Löschen; Statusänderungen werden protokolliert.
 - **UI/Compare**: Detailansicht zeigt Prompt-Historie mit Rohdaten, einfachem Diff und manueller Auswahl von A/B-Versionen. Quality- und Delete-Formulare nutzen weiterhin Internal-Key/IP-Whitelist.
 - **Security**: Neue Aktionen laufen über bestehende Internal-Key-Checks; keine zusätzlichen Web-Endpunkte, Audit via `media_lifecycle_events` + bestehendes Audit-Log.
+- **Versionierung geschützt**: `prompt_history` besitzt einen Unique-Index `(media_id, version)` (Migration `20260720_001_prompt_history_unique`), History-Writes laufen transaktional mit Längenlimit auf `prompt_raw`.
 
 ## Migrationen / Setup (V2)
 - Neue Migration `20260701_001_prompt_history_and_lifecycle.php` anlegen lassen (`php SCRIPTS/migrate.php`). Sie ergänzt Lifecycle-/Quality-Felder, Prompt-Historie und Lifecycle-Event-Log.

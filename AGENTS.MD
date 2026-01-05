@@ -34,6 +34,10 @@
 - Forge-Regen-Buttons werden bei allen Bildmedien angezeigt; Ausführung erfordert weiterhin Internal-Key/IP-Whitelist, Hinweise zum Zustand genügen.
 - Prompt-Historie und Snapshot-Rebuild: `prompt_history` hält Versionen inkl. Raw-Text, Schreibpfade (Scan/Rescan/Forge/Snapshot-Rebuild) müssen die Historie füllen. Prompt-Rebuild nutzt vorhandene `media_meta.prompt_raw`-Snapshots, wenn Originaldateien fehlen, sonst Originaldatei. UI zeigt Timeline + einfachen Diff; keine Restore-Funktion.
 - Lifecycle/Quality: `media.lifecycle_status` (`active/review/pending_delete/deleted_logical`) und `media.quality_status` (`unknown/ok/review/blocked`) dürfen nur über bestehende Operations-/Web-Formulare gesetzt werden, immer auditierbar (Eintrag in `media_lifecycle_events`). Keine stillen Deletes; `missing` bleibt Status-Flag ohne Dateilöschung.
+- cleanup_missing_cli nur mit `--confirm` löschen; Default ist Dry-Run mit ID-Listing, jede Löschung wird auditiert.
+- Prompt-Historie besitzt einen Unique-Index (media_id, version); Writes laufen transaktional, `prompt_raw` wird auf 20kB begrenzt (Trunkierung wird auditiert).
+- Forge-Healthcheck läuft vor Web-Start von Forge-Regen; bei fehlender Erreichbarkeit wird der Start blockiert und auditiert.
+- Wenn Forge-Refresh ohne Scanner läuft, wird `media_meta.scan_stale=1` gesetzt und als Badge in Grid/Detail angezeigt; beim nächsten erfolgreichen Scan wird der Flag entfernt.
 
 ## Hashbasierte Library / Dupes
 - Importiert wird nur noch in das Schema `<hh>/<hash>.<ext>` innerhalb der konfigurierten Roots (`sv_resolve_library_path`).

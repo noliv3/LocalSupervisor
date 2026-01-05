@@ -147,6 +147,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'forge_regen') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
             try {
+                $endpoint = sv_forge_endpoint_config($config, true);
+                if ($endpoint === null) {
+                    throw new RuntimeException('Forge-Dispatch ist deaktiviert oder nicht konfiguriert.');
+                }
+                $health = sv_forge_healthcheck($endpoint, $logger);
+                if (!$health['ok']) {
+                    sv_audit_log($pdo, 'forge_health_failed', 'media', $id, [
+                        'http_status' => $health['http_code'] ?? null,
+                        'target_url'  => $health['target_url'] ?? null,
+                    ]);
+                    throw new RuntimeException('Forge-Endpoint nicht erreichbar. Bitte später erneut versuchen.');
+                }
+
                 $overrides = [];
 
                 $modeValue = $_POST['_sv_mode'] ?? '';
@@ -299,6 +312,7 @@ try {
 $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta WHERE media_id = :id ORDER BY source, meta_key');
 $metaStmt->execute([':id' => $id]);
 $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
+$hasStaleScan = false;
 
 $tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :id ORDER BY t.type, t.name');
 $tagStmt->execute([':id' => $id]);
@@ -312,6 +326,9 @@ $versions = sv_get_media_versions($pdo, $id);
 $groupedMeta = [];
 foreach ($metaRows as $meta) {
     $src = (string)$meta['source'];
+    if ((string)$meta['meta_key'] === 'scan_stale') {
+        $hasStaleScan = true;
+    }
     $groupedMeta[$src][] = [
         'key'   => (string)$meta['meta_key'],
         'value' => $meta['meta_value'],
@@ -716,6 +733,12 @@ if (is_array($latestJobRequest)) {
                                 <pre><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
                             </details>
                         <?php endif; ?>
+                    </div>
+                <?php endif; ?>
+                <?php if ($hasStaleScan): ?>
+                    <div class="action-feedback error">
+                        <div class="action-feedback-title">Scan veraltet</div>
+                        <div>Scanner war beim letzten Forge-Lauf nicht erreichbar. Tags/Rating sind möglicherweise veraltet.</div>
                     </div>
                 <?php endif; ?>
 
