@@ -14,6 +14,11 @@ try {
 
 $configWarning = $config['_config_warning'] ?? null;
 
+$args = $argv ?? [];
+array_shift($args);
+$confirmDelete = in_array('--confirm', $args, true);
+$dryRun       = !in_array('--no-dry-run', $args, true);
+
 echo "SuperVisOr cleanup_missing_cli\n";
 echo "==============================\n\n";
 
@@ -67,6 +72,18 @@ if (count($targets) === 0) {
     exit(0);
 }
 
+$targetIds = array_map(static fn ($row) => (int)$row['id'], $targets);
+echo "Ziel-Einträge (ohne locked Tags): " . count($targetIds) . "\n";
+if ($targetIds) {
+    echo "IDs: " . implode(', ', $targetIds) . "\n";
+}
+
+if ($dryRun || !$confirmDelete) {
+    echo "\nDry-Run aktiv. Keine Daten wurden gelöscht.\n";
+    echo "Zum Löschen erneut mit --confirm und optional --no-dry-run aufrufen.\n";
+    exit(0);
+}
+
 try {
     $pdo->beginTransaction();
 
@@ -103,6 +120,10 @@ try {
     $deletedMedia = 0;
     foreach ($targets as $m) {
         $deletedMedia += $stmt->execute([$m['id']]) ? $stmt->rowCount() : 0;
+        sv_audit_log($pdo, 'cleanup_missing_delete', 'media', (int)$m['id'], [
+            'path'     => $m['path'],
+            'protected'=> false,
+        ]);
     }
 
     $pdo->commit();

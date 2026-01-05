@@ -466,14 +466,16 @@ function sv_set_media_lifecycle_status(
             $mediaId,
         ]);
     } catch (Throwable $e) {
-        // Spalten ggf. nicht vorhanden, Migration noch nicht gelaufen.
         if ($logger) {
-            $logger('Lifecycle-Status konnte nicht geschrieben werden (Migration erforderlich): ' . $e->getMessage());
+            $logger('Lifecycle-Status konnte nicht geschrieben werden: ' . $e->getMessage());
         }
-        return [
-            'previous' => $prevLifecycle,
-            'current'  => $prevLifecycle,
-        ];
+        sv_audit_log($pdo, 'lifecycle_status_error', 'media', $mediaId, [
+            'from_status' => $prevLifecycle,
+            'to_status'   => $newStatus,
+            'reason'      => $reason,
+            'error'       => $e->getMessage(),
+        ]);
+        throw new RuntimeException('Lifecycle-Status konnte nicht gespeichert werden. Migration/Schema prüfen.', 0, $e);
     }
 
     sv_record_lifecycle_event($pdo, $mediaId, 'status_change', [
@@ -522,12 +524,16 @@ function sv_set_media_quality_status(
         ]);
     } catch (Throwable $e) {
         if ($logger) {
-            $logger('Quality-Status konnte nicht geschrieben werden (Migration erforderlich): ' . $e->getMessage());
+            $logger('Quality-Status konnte nicht geschrieben werden: ' . $e->getMessage());
         }
-        return [
-            'previous' => $prevStatus,
-            'current'  => $prevStatus,
-        ];
+        sv_audit_log($pdo, 'quality_status_error', 'media', $mediaId, [
+            'from_status'   => $prevStatus,
+            'to_status'     => $qualityStatus,
+            'quality_score' => $qualityScore,
+            'notes'         => $notes,
+            'error'         => $e->getMessage(),
+        ]);
+        throw new RuntimeException('Quality-Status konnte nicht gespeichert werden. Migration/Schema prüfen.', 0, $e);
     }
 
     sv_record_lifecycle_event($pdo, $mediaId, 'quality_eval', [
@@ -551,21 +557,39 @@ function sv_set_media_quality_status(
 function sv_fetch_prompt_snapshot(PDO $pdo, int $mediaId): ?array
 {
     try {
-        $stmt = $pdo->prepare("SELECT meta_value, source FROM media_meta WHERE media_id = :media_id AND meta_key = 'prompt_raw' ORDER BY id DESC LIMIT 1");
-        $stmt->execute([':media_id' => $mediaId]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!$row) {
+        $metaStmt = $pdo->prepare("SELECT source, meta_key, meta_value FROM media_meta WHERE media_id = :media_id ORDER BY id DESC");
+        $metaStmt->execute([':media_id' => $mediaId]);
+        $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $raw = null;
+        $metaPairs = [];
+        foreach ($metaRows as $metaRow) {
+            $key = (string)($metaRow['meta_key'] ?? '');
+            $val = $metaRow['meta_value'] ?? null;
+            $src = (string)($metaRow['source'] ?? 'snapshot');
+            if ($key === 'prompt_raw' && is_string($val) && trim($val) !== '') {
+                $raw = (string)$val;
+            }
+            $metaPairs[] = [
+                'source' => $src,
+                'key'    => $key,
+                'value'  => $val,
+            ];
+        }
+
+        if ($raw === null || trim($raw) === '') {
             return null;
         }
-        $raw = (string)($row['meta_value'] ?? '');
-        if (trim($raw) === '') {
-            return null;
-        }
+
+        $structuredPairs = array_filter($metaPairs, static function (array $pair): bool {
+            return isset($pair['key']) && $pair['key'] !== 'prompt_raw';
+        });
+
         return [
-            'meta_pairs'        => [],
+            'meta_pairs'        => array_values($metaPairs),
             'prompt_candidates' => [
                 [
-                    'source'    => (string)($row['source'] ?? 'snapshot'),
+                    'source'    => (string)($metaRows[0]['source'] ?? 'snapshot'),
                     'key'       => 'prompt_raw',
                     'short_key' => 'snapshot',
                     'text'      => $raw,
@@ -573,6 +597,7 @@ function sv_fetch_prompt_snapshot(PDO $pdo, int $mediaId): ?array
                 ],
             ],
             'raw_block' => $raw,
+            'snapshot_incomplete' => $structuredPairs === [],
         ];
     } catch (Throwable $e) {
         return null;
@@ -3355,9 +3380,22 @@ function sv_refresh_media_after_regen(
 
         $stmt = $pdo->prepare('UPDATE media SET has_nsfw = ?, rating = ?, status = "active" WHERE id = ?');
         $stmt->execute([$hasNsfw, $rating, $mediaId]);
+        $pdo->prepare("DELETE FROM media_meta WHERE media_id = ? AND meta_key = 'scan_stale'")->execute([$mediaId]);
         $result['scan_updated'] = true;
     } else {
         $logger('Scanner lieferte keine verwertbaren Daten, Tags unverändert.');
+        $pdo->prepare("DELETE FROM media_meta WHERE media_id = ? AND meta_key = 'scan_stale'")->execute([$mediaId]);
+        $metaStmt = $pdo->prepare("INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)");
+        $metaStmt->execute([
+            $mediaId,
+            SV_FORGE_SCAN_SOURCE_LABEL,
+            'scan_stale',
+            '1',
+            date('c'),
+        ]);
+        sv_audit_log($pdo, 'scan_stale', 'media', $mediaId, [
+            'reason' => 'forge_regen_no_scanner',
+        ]);
     }
 
     try {
@@ -4553,12 +4591,14 @@ function sv_run_prompts_rebuild_operation(
 ): array {
     $limit = $limit ?? 250;
 
-    $sql = "SELECT m.id, m.path, m.type, p.id AS prompt_id FROM media m "
-         . "LEFT JOIN prompts p ON p.media_id = m.id "
-         . "WHERE m.status = 'active' AND m.type = 'image' AND (";
-    $sql .= "p.id IS NULL OR p.prompt IS NULL OR p.negative_prompt IS NULL OR p.source_metadata IS NULL";
-    $sql .= " OR p.model IS NULL OR p.sampler IS NULL OR p.cfg_scale IS NULL OR p.steps IS NULL OR p.seed IS NULL OR p.width IS NULL OR p.height IS NULL OR p.scheduler IS NULL";
-    $sql .= ") ORDER BY m.id ASC";
+    $sql = "SELECT m.id, m.path, m.type, (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1) AS prompt_id "
+         . "FROM media m "
+         . "WHERE m.status = 'active' AND m.type = 'image' "
+         . "AND NOT EXISTS (SELECT 1 FROM prompts p2 WHERE p2.media_id = m.id "
+         . "AND p2.prompt IS NOT NULL AND p2.negative_prompt IS NOT NULL AND p2.source_metadata IS NOT NULL "
+         . "AND p2.model IS NOT NULL AND p2.sampler IS NOT NULL AND p2.cfg_scale IS NOT NULL AND p2.steps IS NOT NULL "
+         . "AND p2.seed IS NOT NULL AND p2.width IS NOT NULL AND p2.height IS NOT NULL AND p2.scheduler IS NOT NULL) "
+         . "ORDER BY m.id ASC";
 
     if ($limit !== null) {
         $sql .= ' LIMIT ' . max(0, (int)$limit);
