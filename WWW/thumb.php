@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 $config = require __DIR__ . '/../CONFIG/config.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+require_once __DIR__ . '/../SCRIPTS/thumb_core.php';
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -60,7 +61,7 @@ if ($id <= 0) {
     exit;
 }
 
-$stmt = $pdo->prepare('SELECT path, type, has_nsfw FROM media WHERE id = :id');
+$stmt = $pdo->prepare('SELECT path, type, has_nsfw, width, height, duration FROM media WHERE id = :id');
 $stmt->execute([':id' => $id]);
 $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
@@ -76,6 +77,7 @@ if (!$showAdult && (int)($row['has_nsfw'] ?? 0) === 1) {
 
 $type = (string)$row['type'];
 $path = (string)$row['path'];
+$duration = isset($row['duration']) ? (float)$row['duration'] : null;
 
 try {
     sv_assert_media_path_allowed($path, $config['paths'] ?? [], 'thumb');
@@ -84,13 +86,42 @@ try {
     exit;
 }
 
-if ($type !== 'image') {
+if ($type !== 'image' && $type !== 'video') {
     http_response_code(415);
     exit;
 }
 
 if (!is_file($path)) {
     http_response_code(404);
+    exit;
+}
+
+if ($type === 'video') {
+    $baseDir   = realpath(__DIR__ . '/..');
+    $cachePath = $baseDir ? $baseDir . '/CACHE/thumbs/video/' . $id . '.jpg' : null;
+    if ($cachePath === null) {
+        http_response_code(500);
+        exit;
+    }
+    $ffmpeg = sv_resolve_ffmpeg_path($config['tools'] ?? []);
+    $cacheOk = is_file($cachePath);
+    $srcMTime = (int)@filemtime($path);
+    $cacheMTime = $cacheOk ? (int)@filemtime($cachePath) : 0;
+    if (!$cacheOk || $srcMTime > $cacheMTime) {
+        $logFn = static function (string $msg): void {
+            error_log('[thumb.php] ' . $msg);
+        };
+        $cacheOk = sv_render_video_thumbnail($path, $cachePath, $ffmpeg, $duration, $logFn);
+    }
+
+    if (!$cacheOk || !is_file($cachePath)) {
+        http_response_code(500);
+        exit;
+    }
+
+    header('Content-Type: image/jpeg');
+    header('Content-Length: ' . (string)filesize($cachePath));
+    readfile($cachePath);
     exit;
 }
 

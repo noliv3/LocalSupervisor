@@ -565,17 +565,28 @@ if (is_array($latestJobRequest)) {
                         <?php endif; ?>
                     </div>
                 <?php else: ?>
-                    <div class="preview-placeholder">
-                        <div class="placeholder-title">Video</div>
-                        <div class="placeholder-meta">Pfad: <?= htmlspecialchars((string)($media['path'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                        <div class="placeholder-meta">Auflösung: <?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                        <div class="placeholder-meta">Dauer: <?= htmlspecialchars((string)($media['duration'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s | FPS: <?= htmlspecialchars((string)($media['fps'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <div class="preview-grid">
+                        <div class="preview-card">
+                            <div class="preview-label original">THUMB</div>
+                            <div class="preview-frame">
+                                <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Video-Thumbnail">
+                            </div>
+                        </div>
+                        <div class="preview-card">
+                            <div class="preview-label preview">PLAYER</div>
+                            <div class="preview-frame">
+                                <video controls preload="metadata" width="100%" src="media_stream.php?<?= http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']) ?>"></video>
+                            </div>
+                        </div>
                     </div>
                 <?php endif; ?>
                 <div class="media-infobar">
                     <span class="pill">ID: <?= (int)$media['id'] ?></span>
                     <span class="pill">Typ: <?= htmlspecialchars((string)$media['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Auflösung: <?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <?php if (!empty($media['duration'])): ?><span class="pill">Dauer: <?= htmlspecialchars(number_format((float)$media['duration'], 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span><?php endif; ?>
+                    <?php if (!empty($media['fps'])): ?><span class="pill">FPS: <?= htmlspecialchars((string)$media['fps'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                    <?php if (!empty($media['filesize'])): ?><span class="pill">Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
                     <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 </div>
             </div>
