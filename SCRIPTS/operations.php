@@ -2365,6 +2365,52 @@ function sv_normalize_forge_overrides(array $overrides): array
     return $normalized;
 }
 
+function sv_detect_forge_core_gaps(array $forgePayload): array
+{
+    $missing = [];
+
+    $prompt = trim((string)($forgePayload['prompt'] ?? ''));
+    if ($prompt === '') {
+        $missing[] = 'prompt';
+    }
+
+    $model = trim((string)($forgePayload['model'] ?? ''));
+    if ($model === '') {
+        $missing[] = 'model';
+    }
+
+    $sampler = trim((string)($forgePayload['sampler'] ?? ''));
+    if ($sampler === '') {
+        $missing[] = 'sampler';
+    }
+
+    $schedulerProvided = array_key_exists('scheduler', $forgePayload);
+    $scheduler         = trim((string)($forgePayload['scheduler'] ?? ''));
+    if ($schedulerProvided && $scheduler === '') {
+        $missing[] = 'scheduler';
+    }
+
+    if (!isset($forgePayload['steps']) || (int)$forgePayload['steps'] <= 0) {
+        $missing[] = 'steps';
+    }
+
+    $seed = trim((string)($forgePayload['seed'] ?? ''));
+    if ($seed === '') {
+        $missing[] = 'seed';
+    }
+
+    $width  = isset($forgePayload['width']) ? (int)$forgePayload['width'] : 0;
+    $height = isset($forgePayload['height']) ? (int)$forgePayload['height'] : 0;
+    if ($width <= 0 || $height <= 0) {
+        $missing[] = 'size';
+    }
+
+    return [
+        'incomplete' => $missing !== [],
+        'missing'    => $missing,
+    ];
+}
+
 function sv_is_i2i_unsuitable(string $path, array $forgePayload = []): array
 {
     if (!is_file($path)) {
@@ -2417,6 +2463,43 @@ function sv_decide_forge_mode(array $mediaRow, array $regenPlan, array $override
         return [
             'mode'   => 'txt2img',
             'reason' => 'override _sv_force_txt2img',
+            'params' => $params,
+        ];
+    }
+
+    $promptCategory = strtoupper((string)($regenPlan['category'] ?? ''));
+    $promptMissing  = !empty($regenPlan['prompt_missing']);
+    $fallbackUsed   = !empty($regenPlan['fallback_used']);
+    $coreGaps       = sv_detect_forge_core_gaps($forgePayload);
+
+    if ($promptMissing) {
+        return [
+            'mode'   => 'img2img',
+            'reason' => 'prompt missing - rely on source image',
+            'params' => $params,
+        ];
+    }
+
+    if ($promptCategory === 'C') {
+        return [
+            'mode'   => 'img2img',
+            'reason' => 'prompt quality C - keep composition via img2img',
+            'params' => $params,
+        ];
+    }
+
+    if (!empty($coreGaps['missing'])) {
+        return [
+            'mode'   => 'img2img',
+            'reason' => 'core fields incomplete: ' . implode(', ', $coreGaps['missing']),
+            'params' => $params,
+        ];
+    }
+
+    if (!$fallbackUsed && in_array($promptCategory, ['A', 'B'], true)) {
+        return [
+            'mode'   => 'txt2img',
+            'reason' => 'prompt quality ' . $promptCategory . ' without fallback',
             'params' => $params,
         ];
     }
