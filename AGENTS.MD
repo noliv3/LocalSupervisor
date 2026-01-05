@@ -83,3 +83,10 @@
 - Output-Format und -Größe müssen 1:1 dem Original entsprechen; Worker erzwingt Originalmaße/-Ext (JPEG/PNG/WEBP) und markiert Konvertierungen, UI nutzt Version-Token/Caches-Busting.
 - Negative Prompts blocken nie: explizit leere Felder per allow_empty_negative oder Flux erlauben, sonst zentraler Fallback.
 - `media_view.php` bietet pro Job manuelle Prompt-/Negative-Overrides sowie Hybrid-Prompt (Stored + Tags); Eingaben werden serverseitig begrenzt.
+
+## Laufzeit-Notizen (aktuell)
+- Scanner-HTTP liegt zentral in `scan_core.php` und akzeptiert `scanner.token` oder Legacy `scanner.api_key`/`scanner.api_key_header`; Dateien gehen als `image` und `file` raus.
+- Parser liest verschachtelte oder gepunktete Modul-Keys; NSFW bleibt `null` wenn kein Modul greift.
+- `media_tags.locked` schützt manuelle Tags: Rescan/Regeneration löschen nur Einträge mit `locked=0`.
+- Video-Unterstützung: `thumb.php` erzeugt JPEG-Thumbs via ffmpeg, `media_stream.php` liefert HTTP-Range, UI zeigt Video-Thumb+Player.
+- `SCRIPTS/selftest_cli.php` prüft Import/Parser/Video-Thumb; ffmpeg/ffprobe nötig für den Video-Teil (Exit 2 wenn ffmpeg fehlt).

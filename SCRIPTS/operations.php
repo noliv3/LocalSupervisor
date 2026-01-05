@@ -3190,7 +3190,7 @@ function sv_refresh_media_after_regen(
             $rating  = 1;
         }
 
-        $delTags = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ?');
+        $delTags = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ? AND locked = 0');
         $delTags->execute([$mediaId]);
         sv_store_tags($pdo, $mediaId, $scanTags);
         sv_store_scan_result($pdo, $mediaId, 'pixai_sensible', $nsfwScore, $scanFlags, $scanData['raw'] ?? []);

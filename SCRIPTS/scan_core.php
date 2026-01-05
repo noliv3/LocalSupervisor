@@ -9,6 +9,31 @@ declare(strict_types=1);
 require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/prompt_parser.php';
 
+/**
+ * Wert über mehrere Pfadvarianten (dotted oder verschachtelt) finden.
+ */
+function sv_get_any(array $data, array $paths)
+{
+    foreach ($paths as $path) {
+        $segments = is_array($path) ? $path : explode('.', (string)$path);
+        $current  = $data;
+        $found    = true;
+        foreach ($segments as $segment) {
+            if (is_array($current) && array_key_exists($segment, $current)) {
+                $current = $current[$segment];
+            } else {
+                $found = false;
+                break;
+            }
+        }
+        if ($found) {
+            return $current;
+        }
+    }
+
+    return null;
+}
+
 function sv_move_file(string $src, string $dest): bool
 {
     $destDir = dirname($dest);
@@ -53,52 +78,102 @@ function sv_get_image_size(string $file): array
  *   ...
  * }
  */
-function sv_interpret_scanner_response(array $data): array
+function sv_interpret_scanner_response(array $data, ?callable $logger = null): array
 {
-    $nsfw     = is_array($data['modules.nsfw_scanner'] ?? null) ? $data['modules.nsfw_scanner'] : [];
-    $tagMod   = is_array(($data['modules.tagging']['tags'] ?? null) ?? null) ? $data['modules.tagging']['tags'] : [];
-    $ddbMod   = is_array(($data['modules.deepdanbooru_tags']['tags'] ?? null) ?? null) ? $data['modules.deepdanbooru_tags']['tags'] : [];
+    $hits = [];
+    $nsfwPaths = [
+        'modules.nsfw_scanner',
+        ['modules', 'nsfw_scanner'],
+        ['modules', 'nsfw', 'scanner'],
+        ['modules', 'nsfw'],
+    ];
+    $nsfw     = sv_get_any($data, $nsfwPaths);
+    if (is_array($nsfw)) {
+        $hits[] = 'nsfw_scanner';
+    } else {
+        $nsfw = null;
+    }
+
+    $tagCandidates = [];
+    $tagSources = [
+        ['modules', 'tagging', 'tags'],
+        ['modules', 'tagging'],
+        ['modules', 'deepdanbooru_tags', 'tags'],
+        ['modules', 'deepdanbooru', 'tags'],
+        'modules.tagging.tags',
+        'modules.deepdanbooru_tags.tags',
+    ];
+    foreach ($tagSources as $path) {
+        $candidate = sv_get_any($data, [$path]);
+        if ($candidate !== null) {
+            $hits[] = is_array($path) ? implode('.', $path) : (string)$path;
+        }
+        if (is_array($candidate)) {
+            $tagCandidates[] = $candidate;
+        }
+    }
 
     // Risk-Berechnung: max(hentai,porn,sexy) + DeepDanbooru-Rating
-    $risk = 0.0;
-    foreach (['hentai', 'porn', 'sexy'] as $k) {
-        if (isset($nsfw[$k]) && is_numeric($nsfw[$k])) {
-            $risk = max($risk, (float)$nsfw[$k]);
+    $risk = null;
+    if ($nsfw !== null) {
+        $risk = 0.0;
+        foreach (['hentai', 'porn', 'sexy'] as $k) {
+            if (isset($nsfw[$k]) && is_numeric($nsfw[$k])) {
+                $risk = max($risk, (float)$nsfw[$k]);
+            }
         }
     }
 
     $allDdbLabels = [];
-    foreach ($ddbMod as $t) {
-        if (is_array($t) && isset($t['label']) && is_string($t['label'])) {
-            $allDdbLabels[] = $t['label'];
+    foreach ($tagCandidates as $tagMod) {
+        foreach ($tagMod as $t) {
+            if (is_array($t) && isset($t['label']) && is_string($t['label'])) {
+                $allDdbLabels[] = $t['label'];
+            }
         }
     }
+    if ($allDdbLabels !== []) {
+        $hits[] = 'deepdanbooru_rating';
+    }
     if (in_array('rating:explicit', $allDdbLabels, true)) {
-        $risk = max($risk, 1.0);
+        $risk = max($risk ?? 0.0, 1.0);
     } elseif (in_array('rating:questionable', $allDdbLabels, true)) {
-        $risk = max($risk, 0.7);
+        $risk = max($risk ?? 0.0, 0.7);
     }
 
     // Tags aus Tagging + DeepDanbooru bündeln
     $tagSet = [];
-    $addTag = function (?array $t) use (&$tagSet): void {
-        if (!$t) {
+    $addTag = function ($t) use (&$tagSet): void {
+        if ($t === null) {
             return;
         }
-        $label = isset($t['label']) && is_string($t['label']) ? trim($t['label']) : '';
-        if ($label === '') {
-            return;
-        }
-        $confidence = null;
-        foreach (['confidence', 'probability', 'score'] as $confKey) {
-            if (isset($t[$confKey]) && is_numeric($t[$confKey])) {
-                $confidence = (float)$t[$confKey];
-                break;
-            }
-        }
-        if ($confidence === null) {
+        if (is_string($t)) {
+            $label      = trim($t);
             $confidence = 1.0;
+            $type       = 'content';
+        } elseif (is_array($t)) {
+            $label = isset($t['label']) && is_string($t['label']) ? trim($t['label']) : '';
+            if ($label === '') {
+                $label = isset($t['name']) && is_string($t['name']) ? trim($t['name']) : '';
+            }
+            if ($label === '') {
+                return;
+            }
+            $confidence = null;
+            foreach (['confidence', 'probability', 'score'] as $confKey) {
+                if (isset($t[$confKey]) && is_numeric($t[$confKey])) {
+                    $confidence = (float)$t[$confKey];
+                    break;
+                }
+            }
+            if ($confidence === null) {
+                $confidence = 1.0;
+            }
+            $type = is_string($t['type'] ?? null) ? (string)$t['type'] : 'content';
+        } else {
+            return;
         }
+
         if ($confidence <= 0.0) {
             return;
         }
@@ -106,23 +181,22 @@ function sv_interpret_scanner_response(array $data): array
             $tagSet[$label] = [
                 'name'       => $label,
                 'confidence' => $confidence,
-                'type'       => is_string($t['type'] ?? null) ? (string)$t['type'] : 'content',
+                'type'       => $type,
             ];
         }
     };
 
-    foreach ($tagMod as $t) {
-        if (is_array($t)) {
-            $addTag($t);
-        }
-    }
-    foreach ($ddbMod as $t) {
-        if (is_array($t)) {
+    foreach ($tagCandidates as $tagMod) {
+        foreach ($tagMod as $t) {
             $addTag($t);
         }
     }
 
     $tags = array_values($tagSet);
+
+    if ($logger && $hits !== []) {
+        $logger('Scanner Parser-Pfade: ' . implode(', ', array_unique($hits)));
+    }
 
     return [
         'nsfw_score' => $risk,
@@ -141,12 +215,24 @@ function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $
 {
     $baseUrl = (string)($scannerCfg['base_url'] ?? '');
     $token   = (string)($scannerCfg['token']     ?? '');
+    $apiKey  = (string)($scannerCfg['api_key']   ?? '');
+    $apiHdr  = (string)($scannerCfg['api_key_header'] ?? '');
 
-    if ($baseUrl === '' || $token === '') {
+    if ($baseUrl === '') {
         if ($logger) {
-            $logger('Scanner nicht konfiguriert (base_url oder token fehlt).');
+            $logger('Scanner nicht konfiguriert (base_url fehlt).');
         }
         return null;
+    }
+
+    $authMode = 'none';
+    if ($token !== '') {
+        $authMode = 'token';
+    } elseif ($apiKey !== '' && $apiHdr !== '') {
+        $authMode = 'api_key';
+    }
+    if ($logger) {
+        $logger('Scanner-Aufruf mit Auth=' . $authMode . ' Felder=image+file');
     }
 
     $url = rtrim($baseUrl, '/') . '/check';
@@ -154,6 +240,8 @@ function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $
     $ch = curl_init();
     $postFields = [
         'image' => new CURLFile($file),
+        'file'  => new CURLFile($file),
+        'autorefresh' => '1',
     ];
 
     curl_setopt($ch, CURLOPT_URL, $url);
@@ -164,8 +252,13 @@ function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $
 
     $headers = [
         'Accept: application/json',
-        'Authorization: ' . $token,
     ];
+    if ($token !== '') {
+        $headers[] = 'Authorization: ' . $token;
+    }
+    if ($apiKey !== '' && $apiHdr !== '') {
+        $headers[] = $apiHdr . ': ' . $apiKey;
+    }
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
     $resp = curl_exec($ch);
@@ -196,7 +289,7 @@ function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $
         return null;
     }
 
-    return sv_interpret_scanner_response($data);
+    return sv_interpret_scanner_response($data, $logger);
 }
 
 function sv_store_tags(PDO $pdo, int $mediaId, array $tags): void
@@ -212,7 +305,9 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): void
         "SELECT id FROM tags WHERE name = ?"
     );
     $insertMediaTag = $pdo->prepare(
-        "INSERT OR REPLACE INTO media_tags (media_id, tag_id, confidence) VALUES (?, ?, ?)"
+        "INSERT INTO media_tags (media_id, tag_id, confidence, locked) VALUES (?, ?, ?, 0)"
+        . " ON CONFLICT(media_id, tag_id) DO UPDATE SET confidence = excluded.confidence"
+        . " WHERE media_tags.locked = 0"
     );
 
     foreach ($tags as $tag) {
@@ -1202,7 +1297,7 @@ function sv_rescan_media(
     try {
         $pdo->beginTransaction();
 
-        $delTags = $pdo->prepare("DELETE FROM media_tags WHERE media_id = ?");
+        $delTags = $pdo->prepare("DELETE FROM media_tags WHERE media_id = ? AND locked = 0");
         $delTags->execute([$id]);
 
         sv_store_tags($pdo, $id, $scanTags);

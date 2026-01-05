@@ -35,3 +35,9 @@ Web: index.php -> operations.php (geschützt) -> scan/rescan/filesync/prompts
 - Backend (Scan/Prompt/Tagging/Consistency) als gehärtete Basis bestätigt.
 - UI-Fixes/Modernisierung pending (Phase 3).
 - Regeneration/Delete-Mechanik geplant: Rebuild aus `media_meta` und gesteuerte Lösch-/Qualitätsprozesse fehlen noch.
+
+## Update-Log (aktueller Patch)
+- Scanner-Kompatibilität gehärtet: `scan_core.php` fasst Legacy/Token-Auth zusammen, sendet Dateien als `image`+`file` und parst sowohl gepunktete als auch verschachtelte Modul-Keys (NSFW bleibt `null` ohne Modul).
+- Tag-Locks bewahrt: `media_tags.locked` per Migration ergänzt, Rescan/Regeneration löschen nur noch `locked=0`, Inserts respektieren Locks.
+- Video-Pipeline erweitert: `thumb.php` rendert Video-JPEGs via ffmpeg, `media_stream.php` liefert HTTP-Range; `mediadb.php`/`media_view.php` zeigen Video-Thumbs, Player und Laufzeitdaten.
+- Selftest hinzugefügt: `SCRIPTS/selftest_cli.php` prüft Import/Parser/Video-Thumb (Exit 2 bei fehlendem ffmpeg) ohne externe Config.

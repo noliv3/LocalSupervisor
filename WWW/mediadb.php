@@ -252,7 +252,8 @@ ORDER BY m.id DESC';
         }
     }
 } elseif ($promptQualityFilter !== 'all') {
-    $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
+$qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
+           m.width, m.height, m.duration, m.fps, m.filesize,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
@@ -294,6 +295,7 @@ ORDER BY m.id DESC';
     $total = (int)$countStmt->fetchColumn();
 
     $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.hash,
+           m.width, m.height, m.duration, m.fps, m.filesize,
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
@@ -595,9 +597,20 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
             $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
             $streamUrl = sv_media_stream_url($id, $showAdult, false);
-            $resolution = (isset($row['prompt_width'], $row['prompt_height']) && $row['prompt_width'] && $row['prompt_height'])
-                ? ((int)$row['prompt_width'] . '×' . (int)$row['prompt_height'])
-                : 'keine Größe';
+            $mediaWidth  = isset($row['width']) ? (int)$row['width'] : null;
+            $mediaHeight = isset($row['height']) ? (int)$row['height'] : null;
+            if ($type === 'image') {
+                if ($mediaWidth && $mediaHeight) {
+                    $resolution = $mediaWidth . '×' . $mediaHeight;
+                } elseif (isset($row['prompt_width'], $row['prompt_height']) && $row['prompt_width'] && $row['prompt_height']) {
+                    $resolution = (int)$row['prompt_width'] . '×' . (int)$row['prompt_height'];
+                } else {
+                    $resolution = 'keine Größe';
+                }
+            } else {
+                $resolution = ($mediaWidth && $mediaHeight) ? ($mediaWidth . '×' . $mediaHeight) : 'keine Größe';
+            }
+            $duration = $type === 'video' && isset($row['duration']) ? (float)$row['duration'] : null;
             ?>
             <article class="media-card status-<?= $statusVariant ?>" data-media-id="<?= $id ?>">
                 <div class="card-badges">
@@ -619,15 +632,11 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                 </div>
 
                 <div class="thumb-wrap">
-                    <?php if ($type === 'image'): ?>
-                        <img
-                            src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-                            data-media-id="<?= $id ?>"
-                            loading="lazy"
-                            alt="ID <?= $id ?>">
-                    <?php else: ?>
-                        <div class="thumb-missing">Video</div>
-                    <?php endif; ?>
+                    <img
+                        src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+                        data-media-id="<?= $id ?>"
+                        loading="lazy"
+                        alt="ID <?= $id ?>">
                     <div class="card-actions">
                         <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
                     </div>
@@ -637,6 +646,9 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                     <div class="info-line">
                         <span class="info-chip"><?= $type === 'video' ? 'Video' : 'Bild' ?></span>
                         <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <?php if ($duration !== null): ?>
+                            <span class="info-chip"><?= htmlspecialchars(number_format($duration, 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span>
+                        <?php endif; ?>
                         <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">PQ <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                         <?php if ($hasMeta): ?><span class="info-chip">Meta</span><?php endif; ?>
                         <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>

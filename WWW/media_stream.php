@@ -84,9 +84,42 @@ function sv_stream_media(array $config, array $row): void
     if ($mime !== null) {
         header('Content-Type: ' . $mime);
     }
-    header('Content-Length: ' . (string)filesize($path));
+    $size = (int)filesize($path);
     header('X-Content-Type-Options: nosniff');
     header('Content-Disposition: ' . ($download ? 'attachment' : 'inline') . '; filename="' . rawurlencode($basename) . '"');
+    header('Accept-Ranges: bytes');
+
+    $rangeHeader = $_SERVER['HTTP_RANGE'] ?? null;
+    $start = 0;
+    $end   = $size > 0 ? $size - 1 : 0;
+    $status = 200;
+
+    if (is_string($rangeHeader) && preg_match('/bytes=(\\d*)-(\\d*)/i', $rangeHeader, $m)) {
+        $rangeStart = $m[1] !== '' ? (int)$m[1] : null;
+        $rangeEnd   = $m[2] !== '' ? (int)$m[2] : null;
+
+        if ($rangeStart === null && $rangeEnd !== null) {
+            $start = max(0, $size - $rangeEnd);
+            $end   = $size - 1;
+        } else {
+            $start = $rangeStart ?? 0;
+            $end   = $rangeEnd !== null ? $rangeEnd : $end;
+        }
+
+        if ($start < 0 || $end < $start || $start >= $size) {
+            http_response_code(416);
+            header('Content-Range: bytes */' . $size);
+            return;
+        }
+
+        $end    = min($end, $size - 1);
+        $status = 206;
+        http_response_code(206);
+        header('Content-Range: bytes ' . $start . '-' . $end . '/' . $size);
+    }
+
+    $length = $end - $start + 1;
+    header('Content-Length: ' . $length);
 
     $fh = fopen($path, 'rb');
     if ($fh === false) {
@@ -94,11 +127,18 @@ function sv_stream_media(array $config, array $row): void
         return;
     }
 
-    while (!feof($fh)) {
-        $chunk = fread($fh, 8192);
+    if ($start > 0) {
+        fseek($fh, $start);
+    }
+
+    $bytesLeft = $length;
+    while ($bytesLeft > 0 && !feof($fh)) {
+        $readSize = (int)min(8192, $bytesLeft);
+        $chunk = fread($fh, $readSize);
         if ($chunk === false) {
             break;
         }
+        $bytesLeft -= strlen($chunk);
         echo $chunk;
     }
     fclose($fh);
