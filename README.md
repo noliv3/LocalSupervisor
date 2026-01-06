@@ -37,13 +37,13 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## Funktionen und Workflows
 - **Scan**: `scan_core` identifiziert Typ (Bild/Video), berechnet Hash, extrahiert Basis-Metadaten, ruft den konfigurierten Scanner via HTTP, verschiebt Dateien in die gültigen SFW/NSFW-Zielpfade und schreibt `media`, `scan_results`, `tags/media_tags`, `import_log` sowie `media_meta`/`prompts`. Bekannte System-/Trash-Ordner (`$RECYCLE.BIN`, `System Volume Information`, `.Trash` u. a.) werden rekursiv übersprungen; Berechtigungsfehler erhöhen nur den Error-Zähler und brechen den Lauf nicht ab.
-- **Rescan**: Sendet vorhandene Medien erneut an den Scanner, aktualisiert Status/Ratings/NSFW und füllt fehlende Metadaten nach.
+- **Rescan**: Sendet vorhandene Medien erneut an den Scanner, aktualisiert Status/Ratings/NSFW und füllt fehlende Metadaten nach; Single-Media-Rescan läuft als Job (`rescan_media`) und nutzt dieselbe Queue wie der Scan-Worker.
 - **Filesync**: Prüft die Existenz der `media.path`-Einträge und setzt Status `active`/`missing`; optional in Batches.
 - **Prompt-Extraktion & -Normalisierung**: Kandidaten aus EXIF-Kommentaren, PNG-Text, Parameter-Strings und JSON-Blöcken werden gesammelt, gewichtet und in `prompts` strukturiert; Raw-Blöcke landen parallel in `media_meta`.
 - **Prompt-Rebuild**: Liest aktive Medien mit fehlenden Kernfeldern erneut von der Quelldatei und wendet die Prompt-Pipeline an (keine Auswertung bestehender `media_meta`-Snapshots).
 - **Tag-Pipeline**: Scanner liefert Tags/Confidence; Persistenz erfolgt in `tags`/`media_tags` mit Lock-Flag, um manuelle Korrekturen zu schützen.
 - **Medienanzeige**: `mediadb.php` liefert die produktive Card-Grid-Ansicht (Default) mit optionalem List-Mode, Filtern und Badges; `media_view.php` zeigt Details inkl. Metadaten/Prompts, `media_stream.php`/`thumb.php` streamen geprüfte Pfade (inkl. Video-Range/Video-Thumbnails via ffmpeg). Die Detailansicht ist als zweispaltige Workbench mit großem Preview, Aktions-/Status-Panels und einklappbaren Prompt/Tags/Meta-Bereichen aufgebaut.
-- **Detail-Rework**: Die Media-Detailseite bietet nun einen Version-Switch (Original/Forge-Versionen), einen editierbaren NSFW-Schalter mit Pfad-Move in die passende Root, sowie einen geführten Recreate-Block (Strategie wählen → Parameter prüfen → Preview/Replace-Job starten). Tags können im selben Screen editiert oder gelockt werden; ein Rescan-Button aktualisiert Tags/Rating und entfernt `scan_stale`. Compare A/B hebt Parameterunterschiede zwischen Versionen hervor, Job-Status wird live per Polling nachgeladen.
+- **Detail-Rework**: Die Media-Detailseite bietet nun einen Version-Switch (Original/Forge-Versionen), einen editierbaren NSFW-Schalter mit Pfad-Move in die passende Root, sowie einen geführten Recreate-Block (Strategie wählen → Parameter prüfen → Preview/Replace-Job starten). Tags können im selben Screen editiert oder gelockt werden; ein Rescan-Button reiht einen `rescan_media`-Job ein und zeigt den Jobstatus (queued/running/done/error). Compare A/B hebt Parameterunterschiede zwischen Versionen hervor, Job-Status wird live per Polling nachgeladen.
 - **Media-Grid (Legacy)**: `media.php` bleibt als ältere Grid-Variante (Hover-Aktionen Forge/Details/Missing) erhalten, wird aber nicht mehr als Hauptpfad beworben.
 - **Einzel-Rebuild / logisches Löschen**: In `media_view.php` können einzelne Medien erneut durch die Prompt-Pipeline geschickt oder als `missing` markiert werden (keine Dateilöschung, Status-Umschaltung über `operations.php`).
 - **Sicherheitsmodell**: Schreibende Webaktionen verlangen Internal-Key + IP-Whitelist; Pfadvalidierung verhindert Symlinks/Webroot-Bypass; Audit-Log dokumentiert kritische Operationen.
@@ -76,8 +76,9 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## Asynchrone Scans
 
-- Web-Trigger für Scans legen ausschließlich Jobs vom Typ `scan_path` in der Queue an und starten automatisch einen dedizierten Worker im Hintergrund.
-- Der Worker läuft rein im CLI-Kontext (`SCRIPTS/scan_worker_cli.php`) und zieht queued/running-Scans ohne Web-Timeouts ab, Status landet in `jobs.status/forge_response_json`.
+- Web-Trigger für Scans/Rescan legen Jobs (`scan_path`, `rescan_media`) in die Queue und starten automatisch einen dedizierten Worker im Hintergrund.
+- Der Worker läuft rein im CLI-Kontext (`SCRIPTS/scan_worker_cli.php`) und zieht queued/running-Jobs ohne Web-Timeouts ab, Status landet in `jobs.status/forge_response_json`; `--media-id=<id>` verarbeitet gezielt einen Rescan-Job.
+- Jobs mit Status `running`, die länger als ~30 Minuten kein Update erhalten, werden mit `job_stuck_timeout` auf `error` gesetzt.
 - Beispiel: `php SCRIPTS/scan_worker_cli.php --path="/data/import" --limit=5` verarbeitet maximal fünf anstehende Scans für den angegebenen Wurzelpfad.
 
 ## CLI- und Web-Operations

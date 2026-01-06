@@ -18,11 +18,14 @@ try {
 
 $limit      = null;
 $pathFilter = null;
+$mediaId    = null;
 foreach (array_slice($argv, 1) as $arg) {
     if (strpos($arg, '--limit=') === 0) {
         $limit = (int)substr($arg, 8);
     } elseif (strpos($arg, '--path=') === 0) {
         $pathFilter = trim(substr($arg, 7), "\"' ");
+    } elseif (strpos($arg, '--media-id=') === 0) {
+        $mediaId = (int)substr($arg, 11);
     }
 }
 
@@ -31,12 +34,14 @@ $logger = function (string $msg): void {
 };
 
 try {
-    $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger, $pathFilter);
+    $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger, $pathFilter, $mediaId);
     $line = sprintf(
-        'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d',
+        'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Rescan: %d | Scan: %d',
         (int)($summary['total'] ?? 0),
         (int)($summary['done'] ?? 0),
-        (int)($summary['error'] ?? 0)
+        (int)($summary['error'] ?? 0),
+        (int)($summary['rescan'] ?? 0),
+        (int)($summary['scan'] ?? 0)
     );
     fwrite(STDOUT, $line . PHP_EOL);
     exit(0);

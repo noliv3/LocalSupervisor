@@ -109,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             try {
                 $job     = sv_create_scan_job($pdo, $config, $lastPath, $limit, $logger);
-                $worker  = sv_spawn_scan_worker($config, $job['payload']['path'] ?? $lastPath, null, $logger);
+                $worker  = sv_spawn_scan_worker($config, $job['payload']['path'] ?? $lastPath, null, $logger, null);
                 $jobId   = (int)($job['job_id'] ?? 0);
 
                 if ($jobId > 0) {
