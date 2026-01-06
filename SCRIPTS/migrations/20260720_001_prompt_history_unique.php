@@ -48,7 +48,6 @@ $migration['run'] = function (PDO $pdo) use (&$migration): void {
         }
         throw $e;
     }
-
 };
 
 return $migration;

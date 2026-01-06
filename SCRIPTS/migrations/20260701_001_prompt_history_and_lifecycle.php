@@ -87,22 +87,6 @@ SQL
 
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_media_lifecycle_events_media ON media_lifecycle_events(media_id)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_media_lifecycle_events_type ON media_lifecycle_events(event_type)');
-
-    // Migration registrieren
-    $stmt = $pdo->prepare('SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1');
-    $stmt->execute([$migration['version']]);
-    if ($stmt->fetchColumn() !== false) {
-        return;
-    }
-
-    $insert = $pdo->prepare(
-        'INSERT INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)'
-    );
-    $insert->execute([
-        $migration['version'],
-        date('c'),
-        $migration['description'],
-    ]);
 };
 
 return $migration;

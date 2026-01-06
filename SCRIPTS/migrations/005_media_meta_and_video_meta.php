@@ -28,21 +28,6 @@ CREATE INDEX IF NOT EXISTS idx_media_meta_media
     ON media_meta(media_id);
 SQL
     );
-
-    $stmt = $pdo->prepare('SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1');
-    $stmt->execute([$migration['version']]);
-    if ($stmt->fetchColumn() !== false) {
-        return;
-    }
-
-    $insert = $pdo->prepare(
-        'INSERT INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)'
-    );
-    $insert->execute([
-        $migration['version'],
-        date('c'),
-        $migration['description'],
-    ]);
 };
 
 return $migration;

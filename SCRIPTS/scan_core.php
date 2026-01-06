@@ -17,6 +17,15 @@ function sv_record_prompt_history(
     ?string $rawText,
     string $sourceLabel
 ): void {
+    $isUniqueError = static function (Throwable $e): bool {
+        $code = (string)$e->getCode();
+        if ($code === '23000' || $code === '23505' || $code === '19') {
+            return true;
+        }
+        $msg = strtolower($e->getMessage() ?? '');
+        return str_contains($msg, 'unique constraint') || str_contains($msg, 'duplicate entry') || str_contains($msg, 'constraint failed');
+    };
+
     if ($sourceLabel === '') {
         $sourceLabel = 'unknown';
     }
@@ -34,52 +43,80 @@ function sv_record_prompt_history(
 
     $started = false;
     $externalTx = $pdo->inTransaction();
+    $attempts = 0;
+    $maxAttempts = 3;
 
-    try {
-        if (!$externalTx) {
-            $pdo->beginTransaction();
-            $started = true;
+    while ($attempts < $maxAttempts) {
+        $started = false;
+        $attempts++;
+
+        try {
+            if (!$externalTx) {
+                $pdo->beginTransaction();
+                $started = true;
+            }
+
+            $driver     = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+            $versionSql = 'SELECT COALESCE(MAX(version), 0) AS max_version FROM prompt_history WHERE media_id = ?';
+            if (in_array($driver, ['mysql', 'pgsql'], true)) {
+                $versionSql .= ' FOR UPDATE';
+            }
+
+            $versionStmt = $pdo->prepare($versionSql);
+            $versionStmt->execute([$mediaId]);
+            $version = (int)$versionStmt->fetchColumn();
+            $version = $version > 0 ? $version + 1 : 1;
+
+            $stmt = $pdo->prepare(
+                "INSERT INTO prompt_history (media_id, prompt_id, version, source, created_at, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata, raw_text)"
+                . " VALUES (:media_id, :prompt_id, :version, :source, :created_at, :prompt, :negative_prompt, :model, :sampler, :cfg_scale, :steps, :seed, :width, :height, :scheduler, :sampler_settings, :loras, :controlnet, :source_metadata, :raw_text)"
+            );
+            $stmt->execute([
+                ':media_id'        => $mediaId,
+                ':prompt_id'       => $promptId,
+                ':version'         => $version,
+                ':source'          => $sourceLabel,
+                ':created_at'      => date('c'),
+                ':prompt'          => $normalized['prompt'] ?? null,
+                ':negative_prompt' => $normalized['negative_prompt'] ?? null,
+                ':model'           => $normalized['model'] ?? null,
+                ':sampler'         => $normalized['sampler'] ?? null,
+                ':cfg_scale'       => $normalized['cfg_scale'] ?? null,
+                ':steps'           => $normalized['steps'] ?? null,
+                ':seed'            => $normalized['seed'] ?? null,
+                ':width'           => $normalized['width'] ?? null,
+                ':height'          => $normalized['height'] ?? null,
+                ':scheduler'       => $normalized['scheduler'] ?? null,
+                ':sampler_settings'=> $normalized['sampler_settings'] ?? null,
+                ':loras'           => $normalized['loras'] ?? null,
+                ':controlnet'      => $normalized['controlnet'] ?? null,
+                ':source_metadata' => $normalized['source_metadata'] ?? null,
+                ':raw_text'        => $limitedRaw,
+            ]);
+
+            if ($started) {
+                $pdo->commit();
+            }
+            return;
+        } catch (Throwable $e) {
+            if ($started && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            if ($isUniqueError($e) && $attempts < $maxAttempts) {
+                continue;
+            }
+            if ($isUniqueError($e)) {
+                sv_audit_log($pdo, 'prompt_history_conflict', 'media', $mediaId, [
+                    'attempts'   => $attempts,
+                    'error'      => $e->getMessage(),
+                    'source'     => $sourceLabel,
+                    'prompt_id'  => $promptId,
+                    'next_guess' => $version ?? null,
+                ]);
+                throw new RuntimeException('Prompt-Historie konnte nicht geschrieben werden (Versionskonflikt).', 0, $e);
+            }
+            throw $e;
         }
-
-        $versionStmt = $pdo->prepare('SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM prompt_history WHERE media_id = ?');
-        $versionStmt->execute([$mediaId]);
-        $version = (int)($versionStmt->fetchColumn() ?: 1);
-
-        $stmt = $pdo->prepare(
-            "INSERT INTO prompt_history (media_id, prompt_id, version, source, created_at, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata, raw_text)"
-            . " VALUES (:media_id, :prompt_id, :version, :source, :created_at, :prompt, :negative_prompt, :model, :sampler, :cfg_scale, :steps, :seed, :width, :height, :scheduler, :sampler_settings, :loras, :controlnet, :source_metadata, :raw_text)"
-        );
-        $stmt->execute([
-            ':media_id'        => $mediaId,
-            ':prompt_id'       => $promptId,
-            ':version'         => $version,
-            ':source'          => $sourceLabel,
-            ':created_at'      => date('c'),
-            ':prompt'          => $normalized['prompt'] ?? null,
-            ':negative_prompt' => $normalized['negative_prompt'] ?? null,
-            ':model'           => $normalized['model'] ?? null,
-            ':sampler'         => $normalized['sampler'] ?? null,
-            ':cfg_scale'       => $normalized['cfg_scale'] ?? null,
-            ':steps'           => $normalized['steps'] ?? null,
-            ':seed'            => $normalized['seed'] ?? null,
-            ':width'           => $normalized['width'] ?? null,
-            ':height'          => $normalized['height'] ?? null,
-            ':scheduler'       => $normalized['scheduler'] ?? null,
-            ':sampler_settings'=> $normalized['sampler_settings'] ?? null,
-            ':loras'           => $normalized['loras'] ?? null,
-            ':controlnet'      => $normalized['controlnet'] ?? null,
-            ':source_metadata' => $normalized['source_metadata'] ?? null,
-            ':raw_text'        => $limitedRaw,
-        ]);
-
-        if ($started) {
-            $pdo->commit();
-        }
-    } catch (Throwable $e) {
-        if ($started && $pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
-        throw $e;
     }
 }
 

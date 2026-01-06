@@ -163,6 +163,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## V2-Design (Kurzspezifikation)
 - **Prompt-Historie**: Neue Tabelle `prompt_history` mit Versionierung pro `media_id`, referenziert `prompts.id` und speichert Raw-Text plus Normalisierung. Schreibpunkte (Scan/Rescan/Forge/Manual/Snapshot) erzeugen Versionen.
+- Prompt-Historie-Writes laufen transaktional mit begrenzten Retries; Unique-Konflikte werden auditiert und führen zu einem harten Fehler statt stiller Duplikate.
 - **Prompt-Rohdaten**: `prompt_raw` wird auf 20kB begrenzt; Trunkierungen werden auditiert, Versionierung erfolgt transaktional.
 - **Snapshot-Rebuild**: `prompts_rebuild` nutzt bevorzugt gespeicherte `media_meta.prompt_raw`, fallback auf Quelldatei. Ohne Datei und Snapshot bleibt der Eintrag unverändert.
 - **Lifecycle/Quality**: Erweiterte Felder auf `media` für `lifecycle_status`, `quality_status`, `quality_score/-notes`, `deleted_at` sowie Event-Log `media_lifecycle_events` (Statuswechsel, Delete-Requests, Quality-Evals). Kein automatisches Löschen; Statusänderungen werden protokolliert.
@@ -173,6 +174,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Migrationen / Setup (V2)
 - Neue Migration `20260701_001_prompt_history_and_lifecycle.php` anlegen lassen (`php SCRIPTS/migrate.php`). Sie ergänzt Lifecycle-/Quality-Felder, Prompt-Historie und Lifecycle-Event-Log.
 - `DB/schema.sql` enthält die neuen Tabellen/Indizes; Deployment nutzt wie gehabt manuelle Migrationen (kein Auto-DDL).
+- `schema_migrations` wird ausschließlich durch `SCRIPTS/migrate.php` gepflegt; einzelne Migrationen schreiben nicht selbst in diese Tabelle, Idempotenz bleibt über IF-NOT-EXISTS-DDL erhalten.
 - Nach Migration optional `php SCRIPTS/prompts_rebuild_cli.php --limit=100` ausführen, um fehlende Prompts/Snapshots zu füllen (funktioniert auch ohne Quelldateien, wenn Snapshots vorhanden).
 
 ## Rauchtests (ohne externe Dienste)
