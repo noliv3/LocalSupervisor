@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+require_once __DIR__ . '/../SCRIPTS/operations.php';
 
 try {
     $config = sv_load_config();
@@ -61,52 +62,6 @@ function sv_normalize_adult_flag(array $input): bool
 }
 
 $allowedJobTypes = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
-
-function sv_resolve_job_asset(PDO $pdo, array $config, int $jobId, string $asset, array $allowedJobTypes, ?int $expectedMediaId = null): array
-{
-    $jobStmt = $pdo->prepare('SELECT id, media_id, type, status, forge_response_json FROM jobs WHERE id = :id');
-    $jobStmt->execute([':id' => $jobId]);
-    $jobRow = $jobStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$jobRow) {
-        throw new RuntimeException('Job nicht gefunden.');
-    }
-    if (!in_array((string)($jobRow['type'] ?? ''), $allowedJobTypes, true)) {
-        throw new RuntimeException('Job-Typ nicht erlaubt.');
-    }
-
-    $mediaId = isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : 0;
-    if ($expectedMediaId !== null && $mediaId !== $expectedMediaId) {
-        throw new RuntimeException('Job gehört zu einem anderen Medium.');
-    }
-    if ($mediaId <= 0) {
-        throw new RuntimeException('Ungültige Job-Referenz.');
-    }
-
-    $response = json_decode((string)($jobRow['forge_response_json'] ?? ''), true);
-    $result   = is_array($response['result'] ?? null) ? $response['result'] : [];
-
-    $path = null;
-    if ($asset === 'preview') {
-        $path = $result['preview_path'] ?? null;
-    } elseif ($asset === 'backup') {
-        $path = $result['backup_path'] ?? null;
-    } else {
-        $path = $result['output_path'] ?? ($result['preview_path'] ?? null);
-    }
-
-    if (!is_string($path) || trim($path) === '') {
-        throw new RuntimeException('Asset nicht vorhanden.');
-    }
-
-    sv_assert_stream_path_allowed($path, $config, 'media_stream_job_asset', true, true);
-
-    return [
-        'media_id' => $mediaId,
-        'path'     => (string)$path,
-        'status'   => (string)($jobRow['status'] ?? ''),
-    ];
-}
 
 function sv_stream_media(array $config, array $row, ?string $pathOverride = null, bool $allowPreviews = false, bool $allowBackups = false): void
 {

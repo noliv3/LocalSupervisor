@@ -1383,6 +1383,65 @@ function sv_merge_job_response_metadata(PDO $pdo, int $jobId, array $data): void
     ]);
 }
 
+function sv_resolve_job_asset(PDO $pdo, array $config, int $jobId, string $asset, array $allowedJobTypes, ?int $expectedMediaId = null): array
+{
+    $assetKey = match ($asset) {
+        'preview' => 'preview_path',
+        'backup'  => 'backup_path',
+        'output'  => 'output_path',
+        default   => null,
+    };
+
+    if ($assetKey === null) {
+        throw new RuntimeException('Ungültiges Asset angefordert.');
+    }
+
+    $jobStmt = $pdo->prepare('SELECT id, media_id, type, status, forge_response_json FROM jobs WHERE id = :id');
+    $jobStmt->execute([':id' => $jobId]);
+    $jobRow = $jobStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$jobRow) {
+        throw new RuntimeException('Job nicht gefunden.');
+    }
+    if (!in_array((string)($jobRow['type'] ?? ''), $allowedJobTypes, true)) {
+        throw new RuntimeException('Job-Typ nicht erlaubt.');
+    }
+
+    $mediaId = isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : 0;
+    if ($expectedMediaId !== null && $mediaId !== $expectedMediaId) {
+        throw new RuntimeException('Job gehört zu einem anderen Medium.');
+    }
+    if ($mediaId <= 0) {
+        throw new RuntimeException('Ungültige Job-Referenz.');
+    }
+
+    $responseRaw = (string)($jobRow['forge_response_json'] ?? '');
+    $response    = $responseRaw !== '' ? json_decode($responseRaw, true) : null;
+    if (!is_array($response)) {
+        throw new RuntimeException('Job hat keine Antwortdaten.');
+    }
+
+    $result = is_array($response['result'] ?? null) ? $response['result'] : [];
+    if ($result === []) {
+        throw new RuntimeException('Job enthält kein Result-Objekt.');
+    }
+
+    $path = $result[$assetKey] ?? null;
+    if ($path === null && $assetKey === 'output_path') {
+        $path = $result['preview_path'] ?? null;
+    }
+
+    if (!is_string($path) || trim($path) === '') {
+        throw new RuntimeException('Asset nicht vorhanden: ' . $asset);
+    }
+
+    return [
+        'media_id' => $mediaId,
+        'path'     => (string)$path,
+        'status'   => (string)($jobRow['status'] ?? ''),
+    ];
+}
+
 function sv_spawn_forge_worker_for_media(
     PDO $pdo,
     array $config,
