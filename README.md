@@ -4,8 +4,8 @@
 SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bild- und Video-Sammlungen. Es kombiniert Scanner-gestützten Import, Prompt-Pipeline, Tagging und eine Weboberfläche zur Anzeige und Steuerung wiederkehrender Abläufe. Ziel ist eine konsistente Datenbasis aus Dateien, Prompts und Metadaten ohne Abhängigkeit von Cloud-Diensten.
 
 ## Dokumentationsstruktur
-- **README.md** (dieses Dokument): Projektbeschreibung, Architektur, Setup und Betriebsabläufe.
-- **AGENTS.md**: Verbindliche Anforderungen, Prozesse, Sicherheits- und Architekturregeln.
+- **README.md** (dieses Dokument): Projektbeschreibung, Architektur, Setup und Betriebsabläufe. Ehemalige Inhalte aus `docs/SETUP.md` und `docs/ASSETS.md` sind hier integriert; es existieren keine separaten Dateien mehr.
+- **AGENTS.MD**: Verbindliche Anforderungen, Prozesse, Sicherheits- und Architekturregeln.
 - **Log.md**: Änderungs- und Revisionsprotokoll.
 
 ## Systemarchitektur
@@ -70,7 +70,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ### Quickstart (VA/VIDAX)
 - `npm install`
 - `npx va doctor` (prüft node/ffmpeg/ffprobe, python optional)
-- `npx va install` (legt `<VA_STATE_DIR>/state/...` an, kopiert fehlende Beispiel-Configs nach `state/config`, lädt Assets lt. Manifest)
+- `npx va install` (legt `<VA_STATE_DIR>/state/` mit den benötigten Unterordnern an, kopiert fehlende Beispiel-Configs nach `state/config`, lädt Assets lt. Manifest)
 - `VIDAX_CONFIG=<pfad>/vidax.json node src/vidax/server.js` (API-Key Pflicht; Install-Endpoints erreichbar)
 
 ## Asynchrone Scans
@@ -95,9 +95,9 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `php SCRIPTS/cleanup_missing_cli.php [--confirm] [--no-dry-run]` | Löscht nur nach explizitem `--confirm`; Default ist Dry-Run mit ID-Listing | Locked-Tags bleiben geschützt, jede Löschung wird auditiert |
 | `WWW/index.php` | Dashboard: Start Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz | Internal-Key + IP-Whitelist für Write-Actions |
 | `WWW/mediadb.php` | Listenansicht mit Filtern | type, prompt, meta, status, rating_min, path_substring, adult |
-| `WWW/media_view.php?id=...` | Detailansicht eines Mediums | id (Integer), optional adult |
-| `WWW/media_stream.php?path=...` | Streamt Originaldateien nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
-| `WWW/thumb.php?path=...` | Thumbnails nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
+| `WWW/media_view.php?id=<id>` | Detailansicht eines Mediums | id (Integer), optional adult |
+| `WWW/media_stream.php?path=<path>` | Streamt Originaldateien nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
+| `WWW/thumb.php?path=<path>` | Thumbnails nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
 
 ## Konsistenz-Tools
 - **UI-Indikatoren**: `mediadb.php` und `media_view.php` zeigen Badges für Prompt-Vollständigkeit, Tags und Metadaten an. Filter `incomplete=` (prompt/tags/meta/any) erleichtern die Suche nach Lücken.
@@ -153,7 +153,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Dateiablage**: Neu importierte Medien landen hashbasiert unter `<hh>/<hash>.<ext>` (erste zwei Hex-Zeichen als Ordner). Pfade werden zentral über `sv_resolve_library_path` erzeugt.
 - **Originalreferenzen**: Der ursprüngliche Importpfad/Dateiname wird als `media_meta` (`source=import`, Keys `original_path`/`original_name`) gesichert.
 - **Nachpflege**: Abweichende Altbestände können im Dashboard als `library_rename`-Jobs eingeplant und via `php SCRIPTS/library_rename_worker_cli.php --limit=N` abgearbeitet werden. Der Worker verschiebt Dateien in das neue Schema, aktualisiert `media.path` und protokolliert `rename_at`.
-- **Dupes**: Strikte Duplikate basieren auf identischem Hash. `mediadb.php` unterstützt die Filter `dupes=1` und `dupe_hash=...` und zeigt Dupe-Badges je Hash-Gruppe.
+- **Dupes**: Strikte Duplikate basieren auf identischem Hash. `mediadb.php` unterstützt die Filter `dupes=1` und `dupe_hash=<hash>` und zeigt Dupe-Badges je Hash-Gruppe.
 
 ## Bekannte Einschränkungen / Offene Baustellen
 - Prompt-Historie: Prompts werden versioniert und pro Medium als Timeline angezeigt (`prompt_history`). Jede neue Persistierung (Scan/Rescan/Forge/Manual) legt einen Versionsdatensatz mit Rohtext an, ein einfacher Diff-Vergleich steht in der Detailansicht bereit.
