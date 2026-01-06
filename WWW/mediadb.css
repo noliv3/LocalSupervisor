@@ -950,3 +950,21 @@ body.media-grid-page {
 .meta-row { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.05); border-radius:0.5rem; padding:0.45rem 0.6rem; display:flex; justify-content:space-between; gap:0.5rem; }
 
 .log-viewer { background:rgba(0,0,0,0.4); color:var(--text); padding:0.6rem; border-radius:0.6rem; border:1px solid rgba(255,255,255,0.08); white-space:pre-wrap; }
+
+.nsfw-toggle-form { display:flex; gap:0.5rem; align-items:center; }
+.nsfw-toggle-form select { padding:0.25rem 0.4rem; border-radius:0.4rem; border:1px solid #444; background:var(--card); color:var(--text); }
+.badge-row { display:flex; flex-wrap:wrap; gap:0.3rem; }
+.version-switch { display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; gap:0.5rem; flex-wrap:wrap; }
+.version-switch select { padding:0.35rem 0.5rem; border-radius:0.4rem; border:1px solid #444; background:var(--card); color:var(--text); }
+.version-meta { color:#a0aec0; font-size:0.9rem; }
+.compare-table { width:100%; border-collapse:collapse; font-size:0.9rem; margin-top:0.4rem; }
+.compare-table th, .compare-table td { border:1px solid rgba(255,255,255,0.08); padding:0.35rem 0.45rem; }
+.compare-table th { background:rgba(255,255,255,0.05); text-align:left; }
+.compare-summary { margin-top:0.4rem; font-weight:700; }
+.tag-form .button-stack.inline { gap:0.35rem; flex-wrap:wrap; }
+.lightbox { position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; z-index:50; }
+.lightbox.hidden { display:none; }
+.lightbox-inner { background:var(--card); padding:1rem; border-radius:0.75rem; max-width:90vw; max-height:90vh; overflow:auto; position:relative; }
+.lightbox-inner img { max-width:80vw; max-height:70vh; display:block; margin:0 auto 0.5rem; }
+.lightbox-close { position:absolute; top:0.35rem; right:0.35rem; background:transparent; border:1px solid #444; color:var(--text); font-size:1.2rem; cursor:pointer; border-radius:0.5rem; }
+.lightbox-meta { color:#cbd5e1; font-size:0.9rem; display:grid; gap:0.2rem; }
