@@ -5767,6 +5767,33 @@ function sv_run_simple_integrity_repair(PDO $pdo, callable $logLine): array
     return $changes;
 }
 
+function sv_run_consistency_checks(PDO $pdo, callable $logFinding, string $repairMode): void
+{
+    sv_check_orphans($pdo, $logFinding, $repairMode);
+    sv_check_duplicate_hashes($pdo, $logFinding);
+    sv_check_missing_files($pdo, $logFinding, $repairMode);
+    sv_check_tag_lock_conflicts($pdo, $logFinding);
+    sv_check_scan_metadata_gaps($pdo, $logFinding);
+    sv_check_job_state_gaps($pdo, $logFinding);
+    sv_check_prompt_history_links($pdo, $logFinding);
+}
+
+function sv_collect_consistency_findings(PDO $pdo): array
+{
+    $findings = [];
+    $collector = static function (string $checkName, string $severity, string $message) use (&$findings): void {
+        $findings[] = [
+            'check'    => $checkName,
+            'severity' => $severity,
+            'message'  => $message,
+        ];
+    };
+
+    sv_run_consistency_checks($pdo, $collector, 'report');
+
+    return $findings;
+}
+
 function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, callable $logLine): array
 {
     $repairMode = $mode === 'simple' ? 'simple' : 'report';
@@ -5817,9 +5844,7 @@ function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, cal
         }
     };
 
-    sv_check_orphans($pdo, $logFinding, $repairMode);
-    sv_check_duplicate_hashes($pdo, $logFinding);
-    sv_check_missing_files($pdo, $logFinding, $repairMode);
+    sv_run_consistency_checks($pdo, $logFinding, $repairMode);
 
     $logWriter('Konsistenzprüfung abgeschlossen.');
     if (is_resource($logHandle)) {
@@ -5933,4 +5958,244 @@ function sv_check_missing_files(PDO $pdo, callable $logFinding, string $repairMo
             }
         }
     }
+}
+
+function sv_check_tag_lock_conflicts(PDO $pdo, callable $logFinding): void
+{
+    $stmt = $pdo->query(
+        'SELECT media_id, tag_id, MIN(locked) AS min_locked, MAX(locked) AS max_locked, COUNT(*) AS cnt '
+        . 'FROM media_tags GROUP BY media_id, tag_id HAVING cnt > 1 AND min_locked <> max_locked'
+    );
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $row) {
+        $logFinding(
+            'media_tags_lock_conflict',
+            'warn',
+            'Media_ID=' . $row['media_id'] . ', Tag_ID=' . $row['tag_id'] . ', Rows=' . $row['cnt']
+        );
+    }
+}
+
+function sv_check_scan_metadata_gaps(PDO $pdo, callable $logFinding): void
+{
+    $stmt = $pdo->query(
+        "SELECT id, media_id, scanner, run_at FROM scan_results "
+        . "WHERE run_at IS NULL OR TRIM(run_at) = '' OR scanner IS NULL OR TRIM(scanner) = '' "
+        . "ORDER BY id ASC LIMIT 500"
+    );
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $logFinding(
+            'scan_missing_run_at',
+            'warn',
+            'Scan_ID=' . $row['id'] . ', Media_ID=' . $row['media_id'] . ', Scanner=' . ($row['scanner'] ?? '<leer>')
+        );
+    }
+}
+
+function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
+{
+    $allowedStatuses = ['queued', 'pending', 'created', 'running', 'done', 'error', 'canceled'];
+    $stmt = $pdo->query(
+        'SELECT id, type, status, created_at, updated_at, error_message FROM jobs ORDER BY id DESC LIMIT 500'
+    );
+
+    $now = time();
+    $stuckThreshold = $now - (SV_JOB_STUCK_MINUTES * 60);
+
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $status     = (string)($row['status'] ?? '');
+        $createdAt  = (string)($row['created_at'] ?? '');
+        $updatedAt  = (string)($row['updated_at'] ?? '');
+        $createdTs  = $createdAt !== '' ? strtotime($createdAt) : null;
+        $updatedTs  = $updatedAt !== '' ? strtotime($updatedAt) : null;
+        $id         = (int)$row['id'];
+        $type       = (string)($row['type'] ?? '');
+        $errorMsg   = trim((string)($row['error_message'] ?? ''));
+
+        if (!in_array($status, $allowedStatuses, true)) {
+            $logFinding('job_state_invalid', 'warn', 'Job #' . $id . ' (' . $type . ') mit unbekanntem Status: ' . $status);
+        }
+
+        if ($status !== 'queued' && $createdAt === '') {
+            $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') ohne created_at');
+        }
+
+        if (in_array($status, ['done', 'error', 'canceled'], true) && $updatedAt === '') {
+            $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') ohne updated_at');
+        }
+
+        if ($status === 'running' && $updatedTs !== null && $updatedTs < $stuckThreshold) {
+            $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') läuft seit ' . $row['updated_at'] . ' ohne Update');
+        }
+
+        if ($errorMsg !== '' && $status === 'running') {
+            $logFinding('job_state_gap', 'info', 'Job #' . $id . ' (' . $type . ') running mit Error-Meldung: ' . $errorMsg);
+        }
+    }
+}
+
+function sv_check_prompt_history_links(PDO $pdo, callable $logFinding): void
+{
+    $stmt = $pdo->query(
+        'SELECT ph.id, ph.media_id, ph.prompt_id FROM prompt_history ph '
+        . 'LEFT JOIN prompts p ON p.id = ph.prompt_id '
+        . 'WHERE ph.prompt_id IS NOT NULL AND p.id IS NULL'
+    );
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $row) {
+        $logFinding(
+            'prompt_history_orphan',
+            'warn',
+            'History_ID=' . $row['id'] . ', Prompt_ID=' . $row['prompt_id'] . ', Media_ID=' . $row['media_id']
+        );
+    }
+}
+
+function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
+{
+    $jobLimit = max(1, min(50, $jobLimit));
+    $findings = [];
+    try {
+        $findings = sv_collect_consistency_findings($pdo);
+    } catch (Throwable $e) {
+        $findings = [
+            [
+                'check'    => 'consistency_runner',
+                'severity' => 'error',
+                'message'  => 'Health-Checks fehlgeschlagen: ' . $e->getMessage(),
+            ],
+        ];
+    }
+
+    $issueByCheck    = [];
+    $issueBySeverity = [];
+    foreach ($findings as $finding) {
+        $issueByCheck[$finding['check']] = ($issueByCheck[$finding['check']] ?? 0) + 1;
+        $issueBySeverity[$finding['severity']] = ($issueBySeverity[$finding['severity']] ?? 0) + 1;
+    }
+
+    $mediaTotal = 0;
+    try {
+        $mediaTotal = (int)$pdo->query('SELECT COUNT(*) FROM media')->fetchColumn();
+    } catch (Throwable $e) {
+        $mediaTotal = 0;
+    }
+
+    $jobHealth = [
+        'stuck_jobs'   => 0,
+        'recent_jobs'  => [],
+        'operations'   => [],
+    ];
+
+    try {
+        $types         = array_merge(SV_FORGE_JOB_TYPES, [SV_JOB_TYPE_SCAN_PATH, SV_JOB_TYPE_RESCAN_MEDIA, SV_JOB_TYPE_LIBRARY_RENAME]);
+        $placeholder   = implode(',', array_fill(0, count($types), '?'));
+        $stmt = $pdo->prepare(
+            'SELECT id, media_id, type, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+            . 'FROM jobs WHERE type IN (' . $placeholder . ') ORDER BY id DESC LIMIT ?'
+        );
+        $idx = 1;
+        foreach ($types as $type) {
+            $stmt->bindValue($idx, $type, PDO::PARAM_STR);
+            $idx++;
+        }
+        $stmt->bindValue($idx, $jobLimit, PDO::PARAM_INT);
+        $stmt->execute();
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $row) {
+            $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
+            $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
+            $jobHealth['recent_jobs'][] = [
+                'id'          => (int)$row['id'],
+                'type'        => (string)$row['type'],
+                'status'      => (string)$row['status'],
+                'media_id'    => (int)$row['media_id'],
+                'started_at'  => (string)($row['created_at'] ?? ''),
+                'finished_at' => (string)($row['updated_at'] ?? ''),
+                'error'       => (string)($row['error_message'] ?? ($response['error'] ?? '')),
+                'meta'        => [
+                    'path'          => $payload['path'] ?? null,
+                    'limit'         => $payload['limit'] ?? null,
+                    'scanner'       => $response['scanner'] ?? null,
+                    'run_at'        => $response['run_at'] ?? null,
+                    'result'        => $response['result'] ?? null,
+                    'worker_pid'    => $response['_sv_worker_pid'] ?? null,
+                    'worker_started'=> $response['_sv_worker_started_at'] ?? null,
+                    'model'         => $payload['model'] ?? ($response['model'] ?? null),
+                ],
+            ];
+        }
+
+        $stuckStmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'running' AND (updated_at IS NULL OR updated_at < :threshold)"
+        );
+        $stuckStmt->execute([':threshold' => date('c', time() - (SV_JOB_STUCK_MINUTES * 60))]);
+        $jobHealth['stuck_jobs'] = (int)$stuckStmt->fetchColumn();
+    } catch (Throwable $e) {
+        $jobHealth['recent_jobs'] = [];
+        $jobHealth['stuck_jobs']  = 0;
+    }
+
+    try {
+        $auditActions = ['scan_start', 'rescan_start', 'filesync_start'];
+        $placeholders = implode(',', array_fill(0, count($auditActions), '?'));
+        $auditStmt = $pdo->prepare(
+            'SELECT action, details_json, created_at FROM audit_log WHERE action IN (' . $placeholders . ') '
+            . 'ORDER BY id DESC LIMIT 10'
+        );
+        foreach ($auditActions as $i => $action) {
+            $auditStmt->bindValue($i + 1, $action, PDO::PARAM_STR);
+        }
+        $auditStmt->execute();
+        $auditRows = $auditStmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($auditRows as $row) {
+            $jobHealth['operations'][] = [
+                'action'     => (string)$row['action'],
+                'created_at' => (string)($row['created_at'] ?? ''),
+                'details'    => json_decode((string)($row['details_json'] ?? ''), true) ?: [],
+            ];
+        }
+    } catch (Throwable $e) {
+        $jobHealth['operations'] = [];
+    }
+
+    $scanHealth = [
+        'missing_run_at' => 0,
+        'latest'         => [],
+    ];
+
+    try {
+        $scanHealth['missing_run_at'] = (int)$pdo
+            ->query("SELECT COUNT(*) FROM scan_results WHERE run_at IS NULL OR TRIM(run_at) = ''")
+            ->fetchColumn();
+
+        $scanStmt = $pdo->prepare(
+            'SELECT id, media_id, scanner, run_at, nsfw_score FROM scan_results ORDER BY id DESC LIMIT ?'
+        );
+        $scanStmt->bindValue(1, $jobLimit, PDO::PARAM_INT);
+        $scanStmt->execute();
+        $scanRows = $scanStmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($scanRows as $row) {
+            $scanHealth['latest'][] = [
+                'id'        => (int)$row['id'],
+                'media_id'  => (int)$row['media_id'],
+                'scanner'   => (string)($row['scanner'] ?? ''),
+                'run_at'    => (string)($row['run_at'] ?? ''),
+                'nsfw_score'=> isset($row['nsfw_score']) ? (float)$row['nsfw_score'] : null,
+            ];
+        }
+    } catch (Throwable $e) {
+        $scanHealth['latest'] = [];
+    }
+
+    return [
+        'db_health' => [
+            'media_total'       => $mediaTotal,
+            'issues_total'      => count($findings),
+            'issues_by_check'   => $issueByCheck,
+            'issues_by_severity'=> $issueBySeverity,
+        ],
+        'job_health'  => $jobHealth,
+        'scan_health' => $scanHealth,
+    ];
 }

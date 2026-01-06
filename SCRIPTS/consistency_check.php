@@ -36,7 +36,14 @@ $logger = function (string $msg): void {
 };
 
 try {
-    sv_run_consistency_operation($pdo, $config, $repairMode, $logger);
+    $result = sv_run_consistency_operation($pdo, $config, $repairMode, $logger);
+    try {
+        $health = sv_collect_health_snapshot($pdo, 5);
+        fwrite(STDOUT, "Health-Snapshot:\n");
+        fwrite(STDOUT, json_encode($health, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL);
+    } catch (Throwable $healthError) {
+        fwrite(STDERR, "Health-Snapshot fehlgeschlagen: " . $healthError->getMessage() . PHP_EOL);
+    }
 } catch (Throwable $e) {
     fwrite(STDERR, "Consistency-Fehler: " . $e->getMessage() . "\n");
     exit(1);
