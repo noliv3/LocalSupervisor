@@ -36,21 +36,6 @@ $migration['run'] = function (PDO $pdo) use (&$migration): void {
     if ($hasLocked) {
         $pdo->exec('UPDATE media_tags SET locked = 0 WHERE locked IS NULL;');
     }
-
-    $stmt = $pdo->prepare('SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1');
-    $stmt->execute([$migration['version']]);
-    if ($stmt->fetchColumn() !== false) {
-        return;
-    }
-
-    $insert = $pdo->prepare(
-        'INSERT INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)'
-    );
-    $insert->execute([
-        $migration['version'],
-        date('c'),
-        $migration['description'],
-    ]);
 };
 
 return $migration;
