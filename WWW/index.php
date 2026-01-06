@@ -20,19 +20,27 @@ $user          = $config['db']['user']       ?? null;
 $password      = $config['db']['password']   ?? null;
 $options       = $config['db']['options']    ?? [];
 
+$dbStatus = [
+    'driver'             => 'unbekannt',
+    'dsn'                => is_string($dsn) ? sv_db_redact_dsn((string)$dsn) : '',
+    'missing_tables'     => [],
+    'missing_columns'    => [],
+    'ok_tables'          => [],
+    'pending_migrations' => [],
+    'migration_error'    => null,
+];
+$dbError   = null;
+$pdo       = null;
+
 try {
     $db   = sv_db_connect($config);
     $pdo  = $db['pdo'];
     $dbDiff = sv_db_diff_schema($pdo, $db['driver']);
-    $dbStatus = [
-        'driver'          => $db['driver'],
-        'dsn'             => $db['redacted_dsn'],
-        'missing_tables'  => $dbDiff['missing_tables'],
-        'missing_columns' => $dbDiff['missing_columns'],
-        'ok_tables'       => $dbDiff['ok_tables'],
-        'pending_migrations' => [],
-        'migration_error'    => null,
-    ];
+    $dbStatus['driver']          = $db['driver'];
+    $dbStatus['dsn']             = $db['redacted_dsn'];
+    $dbStatus['missing_tables']  = $dbDiff['missing_tables'];
+    $dbStatus['missing_columns'] = $dbDiff['missing_columns'];
+    $dbStatus['ok_tables']       = $dbDiff['ok_tables'];
 
     $migrationDir = realpath(__DIR__ . '/../SCRIPTS/migrations');
     if ($migrationDir !== false && is_dir($migrationDir)) {
@@ -52,17 +60,16 @@ try {
     }
 } catch (Throwable $e) {
     http_response_code(503);
-    echo "<h1>DB-Fehler</h1>";
-    echo "<p>Konfig: " . htmlspecialchars((string)($config['_config_path'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</p>";
-    $safeMessage = htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    echo "<pre>{$safeMessage}</pre>";
-    if (!empty($configWarning)) {
-        echo "<p>" . htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</p>";
-    }
-    exit;
+    $dbError = $e->getMessage();
+    $dbStatus['migration_error'] = 'DB-Verbindung fehlgeschlagen.';
 }
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'scan_jobs') {
+    if (!$pdo instanceof PDO) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'Keine DB-Verbindung: ' . ($dbError ?? 'unbekannt')], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     $pathFilter = isset($_GET['path']) && is_string($_GET['path']) ? trim($_GET['path']) : null;
     $jobs       = sv_fetch_scan_jobs($pdo, $pathFilter, 25);
     header('Content-Type: application/json; charset=utf-8');
@@ -119,25 +126,28 @@ $knownActions = [
 $comfortRebuildLimit = 100;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    sv_require_internal_access($config, 'dashboard_action');
+    if (!$pdo instanceof PDO) {
+        $jobMessage = 'Keine DB-Verbindung: ' . ($dbError ?? 'unbekannt');
+    } else {
+        sv_require_internal_access($config, 'dashboard_action');
 
-    $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check', 'integrity_simple_repair', 'job_requeue', 'job_cancel'];
+        $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
+        $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check', 'integrity_simple_repair', 'job_requeue', 'job_cancel'];
 
-    if (!in_array($action, $allowedActions, true)) {
-        $jobMessage = 'Ungültige Aktion.';
-        $action     = '';
-    }
-
-    $logLines = [];
-
-    if ($action === 'scan_path') {
-        $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
-        $limit    = isset($_POST['scan_limit']) ? (int)$_POST['scan_limit'] : null;
-
-        if ($limit !== null && $limit <= 0) {
-            $limit = null;
+        if (!in_array($action, $allowedActions, true)) {
+            $jobMessage = 'Ungültige Aktion.';
+            $action     = '';
         }
+
+        $logLines = [];
+
+        if ($action === 'scan_path') {
+            $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
+            $limit    = isset($_POST['scan_limit']) ? (int)$_POST['scan_limit'] : null;
+
+            if ($limit !== null && $limit <= 0) {
+                $limit = null;
+            }
 
         if ($lastPath === '') {
             $jobMessage = 'Kein Pfad angegeben.';
@@ -364,142 +374,146 @@ if ($jobFilterRange !== '') {
     }
 }
 
-try {
-    $mediaStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM media')->fetchColumn();
-    $mediaStats['byType'] = $pdo->query('SELECT type, COUNT(*) AS cnt FROM media GROUP BY type ORDER BY type')
-        ->fetchAll(PDO::FETCH_ASSOC);
-    $mediaStats['nsfw'] = $pdo->query(
-        'SELECT SUM(CASE WHEN has_nsfw = 1 THEN 1 ELSE 0 END) AS nsfw, ' .
-        'SUM(CASE WHEN has_nsfw = 1 THEN 0 ELSE 1 END) AS safe FROM media'
-    )->fetch(PDO::FETCH_ASSOC);
-    $mediaStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM media GROUP BY status ORDER BY status')
-        ->fetchAll(PDO::FETCH_ASSOC);
-    $mediaStats['byRating'] = $pdo->query('SELECT rating, COUNT(*) AS cnt FROM media GROUP BY rating ORDER BY rating')
-        ->fetchAll(PDO::FETCH_ASSOC);
-} catch (Throwable $e) {
-    $statErrors['media'] = $e->getMessage();
-}
-
-try {
-    $promptStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM prompts')->fetchColumn();
-    $promptStats['mediaWithPrompts'] = (int)$pdo->query(
-        'SELECT COUNT(*) FROM media WHERE EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = media.id)'
-    )->fetchColumn();
-    $promptStats['mediaWithoutPrompts'] = (int)$pdo->query(
-        'SELECT COUNT(*) FROM media WHERE NOT EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = media.id)'
-    )->fetchColumn();
-} catch (Throwable $e) {
-    $statErrors['prompts'] = $e->getMessage();
-}
-
-try {
-    $qualityStmt = $pdo->query(
-        'SELECT p.prompt, p.width, p.height FROM prompts p '
-        . 'JOIN (SELECT MAX(id) AS id FROM prompts GROUP BY media_id) latest ON latest.id = p.id '
-        . 'ORDER BY p.id DESC LIMIT 2000'
-    );
-    $qualityRows = $qualityStmt->fetchAll(PDO::FETCH_ASSOC);
-    foreach ($qualityRows as $row) {
-        $quality = sv_prompt_quality_from_text(
-            $row['prompt'] ?? null,
-            isset($row['width']) ? (int)$row['width'] : null,
-            isset($row['height']) ? (int)$row['height'] : null
-        );
-        $class = $quality['quality_class'] ?? null;
-        if ($class !== null && isset($promptQualitySummary[$class])) {
-            $promptQualitySummary[$class]++;
-        }
-    }
-} catch (Throwable $e) {
-    $statErrors['prompt_quality'] = $e->getMessage();
-}
-
-try {
-    $tagStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM tags')->fetchColumn();
-    $tagStats['locked'] = (int)$pdo->query('SELECT SUM(CASE WHEN locked = 1 THEN 1 ELSE 0 END) FROM tags')->fetchColumn();
-    $tagStats['relations'] = (int)$pdo->query('SELECT COUNT(*) FROM media_tags')->fetchColumn();
-} catch (Throwable $e) {
-    $statErrors['tags'] = $e->getMessage();
-}
-
-try {
-    $scanStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM scan_results')->fetchColumn();
-    $scanStats['mediaWithScan'] = (int)$pdo->query(
-        'SELECT COUNT(*) FROM media WHERE EXISTS (SELECT 1 FROM scan_results s WHERE s.media_id = media.id)'
-    )->fetchColumn();
-    $scanStats['mediaWithoutScan'] = (int)$pdo->query(
-        'SELECT COUNT(*) FROM media WHERE NOT EXISTS (SELECT 1 FROM scan_results s WHERE s.media_id = media.id)'
-    )->fetchColumn();
-} catch (Throwable $e) {
-    $statErrors['scan_results'] = $e->getMessage();
-}
-
-try {
-    $metaStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM media_meta')->fetchColumn();
-    $metaStats['sources'] = (int)$pdo->query('SELECT COUNT(DISTINCT source) FROM media_meta')->fetchColumn();
-} catch (Throwable $e) {
-    $statErrors['media_meta'] = $e->getMessage();
-}
-
-try {
-    $importStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM import_log GROUP BY status ORDER BY status')
-        ->fetchAll(PDO::FETCH_ASSOC);
-} catch (Throwable $e) {
-    $statErrors['import_log'] = $e->getMessage();
-}
-
-try {
-    $jobStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM jobs GROUP BY status ORDER BY status')
-        ->fetchAll(PDO::FETCH_ASSOC);
-    $jobStats['total'] = array_sum(array_map(static function ($row) {
-        return (int)($row['cnt'] ?? 0);
-    }, $jobStats['byStatus']));
-} catch (Throwable $e) {
-    $statErrors['jobs'] = $e->getMessage();
-}
-
-try {
-    $forgeJobOverview = sv_forge_job_overview($pdo);
-} catch (Throwable $e) {
-    $statErrors['forge_jobs'] = $e->getMessage();
-}
-
-try {
-    $jobCenterJobs = sv_list_jobs($pdo, $jobCenterFilters, 100);
-} catch (Throwable $e) {
-    $jobCenterError = 'Job-Liste konnte nicht geladen werden: ' . $e->getMessage();
-}
-
-try {
-    $integrityReport = sv_collect_integrity_issues($pdo);
-    $integrityStatus['media_with_issues'] = count($integrityReport['by_media'] ?? []);
-} catch (Throwable $e) {
-    $statErrors['integrity'] = $e->getMessage();
-}
-
-try {
-    $healthSnapshot = sv_collect_health_snapshot($pdo, 6);
-} catch (Throwable $e) {
-    $healthError = $e->getMessage();
-}
-
-if (!empty($knownActions)) {
+if ($pdo instanceof PDO) {
     try {
-        $placeholders = implode(', ', array_fill(0, count($knownActions), '?'));
-        $stmt = $pdo->prepare(
-            "SELECT action, MAX(created_at) AS last_at FROM audit_log WHERE action IN ($placeholders) GROUP BY action"
+        $mediaStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM media')->fetchColumn();
+        $mediaStats['byType'] = $pdo->query('SELECT type, COUNT(*) AS cnt FROM media GROUP BY type ORDER BY type')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        $mediaStats['nsfw'] = $pdo->query(
+            'SELECT SUM(CASE WHEN has_nsfw = 1 THEN 1 ELSE 0 END) AS nsfw, ' .
+            'SUM(CASE WHEN has_nsfw = 1 THEN 0 ELSE 1 END) AS safe FROM media'
+        )->fetch(PDO::FETCH_ASSOC);
+        $mediaStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM media GROUP BY status ORDER BY status')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        $mediaStats['byRating'] = $pdo->query('SELECT rating, COUNT(*) AS cnt FROM media GROUP BY rating ORDER BY rating')
+            ->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $statErrors['media'] = $e->getMessage();
+    }
+
+    try {
+        $promptStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM prompts')->fetchColumn();
+        $promptStats['mediaWithPrompts'] = (int)$pdo->query(
+            'SELECT COUNT(*) FROM media WHERE EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = media.id)'
+        )->fetchColumn();
+        $promptStats['mediaWithoutPrompts'] = (int)$pdo->query(
+            'SELECT COUNT(*) FROM media WHERE NOT EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = media.id)'
+        )->fetchColumn();
+    } catch (Throwable $e) {
+        $statErrors['prompts'] = $e->getMessage();
+    }
+
+    try {
+        $qualityStmt = $pdo->query(
+            'SELECT p.prompt, p.width, p.height FROM prompts p '
+            . 'JOIN (SELECT MAX(id) AS id FROM prompts GROUP BY media_id) latest ON latest.id = p.id '
+            . 'ORDER BY p.id DESC LIMIT 2000'
         );
-        $stmt->execute(array_keys($knownActions));
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($rows as $row) {
-            $actionKey = $row['action'] ?? '';
-            if ($actionKey !== '' && isset($knownActions[$actionKey])) {
-                $lastRuns[$actionKey] = $row['last_at'];
+        $qualityRows = $qualityStmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($qualityRows as $row) {
+            $quality = sv_prompt_quality_from_text(
+                $row['prompt'] ?? null,
+                isset($row['width']) ? (int)$row['width'] : null,
+                isset($row['height']) ? (int)$row['height'] : null
+            );
+            $class = $quality['quality_class'] ?? null;
+            if ($class !== null && isset($promptQualitySummary[$class])) {
+                $promptQualitySummary[$class]++;
             }
         }
     } catch (Throwable $e) {
-        $statErrors['audit_log'] = $e->getMessage();
+        $statErrors['prompt_quality'] = $e->getMessage();
     }
+
+    try {
+        $tagStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM tags')->fetchColumn();
+        $tagStats['locked'] = (int)$pdo->query('SELECT SUM(CASE WHEN locked = 1 THEN 1 ELSE 0 END) FROM tags')->fetchColumn();
+        $tagStats['relations'] = (int)$pdo->query('SELECT COUNT(*) FROM media_tags')->fetchColumn();
+    } catch (Throwable $e) {
+        $statErrors['tags'] = $e->getMessage();
+    }
+
+    try {
+        $scanStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM scan_results')->fetchColumn();
+        $scanStats['mediaWithScan'] = (int)$pdo->query(
+            'SELECT COUNT(*) FROM media WHERE EXISTS (SELECT 1 FROM scan_results s WHERE s.media_id = media.id)'
+        )->fetchColumn();
+        $scanStats['mediaWithoutScan'] = (int)$pdo->query(
+            'SELECT COUNT(*) FROM media WHERE NOT EXISTS (SELECT 1 FROM scan_results s WHERE s.media_id = media.id)'
+        )->fetchColumn();
+    } catch (Throwable $e) {
+        $statErrors['scan_results'] = $e->getMessage();
+    }
+
+    try {
+        $metaStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM media_meta')->fetchColumn();
+        $metaStats['sources'] = (int)$pdo->query('SELECT COUNT(DISTINCT source) FROM media_meta')->fetchColumn();
+    } catch (Throwable $e) {
+        $statErrors['media_meta'] = $e->getMessage();
+    }
+
+    try {
+        $importStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM import_log GROUP BY status ORDER BY status')
+            ->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $statErrors['import_log'] = $e->getMessage();
+    }
+
+    try {
+        $jobStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM jobs GROUP BY status ORDER BY status')
+            ->fetchAll(PDO::FETCH_ASSOC);
+        $jobStats['total'] = array_sum(array_map(static function ($row) {
+            return (int)($row['cnt'] ?? 0);
+        }, $jobStats['byStatus']));
+    } catch (Throwable $e) {
+        $statErrors['jobs'] = $e->getMessage();
+    }
+
+    try {
+        $forgeJobOverview = sv_forge_job_overview($pdo);
+    } catch (Throwable $e) {
+        $statErrors['forge_jobs'] = $e->getMessage();
+    }
+
+    try {
+        $jobCenterJobs = sv_list_jobs($pdo, $jobCenterFilters, 100);
+    } catch (Throwable $e) {
+        $jobCenterError = 'Job-Liste konnte nicht geladen werden: ' . $e->getMessage();
+    }
+
+    try {
+        $integrityReport = sv_collect_integrity_issues($pdo);
+        $integrityStatus['media_with_issues'] = count($integrityReport['by_media'] ?? []);
+    } catch (Throwable $e) {
+        $statErrors['integrity'] = $e->getMessage();
+    }
+
+    try {
+        $healthSnapshot = sv_collect_health_snapshot($pdo, $config, 6);
+    } catch (Throwable $e) {
+        $healthError = $e->getMessage();
+    }
+
+    if (!empty($knownActions)) {
+        try {
+            $placeholders = implode(', ', array_fill(0, count($knownActions), '?'));
+            $stmt = $pdo->prepare(
+                "SELECT action, MAX(created_at) AS last_at FROM audit_log WHERE action IN ($placeholders) GROUP BY action"
+            );
+            $stmt->execute(array_keys($knownActions));
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $row) {
+                $actionKey = $row['action'] ?? '';
+                if ($actionKey !== '' && isset($knownActions[$actionKey])) {
+                    $lastRuns[$actionKey] = $row['last_at'];
+                }
+            }
+        } catch (Throwable $e) {
+            $statErrors['audit_log'] = $e->getMessage();
+        }
+    }
+} else {
+    $healthError = $dbError ?? 'Keine DB-Verbindung';
 }
 
 $cliEntries = [
@@ -616,6 +630,12 @@ $cliEntries = [
     <p style="color: #555; font-size: 0.9rem;">Hinweis: Das neue Card-Grid liegt unter <code>mediadb.php</code>; die alte Grid-Ansicht (<code>media.php</code>) bleibt nur als Legacy-Option bestehen.</p>
 
     <h2>DB-Status</h2>
+    <?php if ($dbError !== null): ?>
+        <div style="padding: 0.6rem 0.8rem; background: #f8d7da; color: #842029; border: 1px solid #f5c2c7; margin-top: 0.6rem;">
+            <strong>DB-Verbindung fehlgeschlagen:</strong> <?= htmlspecialchars($dbError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><br>
+            Quelle: <?= htmlspecialchars((string)($config['_config_path'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </div>
+    <?php endif; ?>
     <p>Treiber: <?= htmlspecialchars($dbStatus['driver'] ?? 'unbekannt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> / DSN: <?= htmlspecialchars($dbStatus['dsn'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
     <?php if (($dbStatus['missing_tables'] ?? []) === [] && ($dbStatus['missing_columns'] ?? []) === []): ?>
         <p>Schema: OK (Kerntabellen vorhanden)</p>
@@ -734,10 +754,18 @@ $cliEntries = [
             <div class="panel">
                 <div class="panel-header">DB Health</div>
                 <ul>
+                    <li>Treiber: <?= htmlspecialchars((string)($healthSnapshot['db_health']['driver'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                    <li>DSN (redacted): <?= htmlspecialchars((string)($healthSnapshot['db_health']['redacted_dsn'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                    <li>Offene Migrationen: <?= htmlspecialchars((string)($healthSnapshot['db_health']['pending_migrations_count'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
                     <li>Medien gesamt: <?= htmlspecialchars((string)($healthSnapshot['db_health']['media_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
                     <li>Funde gesamt: <?= htmlspecialchars((string)($healthSnapshot['db_health']['issues_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
                     <li>Warnungen: <?= htmlspecialchars((string)($healthSnapshot['db_health']['issues_by_severity']['warn'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
                 </ul>
+                <?php if (!empty($healthSnapshot['db_health']['migration_error'])): ?>
+                    <div class="job-error inline">Migration: <?= htmlspecialchars((string)$healthSnapshot['db_health']['migration_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php elseif (!empty($healthSnapshot['db_health']['pending_migrations'])): ?>
+                    <div class="small">Pending: <?= htmlspecialchars(implode(', ', (array)$healthSnapshot['db_health']['pending_migrations']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
                 <?php if (!empty($healthSnapshot['db_health']['issues_by_check'])): ?>
                     <table border="1" cellpadding="4" cellspacing="0">
                         <tr><th>Check</th><th>Anzahl</th></tr>
@@ -754,6 +782,10 @@ $cliEntries = [
             <div class="panel">
                 <div class="panel-header">Job Health</div>
                 <p>Stuck Jobs (running ohne frisches Update): <?= htmlspecialchars((string)($healthSnapshot['job_health']['stuck_jobs'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+                <?php if (!empty($healthSnapshot['job_health']['last_error'])): ?>
+                    <?php $last = $healthSnapshot['job_health']['last_error']; ?>
+                    <div class="job-error inline">Letzter Fehler: #<?= htmlspecialchars((string)($last['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (<?= htmlspecialchars((string)($last['type'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>): <?= htmlspecialchars((string)($last['message'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
                 <?php if (!empty($healthSnapshot['job_health']['recent_jobs'])): ?>
                     <table border="1" cellpadding="4" cellspacing="0">
                         <tr><th>ID</th><th>Typ</th><th>Status</th><th>Start</th><th>Ende</th><th>Info</th></tr>
@@ -825,6 +857,7 @@ $cliEntries = [
             <div class="panel">
                 <div class="panel-header">Scan Health</div>
                 <p>Einträge ohne run_at/scanner: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['missing_run_at'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+                <p>Letzter Scan: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['last_scan_time'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Scan-Job-Errors: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['scan_job_errors'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
                 <?php if (!empty($healthSnapshot['scan_health']['latest'])): ?>
                     <table border="1" cellpadding="4" cellspacing="0">
                         <tr><th>ID</th><th>Media</th><th>Scanner</th><th>run_at</th><th>NSFW</th></tr>

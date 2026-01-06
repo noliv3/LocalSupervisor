@@ -38,11 +38,17 @@ $logger = function (string $msg): void {
 try {
     $result = sv_run_consistency_operation($pdo, $config, $repairMode, $logger);
     try {
-        $health = sv_collect_health_snapshot($pdo, 5);
+        $health = sv_collect_health_snapshot($pdo, $config, 5);
         fwrite(STDOUT, "Health-Snapshot:\n");
         fwrite(STDOUT, json_encode($health, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL);
     } catch (Throwable $healthError) {
         fwrite(STDERR, "Health-Snapshot fehlgeschlagen: " . $healthError->getMessage() . PHP_EOL);
+    }
+
+    $findingCount = count($result['findings'] ?? []);
+    fwrite(STDOUT, "Findings gesamt: {$findingCount}\n");
+    if ($findingCount > 0) {
+        exit(2);
     }
 } catch (Throwable $e) {
     fwrite(STDERR, "Consistency-Fehler: " . $e->getMessage() . "\n");
