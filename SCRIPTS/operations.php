@@ -554,6 +554,96 @@ function sv_set_media_quality_status(
     ];
 }
 
+function sv_set_media_nsfw_status(PDO $pdo, array $config, int $mediaId, bool $hasNsfw, callable $logger): array
+{
+    $mediaStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+    $mediaStmt->execute([':id' => $mediaId]);
+    $media = $mediaStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$media) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    $type = (string)($media['type'] ?? '');
+    if (!in_array($type, ['image', 'video'], true)) {
+        throw new InvalidArgumentException('Nur Bilder/Videos unterstützen den NSFW-Schalter.');
+    }
+
+    $pathsCfg = $config['paths'] ?? [];
+    $roots    = sv_media_roots($pathsCfg);
+    $targetBase = null;
+    if ($type === 'image') {
+        $targetBase = $hasNsfw ? ($roots['images_nsfw'] ?? null) : ($roots['images_sfw'] ?? null);
+    } else {
+        $targetBase = $hasNsfw ? ($roots['videos_nsfw'] ?? null) : ($roots['videos_sfw'] ?? null);
+    }
+
+    if ($targetBase === null || $targetBase === '') {
+        throw new RuntimeException('Kein Zielpfad für NSFW-Umschaltung konfiguriert.');
+    }
+
+    $path = (string)($media['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Dateipfad nicht vorhanden.');
+    }
+
+    sv_assert_media_path_allowed($path, $pathsCfg, 'nsfw_toggle');
+
+    $normalizedTarget = rtrim(str_replace('\\', '/', $targetBase), '/');
+    $currentRootKey   = sv_media_root_for_path($path, $pathsCfg);
+    $needsMove        = true;
+
+    if ($currentRootKey !== null) {
+        $currentRoot = $roots[$currentRootKey] ?? null;
+        if ($currentRoot !== null && str_starts_with(str_replace('\\', '/', $path), $currentRoot)) {
+            $needsMove = str_starts_with($currentRootKey, 'images') ? ($hasNsfw ? $currentRootKey !== 'images_nsfw' : $currentRootKey !== 'images_sfw') : ($hasNsfw ? $currentRootKey !== 'videos_nsfw' : $currentRootKey !== 'videos_sfw');
+        }
+    }
+
+    $newPath = $path;
+    $moved   = false;
+
+    if ($needsMove) {
+        $fileName      = basename($path);
+        $candidateBase = $normalizedTarget . '/' . $fileName;
+        $candidate     = $candidateBase;
+        $i             = 1;
+        while (is_file($candidate) && $candidate !== $path) {
+            $candidate = $normalizedTarget . '/' . $i . '_' . $fileName;
+            $i++;
+        }
+
+        if (!sv_move_file($path, $candidate)) {
+            throw new RuntimeException('Datei konnte nicht verschoben werden.');
+        }
+        $newPath = str_replace('\\', '/', $candidate);
+        $moved   = true;
+    }
+
+    $stmt = $pdo->prepare('UPDATE media SET has_nsfw = ?, path = ?, status = "active" WHERE id = ?');
+    $stmt->execute([
+        $hasNsfw ? 1 : 0,
+        $newPath,
+        $mediaId,
+    ]);
+
+    sv_audit_log($pdo, 'media_nsfw_toggle', 'media', $mediaId, [
+        'previous' => (int)($media['has_nsfw'] ?? 0),
+        'current'  => $hasNsfw ? 1 : 0,
+        'moved'    => $moved,
+        'old_path' => $path,
+        'new_path' => $newPath,
+    ]);
+
+    $logger('NSFW-Status angepasst: ' . (($media['has_nsfw'] ?? 0) ? '1' : '0') . ' → ' . ($hasNsfw ? '1' : '0') . ($moved ? ' (verschoben)' : ''));
+
+    return [
+        'moved'   => $moved,
+        'old'     => (int)($media['has_nsfw'] ?? 0) === 1,
+        'current' => $hasNsfw,
+        'path'    => $newPath,
+    ];
+}
+
 function sv_fetch_prompt_snapshot(PDO $pdo, int $mediaId): ?array
 {
     try {
@@ -2211,7 +2301,7 @@ function sv_fetch_media_tags_for_regen(PDO $pdo, int $mediaId, int $limit = 8): 
 {
     $limit = max(1, $limit);
     $stmt = $pdo->prepare(
-        'SELECT t.name, t.type, t.locked, mt.confidence '
+        'SELECT t.name, t.type, mt.locked, mt.confidence '
         . 'FROM media_tags mt '
         . 'JOIN tags t ON t.id = mt.tag_id '
         . 'WHERE mt.media_id = :media_id AND mt.confidence IS NOT NULL AND mt.confidence > 0 '
@@ -2243,6 +2333,136 @@ function sv_build_tag_prompt(array $tags, int $limit = SV_FORGE_MAX_TAGS_PROMPT)
     $limited = array_slice($names, 0, max(1, $limit));
 
     return implode(', ', $limited);
+}
+
+function sv_get_or_create_tag(PDO $pdo, string $name, string $type): int
+{
+    $name = trim($name);
+    $type = trim($type) !== '' ? trim($type) : 'content';
+    if ($name === '') {
+        throw new InvalidArgumentException('Tag-Name fehlt.');
+    }
+
+    $insert = $pdo->prepare('INSERT OR IGNORE INTO tags (name, type, locked) VALUES (?, ?, 0)');
+    $insert->execute([$name, $type]);
+
+    $idStmt = $pdo->prepare('SELECT id FROM tags WHERE name = ?');
+    $idStmt->execute([$name]);
+    $tagId = (int)$idStmt->fetchColumn();
+    if ($tagId <= 0) {
+        throw new RuntimeException('Tag konnte nicht geladen werden.');
+    }
+
+    return $tagId;
+}
+
+function sv_update_media_tags(PDO $pdo, int $mediaId, string $action, array $payload, callable $logger): array
+{
+    $name       = trim((string)($payload['name'] ?? ''));
+    $type       = trim((string)($payload['type'] ?? ''));
+    $confidence = isset($payload['confidence']) && is_numeric($payload['confidence'])
+        ? max(0, (float)$payload['confidence'])
+        : null;
+    $lockFlag   = !empty($payload['lock']);
+
+    if ($name === '') {
+        throw new InvalidArgumentException('Tag-Name fehlt.');
+    }
+
+    $tagId = sv_get_or_create_tag($pdo, $name, $type);
+    $select = $pdo->prepare('SELECT locked FROM media_tags WHERE media_id = ? AND tag_id = ?');
+    $select->execute([$mediaId, $tagId]);
+    $existing = $select->fetch(PDO::FETCH_ASSOC);
+
+    if ($action === 'add') {
+        $stmt = $pdo->prepare(
+            'INSERT INTO media_tags (media_id, tag_id, confidence, locked) VALUES (?, ?, ?, ?)'
+            . ' ON CONFLICT(media_id, tag_id) DO UPDATE SET confidence = CASE WHEN media_tags.locked = 0 THEN excluded.confidence ELSE media_tags.confidence END'
+        );
+        $stmt->execute([$mediaId, $tagId, $confidence ?? 1.0, $lockFlag ? 1 : 0]);
+        $logger('Tag hinzugefügt: ' . $name . ' (' . $tagId . ')');
+        sv_audit_log($pdo, 'tag_add', 'media', $mediaId, [
+            'tag_id'     => $tagId,
+            'tag_name'   => $name,
+            'lock'       => $lockFlag,
+            'confidence' => $confidence,
+        ]);
+        return ['action' => 'added', 'tag_id' => $tagId, 'locked' => $lockFlag];
+    }
+
+    if ($existing === false) {
+        throw new RuntimeException('Tag nicht mit diesem Medium verknüpft.');
+    }
+
+    $isLocked = (int)($existing['locked'] ?? 0) === 1;
+
+    if ($action === 'remove') {
+        if ($isLocked) {
+            throw new RuntimeException('Tag ist gesperrt und kann nicht entfernt werden. Erst entsperren.');
+        }
+        $del = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ? AND tag_id = ?');
+        $del->execute([$mediaId, $tagId]);
+        sv_audit_log($pdo, 'tag_remove', 'media', $mediaId, [
+            'tag_id'   => $tagId,
+            'tag_name' => $name,
+        ]);
+        $logger('Tag entfernt: ' . $name);
+        return ['action' => 'removed', 'tag_id' => $tagId];
+    }
+
+    if ($action === 'lock' || $action === 'unlock') {
+        $newLock = $action === 'lock';
+        $upd = $pdo->prepare('UPDATE media_tags SET locked = ? WHERE media_id = ? AND tag_id = ?');
+        $upd->execute([$newLock ? 1 : 0, $mediaId, $tagId]);
+        sv_audit_log($pdo, 'tag_lock_toggle', 'media', $mediaId, [
+            'tag_id'   => $tagId,
+            'tag_name' => $name,
+            'locked'   => $newLock,
+        ]);
+        $logger('Tag ' . ($newLock ? 'gesperrt' : 'entsperrt') . ': ' . $name);
+        return ['action' => 'lock', 'tag_id' => $tagId, 'locked' => $newLock];
+    }
+
+    throw new RuntimeException('Unbekannte Tag-Aktion.');
+}
+
+function sv_rescan_single_media(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
+    $mediaStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+    $mediaStmt->execute([':id' => $mediaId]);
+    $mediaRow = $mediaStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$mediaRow) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    $path = (string)($mediaRow['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Datei nicht gefunden oder Pfad fehlt.');
+    }
+
+    $pathsCfg      = $config['paths'] ?? [];
+    $scannerCfg    = $config['scanner'] ?? [];
+    $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
+
+    sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_single');
+
+    $ok = sv_rescan_media($pdo, $mediaRow, $pathsCfg, $scannerCfg, $nsfwThreshold, $logger);
+    if ($ok) {
+        $pdo->prepare("DELETE FROM media_meta WHERE media_id = ? AND meta_key = 'scan_stale'")->execute([$mediaId]);
+        sv_audit_log($pdo, 'media_rescan', 'media', $mediaId, [
+            'path' => $path,
+        ]);
+        $logger('Rescan abgeschlossen.');
+    } else {
+        sv_audit_log($pdo, 'media_rescan_failed', 'media', $mediaId, [
+            'path' => $path,
+        ]);
+        $logger('Rescan fehlgeschlagen.');
+    }
+
+    return [
+        'success' => $ok,
+    ];
 }
 
 function sv_analyze_prompt_quality(?array $promptRow, array $tags): array
@@ -2543,7 +2763,13 @@ function sv_normalize_forge_overrides(array $overrides): array
         'scheduler' => $normalizeString($overrides['_sv_scheduler'] ?? null, 200),
         'model' => $normalizeString($overrides['_sv_model'] ?? null, 200),
         'use_hybrid' => !empty($overrides['_sv_use_hybrid'] ?? $overrides['use_hybrid'] ?? null),
+        'prompt_strategy' => $normalizeString($overrides['_sv_recreate_strategy'] ?? $overrides['prompt_strategy'] ?? null, 40),
     ];
+
+    $allowedStrategies = ['prompt_only', 'img2img', 'tags', 'hybrid'];
+    if ($normalized['prompt_strategy'] !== null && !in_array($normalized['prompt_strategy'], $allowedStrategies, true)) {
+        $normalized['prompt_strategy'] = null;
+    }
 
     return $normalized;
 }
@@ -2634,6 +2860,20 @@ function sv_decide_forge_mode(array $mediaRow, array $regenPlan, array $override
     $path = (string)($mediaRow['path'] ?? '');
     $type = (string)($mediaRow['type'] ?? '');
 
+    $strategy = $overrides['prompt_strategy'] ?? null;
+    if (in_array($strategy, ['prompt_only', 'tags'], true)) {
+        return [
+            'mode'   => 'txt2img',
+            'reason' => 'strategy ' . $strategy,
+            'params' => $params,
+        ];
+    }
+
+    if ($strategy === 'img2img') {
+        $mode   = 'img2img';
+        $reason = 'strategy img2img';
+    }
+
     if ($type !== 'image' || $path === '' || !is_file($path)) {
         return [
             'mode'   => 'txt2img',
@@ -2712,6 +2952,7 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
     $manualPrompt     = sv_normalize_manual_field($overrides['manual_prompt'] ?? null, 2000);
     $manualPromptSet  = !empty($overrides['manual_prompt_set']);
     $useHybrid        = !empty($overrides['use_hybrid']);
+    $strategy         = $overrides['prompt_strategy'] ?? null;
     $noHumans         = sv_tag_has_no_humans_flag($tags);
     $tagPromptData    = sv_build_grouped_tag_prompt($tags, $noHumans);
     $tagPrompt        = is_array($tagPromptData) ? ($tagPromptData['prompt'] ?? null) : null;
@@ -2722,6 +2963,21 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
     $fallbackUsed    = false;
     $promptSource    = ($manualPromptSet && $manualPrompt !== '') ? 'manual' : 'stored_prompt';
     $assessment      = null;
+    $allowFallback   = $strategy !== 'prompt_only';
+
+    if ($strategy === 'tags') {
+        if ($tagPrompt === null) {
+            throw new RuntimeException('Tag-Prompt nicht verfügbar.');
+        }
+        $effectivePrompt = $tagPrompt;
+        $tagPromptUsed   = true;
+        $fallbackUsed    = true;
+        $promptSource    = 'tags_prompt';
+    } elseif ($strategy === 'hybrid' && $tagPrompt !== null && $originalPrompt !== '') {
+        $effectivePrompt = $originalPrompt . ', ' . $tagPrompt;
+        $tagPromptUsed   = true;
+        $promptSource    = 'hybrid';
+    }
 
     if ($manualPrompt === '' && $effectivePrompt === '' && $tagPrompt !== null) {
         $effectivePrompt = $tagPrompt;
@@ -2745,13 +3001,13 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
     $quality     = $assessment['quality_class'];
     $tagFragment = $assessment['tag_based_suggestion'] ?? '';
 
-    if ($manualPrompt === '') {
-        if ($quality === 'C') {
+    if ($manualPrompt === '' && $strategy !== 'tags') {
+        if ($quality === 'C' && $allowFallback) {
             $effectivePrompt = $tagPrompt !== null ? 'Detailed reconstruction, ' . $tagPrompt : $effectivePrompt;
             $promptSource    = 'tags_prompt';
             $fallbackUsed    = true;
             $tagPromptUsed   = $tagPrompt !== null;
-        } elseif ($useHybrid && $tagPrompt !== null && $originalPrompt !== '') {
+        } elseif (($useHybrid || $strategy === 'hybrid') && $tagPrompt !== null && $originalPrompt !== '') {
             $effectivePrompt = $originalPrompt . ', ' . $tagPrompt;
             $promptSource    = 'hybrid';
             $tagPromptUsed   = true;
@@ -2759,7 +3015,7 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
             $effectivePrompt = $tagPrompt;
             $promptSource    = 'tags_prompt';
             $tagPromptUsed   = true;
-        } elseif ($promptSource === 'stored_prompt' && $quality !== 'A' && $quality !== 'B' && $tagPrompt !== null) {
+        } elseif ($promptSource === 'stored_prompt' && $quality !== 'A' && $quality !== 'B' && $tagPrompt !== null && $allowFallback) {
             $effectivePrompt = $tagPrompt;
             $promptSource    = 'tags_prompt';
             $tagPromptUsed   = true;
@@ -2791,6 +3047,7 @@ function sv_prepare_forge_regen_prompt(array $mediaRow, array $tags, callable $l
         'prompt_source'   => $promptSource,
         'tags_used_count' => is_array($tagPromptData) ? ($tagPromptData['tags_used_count'] ?? 0) : 0,
         'tags_limited'    => is_array($tagPromptData) ? (bool)($tagPromptData['limited'] ?? false) : false,
+        'strategy'        => $strategy,
     ];
 }
 
@@ -4172,14 +4429,28 @@ function sv_get_media_versions(PDO $pdo, int $mediaId): array
         'source'          => 'import',
         'status'          => 'baseline',
         'timestamp'       => (string)($mediaRow['created_at'] ?? ($mediaRow['imported_at'] ?? '')),
+        'version_token'   => (string)($mediaRow['hash'] ?? ($mediaRow['created_at'] ?? 'base')),
         'model_requested' => null,
         'model_used'      => null,
+        'sampler'         => null,
+        'scheduler'       => null,
+        'steps'           => null,
+        'cfg_scale'       => null,
+        'seed'            => null,
+        'width'           => $mediaRow['width'] ?? null,
+        'height'          => $mediaRow['height'] ?? null,
         'prompt_category' => null,
         'fallback_used'   => false,
         'backup_path'     => null,
         'backup_exists'   => false,
         'hash_old'        => null,
         'hash_new'        => $mediaRow['hash'] ?? null,
+        'hash_display'    => $mediaRow['hash'] ?? null,
+        'prompt'          => null,
+        'negative_prompt' => null,
+        'mode'            => null,
+        'strategy'        => null,
+        'output_path'     => $mediaRow['path'] ?? null,
         'job_id'          => null,
     ]];
 
@@ -4196,21 +4467,34 @@ function sv_get_media_versions(PDO $pdo, int $mediaId): array
     $currentIndex = 0;
 
     foreach ($rows as $row) {
-        $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
-        $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+        $payloadRaw  = json_decode((string)($row['forge_request_json'] ?? ''), true);
+        $responseRaw = json_decode((string)($row['forge_response_json'] ?? ''), true);
+        $payload     = is_array($payloadRaw) ? $payloadRaw : [];
+        $response    = is_array($responseRaw) ? $responseRaw : [];
 
-        $regenPlan = is_array($payload) ? sv_extract_regen_plan_from_payload($payload) : [
+        $regenPlan = $payload !== [] ? sv_extract_regen_plan_from_payload($payload) : [
             'category'        => null,
             'fallback_used'   => null,
             'tag_prompt_used' => null,
         ];
 
-        $requestedModel = is_array($payload)
-            ? ($payload['_sv_requested_model'] ?? ($payload['model'] ?? null))
-            : null;
-        $resolvedModel = is_array($response) && isset($response['result']['model'])
+        $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
+        $resolvedModel = isset($response['result']['model'])
             ? $response['result']['model']
-            : (is_array($payload) ? ($payload['model'] ?? null) : null);
+            : ($payload['model'] ?? null);
+        $resultMeta = is_array($response['result'] ?? null) ? $response['result'] : [];
+        $generationMode = $response['generation_mode']
+            ?? ($payload['_sv_generation_mode'] ?? $payload['_sv_decided_mode'] ?? null)
+            ?? null;
+        $versionToken = $resultMeta['version_token']
+            ?? $resultMeta['output_mtime']
+            ?? $resultMeta['preview_hash']
+            ?? $row['updated_at']
+            ?? $row['id']
+            ?? null;
+        $promptEffective = $resultMeta['prompt_effective'] ?? $regenPlan['final_prompt'] ?? ($payload['prompt'] ?? null);
+        $negativeEffective = $payload['negative_prompt'] ?? null;
+        $outputPath = $resultMeta['output_path'] ?? ($resultMeta['preview_path'] ?? null);
 
         $promptCategory = $response['result']['prompt_category']
             ?? $regenPlan['category']
@@ -4247,12 +4531,26 @@ function sv_get_media_versions(PDO $pdo, int $mediaId): array
             'timestamp'       => (string)($row['updated_at'] ?? $jobCreatedAt),
             'model_requested' => $requestedModel,
             'model_used'      => $resolvedModel,
+            'sampler'         => $payload['sampler'] ?? null,
+            'scheduler'       => $payload['scheduler'] ?? null,
+            'steps'           => $payload['steps'] ?? null,
+            'cfg_scale'       => $payload['cfg_scale'] ?? null,
+            'seed'            => $payload['seed'] ?? null,
+            'width'           => $payload['width'] ?? null,
+            'height'          => $payload['height'] ?? null,
             'prompt_category' => $promptCategory,
             'fallback_used'   => $fallbackUsed,
             'backup_path'     => $backupPath,
             'backup_exists'   => $backupPath !== null && is_file((string)$backupPath),
             'hash_old'        => $hashOld,
             'hash_new'        => $hashNew,
+            'hash_display'    => $hashNew ?? $hashOld,
+            'prompt'          => $promptEffective,
+            'negative_prompt' => $negativeEffective,
+            'mode'            => $generationMode ?? ($payload['_sv_mode'] ?? null),
+            'strategy'        => $regenPlan['strategy'] ?? null,
+            'output_path'     => $outputPath,
+            'version_token'   => $versionToken,
             'job_id'          => (int)($row['id'] ?? 0),
         ];
 

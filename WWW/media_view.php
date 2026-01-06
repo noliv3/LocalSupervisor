@@ -244,6 +244,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $actionSuccess = false;
                 $actionMessage = 'Forge-Regeneration nicht möglich: ' . $e->getMessage();
             }
+        } elseif ($action === 'toggle_nsfw') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'nsfw_toggle', $actionLogs, 5);
+            $target = isset($_POST['nsfw_value']) && (string)$_POST['nsfw_value'] === '1';
+            $result = sv_set_media_nsfw_status($pdo, $config, $id, $target, $logger);
+            $actionSuccess = true;
+            $actionMessage = 'NSFW-Status aktualisiert: ' . ($result['old'] ? '1' : '0') . ' → ' . ($result['current'] ? '1' : '0');
+        } elseif ($action === 'rescan_tags') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'rescan_single', $actionLogs, 10);
+            $result = sv_rescan_single_media($pdo, $config, $id, $logger);
+            $actionSuccess = (bool)($result['success'] ?? false);
+            $actionMessage = $actionSuccess ? 'Rescan abgeschlossen.' : 'Rescan fehlgeschlagen.';
+        } elseif (in_array($action, ['tag_add', 'tag_remove', 'tag_lock', 'tag_unlock'], true)) {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'tag_edit', $actionLogs, 10);
+            $payload = [
+                'name'       => $_POST['tag_name'] ?? '',
+                'type'       => $_POST['tag_type'] ?? '',
+                'confidence' => isset($_POST['tag_confidence']) ? (float)$_POST['tag_confidence'] : null,
+                'lock'       => !empty($_POST['tag_lock_flag']),
+            ];
+            $tagAction = match ($action) {
+                'tag_add'    => 'add',
+                'tag_remove' => 'remove',
+                'tag_lock'   => 'lock',
+                'tag_unlock' => 'unlock',
+                default      => 'add',
+            };
+            $result = sv_update_media_tags($pdo, $id, $tagAction, $payload, $logger);
+            $actionSuccess = true;
+            $actionMessage = 'Tag-Aktion: ' . $result['action'] . ' (' . ($payload['name'] ?? '') . ')';
         } elseif ($action === 'quality_flag') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'quality_flag', $actionLogs, 5);
             $allowedQuality = [SV_QUALITY_OK, SV_QUALITY_REVIEW, SV_QUALITY_BLOCKED, SV_QUALITY_UNKNOWN];
@@ -314,7 +343,7 @@ $metaStmt->execute([':id' => $id]);
 $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
 $hasStaleScan = false;
 
-$tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :id ORDER BY t.type, t.name');
+$tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence, mt.locked FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :id ORDER BY t.type, t.name');
 $tagStmt->execute([':id' => $id]);
 $tags = $tagStmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -322,6 +351,51 @@ $consistencyStatus = sv_media_consistency_status($pdo, $id);
 $issueReport = sv_collect_integrity_issues($pdo, [$id]);
 $mediaIssues = $issueReport['by_media'][$id] ?? [];
 $versions = sv_get_media_versions($pdo, $id);
+$activeVersionIndex = 0;
+foreach ($versions as $idx => $version) {
+    if (!empty($version['is_current'])) {
+        $activeVersionIndex = $idx;
+    }
+}
+$requestedVersion = isset($_GET['version']) ? (int)$_GET['version'] : $activeVersionIndex;
+if ($requestedVersion >= 0 && $requestedVersion < count($versions)) {
+    $activeVersionIndex = $requestedVersion;
+}
+$activeVersion = $versions[$activeVersionIndex] ?? $versions[0];
+$activePath = (string)($activeVersion['output_path'] ?? ($media['path'] ?? ''));
+if ($activePath === '' || !is_file($activePath)) {
+    $activePath = (string)($media['path'] ?? '');
+}
+$activeHash = (string)($activeVersion['hash_display'] ?? ($media['hash'] ?? ''));
+$activeWidth = $activeVersion['width'] ?? $media['width'] ?? null;
+$activeHeight = $activeVersion['height'] ?? $media['height'] ?? null;
+$activeModel = $activeVersion['model_used'] ?? $activeVersion['model_requested'] ?? ($prompt['model'] ?? '');
+$activeSampler = $activeVersion['sampler'] ?? ($prompt['sampler'] ?? '');
+$activeScheduler = $activeVersion['scheduler'] ?? ($prompt['scheduler'] ?? '');
+$activeSeed = $activeVersion['seed'] ?? ($prompt['seed'] ?? '');
+$activeSteps = $activeVersion['steps'] ?? ($prompt['steps'] ?? '');
+$activeCfg = $activeVersion['cfg_scale'] ?? ($prompt['cfg_scale'] ?? '');
+$versionCompareA = isset($_GET['compare_a']) ? (int)$_GET['compare_a'] : $activeVersionIndex;
+$versionCompareB = isset($_GET['compare_b']) ? (int)$_GET['compare_b'] : $activeVersionIndex;
+if ($versionCompareA < 0 || $versionCompareA >= count($versions)) {
+    $versionCompareA = $activeVersionIndex;
+}
+if ($versionCompareB < 0 || $versionCompareB >= count($versions)) {
+    $versionCompareB = $activeVersionIndex;
+}
+$compareVersionA = $versions[$versionCompareA] ?? null;
+$compareVersionB = $versions[$versionCompareB] ?? null;
+$versionDiff = [];
+if ($compareVersionA && $compareVersionB && $versionCompareA !== $versionCompareB) {
+    $fields = ['model_used', 'sampler', 'scheduler', 'steps', 'cfg_scale', 'seed', 'width', 'height', 'hash_display', 'prompt_category', 'mode'];
+    foreach ($fields as $field) {
+        $aVal = $compareVersionA[$field] ?? ($compareVersionA['model_requested'] ?? null);
+        $bVal = $compareVersionB[$field] ?? ($compareVersionB['model_requested'] ?? null);
+        if ($aVal !== $bVal) {
+            $versionDiff[] = [$field, $aVal, $bVal];
+        }
+    }
+}
 
 $groupedMeta = [];
 foreach ($metaRows as $meta) {
@@ -427,29 +501,38 @@ $needsRebuild   = !$consistencyStatus['prompt_complete'];
 $negativePrompt = trim((string)($prompt['negative_prompt'] ?? ''));
 $showRebuildButton = $needsRebuild || (!empty($prompt['source_metadata']) && $promptText !== '');
 
+$displayPromptText    = trim((string)($activeVersion['prompt'] ?? $promptText));
+$displayNegativePrompt = trim((string)($activeVersion['negative_prompt'] ?? $negativePrompt));
 $promptParams = [];
-if ($promptExists) {
-    if (($prompt['model'] ?? '') !== '') {
-        $promptParams['Model'] = (string)$prompt['model'];
-    }
-    if (($prompt['sampler'] ?? '') !== '') {
-        $promptParams['Sampler'] = (string)$prompt['sampler'];
-    }
-    if ($prompt['steps'] !== null) {
-        $promptParams['Steps'] = (string)$prompt['steps'];
-    }
-    if ($prompt['cfg_scale'] !== null) {
-        $promptParams['CFG Scale'] = (string)$prompt['cfg_scale'];
-    }
-    if (($prompt['seed'] ?? '') !== '') {
-        $promptParams['Seed'] = (string)$prompt['seed'];
-    }
-    if ($prompt['width'] !== null || $prompt['height'] !== null) {
-        $promptParams['Size'] = trim((string)($prompt['width'] ?? '-')) . ' × ' . trim((string)($prompt['height'] ?? '-'));
-    }
-    if (($prompt['scheduler'] ?? '') !== '') {
-        $promptParams['Scheduler'] = (string)$prompt['scheduler'];
-    }
+$paramModel     = $activeModel ?: ($prompt['model'] ?? '');
+$paramSampler   = $activeSampler ?: ($prompt['sampler'] ?? '');
+$paramScheduler = $activeScheduler ?: ($prompt['scheduler'] ?? '');
+$paramSteps     = $activeSteps ?: ($prompt['steps'] ?? null);
+$paramCfg       = $activeCfg ?: ($prompt['cfg_scale'] ?? null);
+$paramSeed      = $activeSeed ?: ($prompt['seed'] ?? '');
+$paramWidth     = $activeWidth ?? ($prompt['width'] ?? null);
+$paramHeight    = $activeHeight ?? ($prompt['height'] ?? null);
+
+if (($paramModel ?? '') !== '') {
+    $promptParams['Model'] = (string)$paramModel;
+}
+if (($paramSampler ?? '') !== '') {
+    $promptParams['Sampler'] = (string)$paramSampler;
+}
+if ($paramSteps !== null && $paramSteps !== '') {
+    $promptParams['Steps'] = (string)$paramSteps;
+}
+if ($paramCfg !== null && $paramCfg !== '') {
+    $promptParams['CFG Scale'] = (string)$paramCfg;
+}
+if (($paramSeed ?? '') !== '') {
+    $promptParams['Seed'] = (string)$paramSeed;
+}
+if ($paramWidth !== null || $paramHeight !== null) {
+    $promptParams['Size'] = trim((string)($paramWidth ?? '-')) . ' × ' . trim((string)($paramHeight ?? '-'));
+}
+if (($paramScheduler ?? '') !== '') {
+    $promptParams['Scheduler'] = (string)$paramScheduler;
 }
 $promptQuality = sv_analyze_prompt_quality($prompt, $tags);
 $promptQualityIssues = array_slice($promptQuality['issues'] ?? [], 0, 3);
@@ -497,6 +580,8 @@ $isMissing = (int)($media['is_missing'] ?? 0) === 1 || (string)($media['status']
 $hasFileIssue = array_reduce($mediaIssues, static function (bool $carry, array $issue): bool {
     return $carry || ((string)($issue['type'] ?? '') === 'file');
 }, false);
+$fileTitle = $media['path'] ? basename((string)$media['path']) : ('Media #' . $id);
+$nsfwFlag = (int)($media['has_nsfw'] ?? 0) === 1;
 $showForgeButton = $type === 'image';
 $forgeInfoNotes = [];
 if (!$hasInternalAccess) {
@@ -512,9 +597,9 @@ if (!$consistencyStatus['prompt_complete']) {
     $forgeInfoNotes[] = 'Prompt unvollständig; Fallback/Tag-Rebuild greift in operations.php.';
 }
 $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
-$thumbVersion = (string)($media['hash'] ?? '');
-if ($thumbVersion === '' && is_file((string)($media['path'] ?? ''))) {
-    $thumbVersion = (string)@filemtime((string)$media['path']);
+$thumbVersion = (string)($activeVersion['version_token'] ?? $activeHash ?? '');
+if ($thumbVersion === '' && is_file($activePath)) {
+    $thumbVersion = (string)@filemtime($activePath);
 }
 if ($thumbVersion !== '') {
     $thumbUrl .= (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode($thumbVersion);
@@ -620,12 +705,28 @@ if (is_array($latestJobRequest)) {
 
     <header class="media-header">
         <div class="title-wrap">
-            <h1>Media #<?= (int)$id ?></h1>
-            <div class="subtitle">Typ: <?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <h1><?= htmlspecialchars($fileTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></h1>
+            <div class="subtitle">ID <?= (int)$id ?> • Typ: <?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
         </div>
         <div class="header-info">
-            <span class="pill">FSK18: <?= (int)($media['has_nsfw'] ?? 0) === 1 ? 'ja' : 'nein' ?></span>
-            <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+            <form method="post" class="nsfw-toggle-form">
+                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                <input type="hidden" name="action" value="toggle_nsfw">
+                <label>FSK18
+                    <select name="nsfw_value" <?= $hasInternalAccess ? '' : 'disabled' ?>>
+                        <option value="0" <?= !$nsfwFlag ? 'selected' : '' ?>>nein</option>
+                        <option value="1" <?= $nsfwFlag ? 'selected' : '' ?>>ja</option>
+                    </select>
+                </label>
+                <button class="btn secondary small" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Speichern</button>
+            </form>
+            <div class="badge-row">
+                <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="pill">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <?php if ($hasStaleScan): ?><span class="pill pill-warn">Scan stale</span><?php endif; ?>
+                <?php if (!empty($media['rating'])): ?><span class="pill">Rating <?= htmlspecialchars((string)$media['rating'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+            </div>
         </div>
     </header>
 
@@ -651,12 +752,30 @@ if (is_array($latestJobRequest)) {
     <div class="media-main-grid">
         <div class="media-left">
             <div class="panel media-visual" id="visual">
+                <div class="version-switch">
+                    <label>Version auswählen
+                        <select id="version-select">
+                            <?php foreach ($versions as $idx => $version): ?>
+                                <option value="<?= (int)$idx ?>" <?= $idx === $activeVersionIndex ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars('V' . (int)$version['version_index'] . ' · ' . ($version['status'] ?? '')) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <div class="version-meta">Aktiv: <?= htmlspecialchars($activeVersion['source'] ?? 'import', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= !empty($activeVersion['status']) ? ' · ' . htmlspecialchars((string)$activeVersion['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
+                </div>
                 <?php if ($type === 'image'): ?>
                     <div class="preview-grid">
                         <div class="preview-card">
-                            <div class="preview-label original">ORIGINAL</div>
+                            <div class="preview-label original">AKTIVE VERSION</div>
                             <div class="preview-frame">
-                                <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau">
+                                <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
+                                    'path'   => $activePath,
+                                    'hash'   => $activeHash,
+                                    'width'  => $activeWidth,
+                                    'height' => $activeHeight,
+                                    'size'   => (int)($media['filesize'] ?? 0),
+                                ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                             </div>
                         </div>
                         <?php if ($latestPreview !== null): ?>
@@ -706,10 +825,12 @@ if (is_array($latestJobRequest)) {
                 <div class="media-infobar">
                     <span class="pill">ID: <?= (int)$media['id'] ?></span>
                     <span class="pill">Typ: <?= htmlspecialchars((string)$media['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="pill">Auflösung: <?= htmlspecialchars((string)($media['width'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($media['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="pill">Auflösung: <?= htmlspecialchars((string)($activeWidth ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($activeHeight ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php if (!empty($media['duration'])): ?><span class="pill">Dauer: <?= htmlspecialchars(number_format((float)$media['duration'], 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span><?php endif; ?>
                     <?php if (!empty($media['fps'])): ?><span class="pill">FPS: <?= htmlspecialchars((string)$media['fps'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                     <?php if (!empty($media['filesize'])): ?><span class="pill">Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
+                    <?php if ($activeHash !== ''): ?><span class="pill">Hash: <?= htmlspecialchars($activeHash, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                    <?php if ($activePath !== ''): ?><span class="pill pill-muted" title="<?= htmlspecialchars($activePath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad gesetzt</span><?php endif; ?>
                     <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -747,7 +868,17 @@ if (is_array($latestJobRequest)) {
                     <input type="hidden" name="action" value="forge_regen">
                     <div class="forge-grid">
                         <div class="form-block">
-                            <div class="label-row">Mode</div>
+                            <div class="label-row">Verfahren (Schritt 1)</div>
+                            <div class="radio-row vertical">
+                                <label><input type="radio" name="_sv_recreate_strategy" value="img2img" checked> Img2img (aktuelle Version als Input)</label>
+                                <label><input type="radio" name="_sv_recreate_strategy" value="prompt_only"> Prompt-only (txt2img)</label>
+                                <label><input type="radio" name="_sv_recreate_strategy" value="tags" <?= $tags === [] ? 'disabled' : '' ?>> Tags-to-Prompt<?= $tags === [] ? ' (keine Tags)' : '' ?></label>
+                                <label><input type="radio" name="_sv_recreate_strategy" value="hybrid"> Hybrid (Prompt + Tags gedrosselt)</label>
+                            </div>
+                            <div class="hint">Strategie steuert Prompt-Quelle und Mode-Entscheidung.</div>
+                        </div>
+                        <div class="form-block">
+                            <div class="label-row">Mode (Schritt 2)</div>
                             <div class="radio-row">
                                 <label><input type="radio" name="_sv_mode" value="preview" checked> Preview (Standard)</label>
                                 <label><input type="radio" name="_sv_mode" value="replace"> Replace sofort</label>
@@ -756,7 +887,7 @@ if (is_array($latestJobRequest)) {
                         </div>
                         <div class="form-block">
                             <div class="label-row">Prompt Quelle</div>
-                            <div class="prompt-chip">Effektiv: <?= htmlspecialchars($promptText !== '' ? sv_meta_value($promptText, 160) : 'Kein Prompt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <div class="prompt-chip">Effektiv: <?= htmlspecialchars($displayPromptText !== '' ? sv_meta_value($displayPromptText, 160) : 'Kein Prompt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                             <?php if ($manualOverrideActive): ?>
                                 <div class="action-note highlight">Manual override aktiv (zuletzt genutzter Prompt).</div>
                             <?php endif; ?>
@@ -768,17 +899,17 @@ if (is_array($latestJobRequest)) {
                             <label class="checkbox-inline"><input type="checkbox" name="_sv_negative_allow_empty" value="1"> Leeren negativen Prompt erlauben</label>
                         </div>
                         <div class="form-block two-col">
-                            <label>Seed (optional)<input type="number" name="_sv_seed" min="0" step="1" placeholder="Auto"></label>
-                            <label>Steps<input type="number" name="_sv_steps" min="1" max="150" step="1" placeholder="auto"></label>
+                            <label>Seed (optional)<input type="number" name="_sv_seed" min="0" step="1" placeholder="Auto" value="<?= htmlspecialchars((string)$activeSeed, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
+                            <label>Steps<input type="number" name="_sv_steps" min="1" max="150" step="1" placeholder="auto" value="<?= htmlspecialchars((string)$activeSteps, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
                         </div>
                         <div class="form-block two-col">
                             <label>Denoise<input type="number" name="_sv_denoise" min="0" max="1" step="0.01" placeholder="auto"></label>
                             <label>Sampler
                                 <select name="_sv_sampler">
                                     <option value="">Auto</option>
-                                    <option value="DPM++ 2M Karras">DPM++ 2M Karras</option>
-                                    <option value="Euler a">Euler a</option>
-                                    <option value="DPM++ SDE Karras">DPM++ SDE Karras</option>
+                                    <option value="DPM++ 2M Karras" <?= $activeSampler === 'DPM++ 2M Karras' ? 'selected' : '' ?>>DPM++ 2M Karras</option>
+                                    <option value="Euler a" <?= $activeSampler === 'Euler a' ? 'selected' : '' ?>>Euler a</option>
+                                    <option value="DPM++ SDE Karras" <?= $activeSampler === 'DPM++ SDE Karras' ? 'selected' : '' ?>>DPM++ SDE Karras</option>
                                 </select>
                             </label>
                         </div>
@@ -786,12 +917,12 @@ if (is_array($latestJobRequest)) {
                             <label>Scheduler
                                 <select name="_sv_scheduler">
                                     <option value="">Auto</option>
-                                    <option value="Karras">Karras</option>
-                                    <option value="Normal">Normal</option>
-                                    <option value="Exponential">Exponential</option>
+                                    <option value="Karras" <?= $activeScheduler === 'Karras' ? 'selected' : '' ?>>Karras</option>
+                                    <option value="Normal" <?= $activeScheduler === 'Normal' ? 'selected' : '' ?>>Normal</option>
+                                    <option value="Exponential" <?= $activeScheduler === 'Exponential' ? 'selected' : '' ?>>Exponential</option>
                                 </select>
                             </label>
-                            <label>Model Override<input type="text" name="_sv_model" maxlength="200" placeholder="leer = Default/Fallback"></label>
+                            <label>Model Override<input type="text" name="_sv_model" maxlength="200" placeholder="leer = Default/Fallback" value="<?= htmlspecialchars((string)$activeModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
                         </div>
                         <div class="form-block">
                             <label class="checkbox-inline"><input type="checkbox" name="_sv_use_hybrid" value="1"> Hybrid (Prompt + Tags)</label>
@@ -840,6 +971,29 @@ if (is_array($latestJobRequest)) {
                         <input type="hidden" name="action" value="request_delete">
                         <label>Grund<textarea name="delete_reason" maxlength="240" placeholder="Warum pending_delete?"><?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
                         <button class="btn danger" type="submit">Lifecycle auf pending_delete setzen</button>
+                    </form>
+                </div>
+                <div class="panel-subsection">
+                    <div class="subheader">Tags &amp; Rescan</div>
+                    <form method="post" class="stacked tag-form">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="tag_add" id="tag-action-field">
+                        <label>Tag-Name<input type="text" name="tag_name" maxlength="120" required></label>
+                        <label>Typ (optional)<input type="text" name="tag_type" maxlength="64" placeholder="content/style/meta"></label>
+                        <label>Confidence<input type="number" step="0.01" min="0" max="1" name="tag_confidence" placeholder="1.0"></label>
+                        <label class="checkbox-inline"><input type="checkbox" name="tag_lock_flag" value="1"> sofort sperren</label>
+                        <div class="button-stack inline">
+                            <button class="btn secondary tag-action" type="submit" data-action="tag_add" <?= $hasInternalAccess ? '' : 'disabled' ?>>Tag hinzufügen/aktualisieren</button>
+                            <button class="btn muted tag-action" type="submit" data-action="tag_lock" <?= $hasInternalAccess ? '' : 'disabled' ?>>Lock</button>
+                            <button class="btn muted tag-action" type="submit" data-action="tag_unlock" <?= $hasInternalAccess ? '' : 'disabled' ?>>Unlock</button>
+                            <button class="btn danger tag-action" type="submit" data-action="tag_remove" <?= $hasInternalAccess ? '' : 'disabled' ?>>Entfernen</button>
+                        </div>
+                    </form>
+                    <form method="post" class="stacked">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="rescan_tags">
+                        <button class="btn primary" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Rescan Tags</button>
+                        <div class="hint">Aktualisiert Tags (locked=1 bleibt geschützt) und entfernt scan_stale.</div>
                     </form>
                 </div>
                 <?php if ($forgeInfoNotes !== []): ?>
@@ -917,6 +1071,51 @@ if (is_array($latestJobRequest)) {
                             </a>
                         <?php endforeach; ?>
                     </div>
+                <?php endif; ?>
+            </div>
+            <div class="panel compare-panel">
+                <div class="panel-header">Compare Versionen</div>
+                <form method="get" class="compare-form">
+                    <input type="hidden" name="id" value="<?= (int)$id ?>">
+                    <?php foreach ($filteredParams as $k => $v): ?>
+                        <input type="hidden" name="<?= htmlspecialchars((string)$k, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                    <?php endforeach; ?>
+                    <label>Version A
+                        <select name="compare_a">
+                            <?php foreach ($versions as $idx => $version): ?>
+                                <option value="<?= (int)$idx ?>" <?= $idx === $versionCompareA ? 'selected' : '' ?>>V<?= (int)$version['version_index'] ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Version B
+                        <select name="compare_b">
+                            <?php foreach ($versions as $idx => $version): ?>
+                                <option value="<?= (int)$idx ?>" <?= $idx === $versionCompareB ? 'selected' : '' ?>>V<?= (int)$version['version_index'] ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <button class="btn secondary" type="submit">Vergleichen</button>
+                </form>
+                <?php if ($compareVersionA && $compareVersionB): ?>
+                    <div class="compare-summary">V<?= (int)$compareVersionA['version_index'] ?> ⇄ V<?= (int)$compareVersionB['version_index'] ?></div>
+                    <?php if ($versionDiff === []): ?>
+                        <div class="job-hint">Keine Unterschiede in Kernparametern.</div>
+                    <?php else: ?>
+                        <table class="compare-table">
+                            <thead><tr><th>Feld</th><th>Version A</th><th>Version B</th></tr></thead>
+                            <tbody>
+                                <?php foreach ($versionDiff as [$field, $aVal, $bVal]): ?>
+                                    <tr>
+                                        <td><?= htmlspecialchars($field, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                        <td><?= htmlspecialchars((string)($aVal ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                        <td><?= htmlspecialchars((string)($bVal ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php endif; ?>
+                <?php else: ?>
+                    <div class="job-hint">Bitte Versionen auswählen.</div>
                 <?php endif; ?>
             </div>
 
@@ -999,9 +1198,9 @@ if (is_array($latestJobRequest)) {
         </div>
         <div class="tab-content active" id="tab-effective">
             <div class="label-row">Effektiver Prompt</div>
-            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($promptText ?: 'Kein Prompt gespeichert.', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($displayPromptText ?: 'Kein Prompt gespeichert.', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
             <div class="label-row">Negativer Prompt</div>
-            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($negativePrompt ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($displayNegativePrompt ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
             <?php if ($promptParams !== []): ?>
                 <div class="prompt-params">
                     <?php foreach ($promptParams as $label => $value): ?>
@@ -1029,9 +1228,10 @@ if (is_array($latestJobRequest)) {
                     <?php foreach ($tags as $tag):
                         $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
                         $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
+                        $locked = (int)($tag['locked'] ?? 0) === 1;
                         ?>
                         <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                            <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>
+                            <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?><?= $locked ? ' 🔒' : '' ?>
                         </span>
                     <?php endforeach; ?>
                 </div>
@@ -1048,9 +1248,10 @@ if (is_array($latestJobRequest)) {
                 <?php foreach ($tags as $tag):
                     $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
                     $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
+                    $locked = (int)($tag['locked'] ?? 0) === 1;
                     ?>
                     <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>
+                        <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?><?= $locked ? ' 🔒' : '' ?>
                     </span>
                 <?php endforeach; ?>
             </div>
@@ -1093,6 +1294,19 @@ if (is_array($latestJobRequest)) {
         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
         <input type="hidden" name="action" value="logical_delete">
     </form>
+
+    <div id="fullscreen-viewer" class="lightbox hidden">
+        <div class="lightbox-inner">
+            <button class="lightbox-close" type="button" aria-label="Schließen">×</button>
+            <img src="media_stream.php?<?= http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']) ?>" alt="Fullscreen">
+            <div class="lightbox-meta">
+                <div>Maße: <?= htmlspecialchars((string)($activeWidth ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($activeHeight ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php if (!empty($media['filesize'])): ?><div>Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</div><?php endif; ?>
+                <?php if ($activeHash !== ''): ?><div>Hash: <?= htmlspecialchars($activeHash, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                <?php if ($activePath !== ''): ?><div class="path-info">Pfad: <?= htmlspecialchars($activePath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -1256,6 +1470,46 @@ if (is_array($latestJobRequest)) {
             }
         });
     });
+})();
+
+(function() {
+    const versionSelect = document.getElementById('version-select');
+    if (versionSelect) {
+        versionSelect.addEventListener('change', () => {
+            const url = new URL(window.location.href);
+            url.searchParams.set('version', versionSelect.value);
+            window.location.href = url.toString();
+        });
+    }
+
+    const tagButtons = document.querySelectorAll('.tag-action');
+    const actionField = document.getElementById('tag-action-field');
+    tagButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            if (actionField) {
+                actionField.value = btn.dataset.action || 'tag_add';
+            }
+        });
+    });
+
+    const lightbox = document.getElementById('fullscreen-viewer');
+    const preview = document.querySelector('.full-preview');
+    if (preview && lightbox) {
+        preview.addEventListener('click', () => {
+            lightbox.classList.remove('hidden');
+        });
+        const close = lightbox.querySelector('.lightbox-close');
+        if (close) {
+            close.addEventListener('click', () => {
+                lightbox.classList.add('hidden');
+            });
+        }
+        lightbox.addEventListener('click', (ev) => {
+            if (ev.target === lightbox) {
+                lightbox.classList.add('hidden');
+            }
+        });
+    }
 })();
 </script>
 
