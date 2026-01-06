@@ -100,6 +100,31 @@ function sv_limit_string(string $value, int $maxLen): string
     return mb_substr($trimmed, 0, $maxLen);
 }
 
+function sv_extract_scan_info($rawJson): array
+{
+    if (!is_string($rawJson) || trim($rawJson) === '') {
+        return [
+            'error'        => null,
+            'tags_written' => null,
+        ];
+    }
+
+    $decoded = json_decode($rawJson, true);
+    if (!is_array($decoded)) {
+        return [
+            'error'        => null,
+            'tags_written' => null,
+        ];
+    }
+
+    $meta = is_array($decoded['_meta'] ?? null) ? $decoded['_meta'] : [];
+
+    return [
+        'error'        => isset($decoded['_error']) && is_string($decoded['_error']) ? (string)$decoded['_error'] : null,
+        'tags_written' => isset($meta['tags_written']) ? (int)$meta['tags_written'] : null,
+    ];
+}
+
 $showAdult = sv_normalize_adult_flag($_GET);
 $viewMode  = (isset($_GET['view']) && $_GET['view'] === 'list') ? 'list' : 'grid';
 
@@ -211,6 +236,11 @@ if ($promptQualityFilter === 'A') {
 
 $whereSql = $where === [] ? '1=1' : implode(' AND ', $where);
 $issueReport = [];
+$latestScanCols = "
+           (SELECT sr.run_at FROM scan_results sr WHERE sr.media_id = m.id ORDER BY sr.run_at DESC, sr.id DESC LIMIT 1) AS last_scan_at,
+           (SELECT sr.scanner FROM scan_results sr WHERE sr.media_id = m.id ORDER BY sr.run_at DESC, sr.id DESC LIMIT 1) AS last_scan_scanner,
+           (SELECT sr.raw_json FROM scan_results sr WHERE sr.media_id = m.id ORDER BY sr.run_at DESC, sr.id DESC LIMIT 1) AS last_scan_raw,
+";
 
 if ($issueFilter) {
     $idSql = 'SELECT m.id FROM media m ' . $latestPromptJoin . ' WHERE ' . $whereSql . ' ORDER BY m.id DESC';
@@ -237,6 +267,7 @@ if ($issueFilter) {
     } else {
         $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
         $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
+           ' . $latestScanCols . '
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
@@ -265,6 +296,7 @@ ORDER BY m.id DESC';
 } elseif ($promptQualityFilter !== 'all') {
 $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            m.width, m.height, m.duration, m.fps, m.filesize,
+           ' . $latestScanCols . '
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
@@ -309,6 +341,7 @@ ORDER BY m.id DESC';
 
     $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            m.width, m.height, m.duration, m.fps, m.filesize,
+           ' . $latestScanCols . '
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
@@ -606,6 +639,11 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
             $jobRunning = (int)($row['job_running'] ?? 0) === 1;
             $hasIssues = isset($issuesByMedia[$id]);
+            $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
+            $lastScanScanner = (string)($row['last_scan_scanner'] ?? '');
+            $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
+            $lastScanError = $scanInfo['error'] ?? null;
+            $scanTagsWritten = $scanInfo['tags_written'] ?? null;
 
             $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
                 $row['prompt_text'] ?? null,
@@ -676,6 +714,11 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                     <?php if ($scanStale): ?>
                         <span class="pill pill-warn" title="Scanner nicht erreichbar, Tags/Rating veraltet">Scan stale</span>
                     <?php endif; ?>
+                    <?php if ($lastScanError): ?>
+                        <span class="pill pill-bad" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Scan error</span>
+                    <?php elseif ($lastScanAt === ''): ?>
+                        <span class="pill pill-warn">Scan fehlt</span>
+                    <?php endif; ?>
                     <?php if ($rating > 0): ?>
                         <span class="pill">Rating <?= $rating ?></span>
                     <?php endif; ?>
@@ -706,6 +749,12 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
                         <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan stale</span><?php endif; ?>
                     </div>
+                    <div class="info-line">
+                        <span class="info-chip">Scan <?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?></span>
+                        <?php if ($lastScanScanner !== ''): ?><span class="info-chip">Scanner <?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                        <?php if ($scanTagsWritten !== null): ?><span class="info-chip">Tags <?= (int)$scanTagsWritten ?></span><?php endif; ?>
+                        <?php if ($lastScanError): ?><span class="info-chip chip-warn" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?>
+                    </div>
                     <div class="info-path" title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         ID <?= $id ?> · <?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                     </div>
@@ -733,6 +782,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <th>Prompt</th>
                             <th>Meta</th>
                             <th>Tags</th>
+                            <th>Scan</th>
                             <th>Issues</th>
                             <th>Rating</th>
                             <th>Quality</th>
@@ -753,6 +803,10 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         $hasIssues = isset($issuesByMedia[$id]);
                         $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
                         $jobRunning = (int)($row['job_running'] ?? 0) === 1;
+                        $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
+                        $lastScanScanner = (string)($row['last_scan_scanner'] ?? '');
+                        $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
+                        $lastScanError = $scanInfo['error'] ?? null;
                         $rating  = (int)($row['rating'] ?? 0);
                         $status  = (string)($row['status'] ?? '');
                         $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
@@ -764,6 +818,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
                             <td><?= $hasMeta ? 'ja' : 'nein' ?></td>
                             <td><?= $hasTags ? 'ja' : 'nein' ?></td>
+                            <td><?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?><?php if ($lastScanScanner !== ''): ?> (<?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?><?php if ($lastScanError): ?> · <span title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?></td>
                             <td><?= $hasIssues ? 'ja' : '—' ?></td>
                             <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
                             <td><?= $qualityStatus !== '' ? htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'unknown' ?></td>

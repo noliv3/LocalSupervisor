@@ -1998,7 +1998,16 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         'result'   => null,
     ];
 
-    sv_update_job_status($pdo, $jobId, 'running', json_encode(['started_at' => date('c')], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), null);
+    $startedAt = date('c');
+    $response['started_at'] = $startedAt;
+
+    sv_update_job_status(
+        $pdo,
+        $jobId,
+        'running',
+        json_encode(['started_at' => $startedAt], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        null
+    );
 
     try {
         $stmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
@@ -2021,11 +2030,13 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         $resultMeta = [];
         $ok = sv_rescan_media($pdo, $mediaRow, $pathsCfg, $scannerCfg, $nsfwThreshold, $jobLogger, $resultMeta);
 
+        $finishedAt = date('c');
         $response = array_merge($response, [
             'media_id'     => $mediaId,
             'path'         => $path,
             'result'       => $ok ? 'ok' : 'failed',
-            'completed_at' => date('c'),
+            'completed_at' => $finishedAt,
+            'finished_at'  => $finishedAt,
             'scanner'      => $resultMeta['scanner'] ?? null,
             'nsfw_score'   => $resultMeta['nsfw_score'] ?? null,
             'tags_written' => $resultMeta['tags_written'] ?? null,
@@ -2033,6 +2044,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             'path_after'   => $resultMeta['path_after'] ?? null,
             'has_nsfw'     => $resultMeta['has_nsfw'] ?? null,
             'rating'       => $resultMeta['rating'] ?? null,
+            'started_at'   => $startedAt,
         ]);
 
         if ($ok) {
@@ -2056,7 +2068,9 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         }
 
         $error = $resultMeta['error'] ?? 'Rescan fehlgeschlagen';
+        $finishedAt = date('c');
         $response['error'] = $error;
+        $response['finished_at'] = $finishedAt;
         sv_update_job_status(
             $pdo,
             $jobId,
@@ -2077,7 +2091,18 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         ];
     } catch (Throwable $e) {
         $message = $e->getMessage();
-        sv_update_job_status($pdo, $jobId, 'error', null, $message);
+        $response['error'] = $message;
+        if (!isset($response['run_at']) && isset($resultMeta['run_at'])) {
+            $response['run_at'] = $resultMeta['run_at'];
+        }
+        $response['finished_at'] = date('c');
+        sv_update_job_status(
+            $pdo,
+            $jobId,
+            'error',
+            json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            $message
+        );
         sv_audit_log($pdo, 'rescan_job_failed', 'jobs', $jobId, [
             'media_id' => $mediaId,
             'error'    => $message,
@@ -2407,6 +2432,9 @@ function sv_fetch_rescan_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 5):
             'run_at'      => $response['run_at'] ?? null,
             'has_nsfw'    => $response['has_nsfw'] ?? null,
             'rating'      => $response['rating'] ?? null,
+            'started_at'  => $response['started_at'] ?? null,
+            'finished_at' => $response['finished_at'] ?? null,
+            'tags_written'=> $response['tags_written'] ?? null,
         ];
     }
 
@@ -4081,8 +4109,23 @@ function sv_refresh_media_after_regen(
 
         $delTags = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ? AND locked = 0');
         $delTags->execute([$mediaId]);
-        sv_store_tags($pdo, $mediaId, $scanTags);
-        sv_store_scan_result($pdo, $mediaId, 'pixai_sensible', $nsfwScore, $scanFlags, $scanData['raw'] ?? []);
+        $writtenTags = sv_store_tags($pdo, $mediaId, $scanTags);
+        $runAt = date('c');
+        sv_store_scan_result(
+            $pdo,
+            $mediaId,
+            'pixai_sensible',
+            $nsfwScore,
+            $scanFlags,
+            $scanData['raw'] ?? [],
+            $runAt,
+            [
+                'tags_written' => $writtenTags,
+                'path_after'   => $path,
+                'has_nsfw'     => $hasNsfw,
+                'rating'       => $rating,
+            ]
+        );
 
         $stmt = $pdo->prepare('UPDATE media SET has_nsfw = ?, rating = ?, status = "active" WHERE id = ?');
         $stmt->execute([$hasNsfw, $rating, $mediaId]);
