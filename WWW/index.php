@@ -96,6 +96,12 @@ $jobCenterFilters = [
 ];
 $lastRuns    = [];
 $integrityStatus = ['media_with_issues' => 0];
+$healthSnapshot  = [
+    'db_health'  => [],
+    'job_health' => [],
+    'scan_health'=> [],
+];
+$healthError = null;
 $knownActions = [
     'scan_start'           => 'Scan (Dashboard)',
     'rescan_start'         => 'Rescan (Dashboard)',
@@ -471,6 +477,12 @@ try {
     $statErrors['integrity'] = $e->getMessage();
 }
 
+try {
+    $healthSnapshot = sv_collect_health_snapshot($pdo, 6);
+} catch (Throwable $e) {
+    $healthError = $e->getMessage();
+}
+
 if (!empty($knownActions)) {
     try {
         $placeholders = implode(', ', array_fill(0, count($knownActions), '?'));
@@ -713,6 +725,125 @@ $cliEntries = [
         </label>
         <button type="submit">Consistency-Check starten</button>
     </form>
+
+    <h2>Health Snapshot</h2>
+    <?php if ($healthError !== null): ?>
+        <p>Health-Snapshot fehlgeschlagen: <?= htmlspecialchars($healthError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php else: ?>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px;">
+            <div class="panel">
+                <div class="panel-header">DB Health</div>
+                <ul>
+                    <li>Medien gesamt: <?= htmlspecialchars((string)($healthSnapshot['db_health']['media_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                    <li>Funde gesamt: <?= htmlspecialchars((string)($healthSnapshot['db_health']['issues_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                    <li>Warnungen: <?= htmlspecialchars((string)($healthSnapshot['db_health']['issues_by_severity']['warn'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                </ul>
+                <?php if (!empty($healthSnapshot['db_health']['issues_by_check'])): ?>
+                    <table border="1" cellpadding="4" cellspacing="0">
+                        <tr><th>Check</th><th>Anzahl</th></tr>
+                        <?php foreach ($healthSnapshot['db_health']['issues_by_check'] as $check => $cnt): ?>
+                            <tr>
+                                <td><?= htmlspecialchars((string)$check, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)$cnt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </table>
+                <?php endif; ?>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">Job Health</div>
+                <p>Stuck Jobs (running ohne frisches Update): <?= htmlspecialchars((string)($healthSnapshot['job_health']['stuck_jobs'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+                <?php if (!empty($healthSnapshot['job_health']['recent_jobs'])): ?>
+                    <table border="1" cellpadding="4" cellspacing="0">
+                        <tr><th>ID</th><th>Typ</th><th>Status</th><th>Start</th><th>Ende</th><th>Info</th></tr>
+                        <?php foreach ($healthSnapshot['job_health']['recent_jobs'] as $job): ?>
+                            <?php
+                            $metaParts = [];
+                            if (!empty($job['meta']['path'])) {
+                                $metaParts[] = 'Pfad: ' . (string)$job['meta']['path'];
+                            }
+                            if (!empty($job['meta']['scanner'])) {
+                                $metaParts[] = 'Scanner: ' . (string)$job['meta']['scanner'];
+                            }
+                            if (!empty($job['meta']['run_at'])) {
+                                $metaParts[] = 'run_at: ' . (string)$job['meta']['run_at'];
+                            }
+                            if (!empty($job['meta']['model'])) {
+                                $metaParts[] = 'Modell: ' . (string)$job['meta']['model'];
+                            }
+                            if (!empty($job['meta']['result']) && is_array($job['meta']['result'])) {
+                                $metaParts[] = 'Result: ' . json_encode($job['meta']['result']);
+                            }
+                            if (!empty($job['meta']['worker_pid'])) {
+                                $metaParts[] = 'Worker PID: ' . (string)$job['meta']['worker_pid'];
+                            }
+                            if (!empty($job['meta']['worker_started'])) {
+                                $metaParts[] = 'Worker start: ' . (string)$job['meta']['worker_started'];
+                            }
+                            $metaText = $metaParts === [] ? '' : implode(' | ', $metaParts);
+                            ?>
+                            <tr>
+                                <td><?= htmlspecialchars((string)($job['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($job['type'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($job['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($job['started_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($job['finished_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td>
+                                    <?php if (!empty($job['error'])): ?>
+                                        <div class="job-error inline"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    <?php endif; ?>
+                                    <?php if ($metaText !== ''): ?>
+                                        <div class="small"><?= htmlspecialchars($metaText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </table>
+                <?php else: ?>
+                    <p>Keine Jobs gefunden.</p>
+                <?php endif; ?>
+                <?php if (!empty($healthSnapshot['job_health']['operations'])): ?>
+                    <details>
+                        <summary>Letzte Trigger (Scan/Rescan/Filesync)</summary>
+                        <ul>
+                            <?php foreach ($healthSnapshot['job_health']['operations'] as $op): ?>
+                                <?php $label = $knownActions[$op['action']] ?? $op['action']; ?>
+                                <li>
+                                    <?= htmlspecialchars((string)$label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> —
+                                    <?= htmlspecialchars((string)($op['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?php if (!empty($op['details']['log_file'])): ?>
+                                        (Log: <?= htmlspecialchars((string)$op['details']['log_file'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)
+                                    <?php endif; ?>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                    </details>
+                <?php endif; ?>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">Scan Health</div>
+                <p>Einträge ohne run_at/scanner: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['missing_run_at'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+                <?php if (!empty($healthSnapshot['scan_health']['latest'])): ?>
+                    <table border="1" cellpadding="4" cellspacing="0">
+                        <tr><th>ID</th><th>Media</th><th>Scanner</th><th>run_at</th><th>NSFW</th></tr>
+                        <?php foreach ($healthSnapshot['scan_health']['latest'] as $scan): ?>
+                            <tr>
+                                <td><?= htmlspecialchars((string)($scan['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($scan['media_id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($scan['scanner'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($scan['run_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string)($scan['nsfw_score'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </table>
+                <?php else: ?>
+                    <p>Keine Scan-Einträge gefunden.</p>
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php endif; ?>
 
     <h2>Integritätsstatus</h2>
     <?php if (isset($statErrors['integrity'])): ?>

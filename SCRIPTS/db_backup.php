@@ -7,6 +7,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 require_once __DIR__ . '/operations.php';
+require_once __DIR__ . '/db_helpers.php';
 
 try {
     $config = sv_load_config();
@@ -107,6 +108,34 @@ if ($copySuccess) {
     $log('Backup fehlgeschlagen.');
     exit(1);
 }
+
+$metadataFile = $backupDir . "/supervisor_{$timestamp}.meta.json";
+$metadata     = [
+    'created_at'     => date('c'),
+    'database_dsn'   => sv_db_redact_dsn($dsn),
+    'database_path'  => $dbPath,
+    'backup_file'    => $backupFile,
+    'backup_gzip'    => $gzipSuccess ? $backupGzip : null,
+    'driver'         => $pdo instanceof PDO ? (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME) : 'unknown',
+    'config_path'    => $config['_config_path'] ?? null,
+    'restore_hint'   => 'Restore: Anwendung stoppen, Backup-Datei an den Zielpfad kopieren (bestehende Datei sichern) und Dienst neu starten.',
+    'schema_tables'  => [],
+];
+
+if ($pdo instanceof PDO) {
+    try {
+        $tablesStmt = $pdo->query("SELECT name FROM sqlite_master WHERE type='table'");
+        $metadata['schema_tables'] = $tablesStmt ? $tablesStmt->fetchAll(PDO::FETCH_COLUMN) : [];
+    } catch (Throwable $e) {
+        $metadata['schema_tables'] = ['<nicht lesbar: ' . $e->getMessage() . '>'];
+    }
+}
+
+file_put_contents(
+    $metadataFile,
+    json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+);
+$log("Backup-Metadaten geschrieben: {$metadataFile}");
 
 $log('Backup abgeschlossen.');
 
