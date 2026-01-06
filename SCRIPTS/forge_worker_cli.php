@@ -42,6 +42,11 @@ $logger = function (string $msg): void {
 };
 
 try {
+    $stuck = sv_mark_stuck_jobs($pdo, SV_FORGE_JOB_TYPES, SV_JOB_STUCK_MINUTES, $logger);
+    if ($stuck > 0) {
+        $logger('Stuck Forge-Jobs bereinigt: ' . $stuck);
+    }
+
     $summary = sv_process_forge_job_batch($pdo, $config, $limit, $logger, $mediaId);
 
     if (($summary['total'] ?? 0) === 0) {

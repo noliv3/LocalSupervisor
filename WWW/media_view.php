@@ -250,11 +250,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = sv_set_media_nsfw_status($pdo, $config, $id, $target, $logger);
             $actionSuccess = true;
             $actionMessage = 'NSFW-Status aktualisiert: ' . ($result['old'] ? '1' : '0') . ' → ' . ($result['current'] ? '1' : '0');
-        } elseif ($action === 'rescan_tags') {
-            [$actionLogFile, $logger] = sv_create_operation_log($config, 'rescan_single', $actionLogs, 10);
-            $result = sv_rescan_single_media($pdo, $config, $id, $logger);
-            $actionSuccess = (bool)($result['success'] ?? false);
-            $actionMessage = $actionSuccess ? 'Rescan abgeschlossen.' : 'Rescan fehlgeschlagen.';
+        } elseif ($action === 'rescan_job') {
+            [$actionLogFile, $logger] = sv_create_operation_log($config, 'rescan_single_job', $actionLogs, 10);
+            $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $id, $logger);
+            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $id);
+            $jobId   = (int)($enqueue['job_id'] ?? 0);
+            $actionSuccess = $jobId > 0;
+            $actionMessage = $actionSuccess
+                ? 'Rescan-Job #' . $jobId . ' eingereiht.'
+                : 'Rescan-Job konnte nicht angelegt werden.';
+            if (!empty($enqueue['already_present'])) {
+                $actionMessage .= ' Bereits vorhandener Job wird genutzt.';
+            }
+            if (!empty($worker['pid'])) {
+                $actionMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
+            } elseif (!empty($worker['unknown'])) {
+                $actionMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
+            }
         } elseif (in_array($action, ['tag_add', 'tag_remove', 'tag_lock', 'tag_unlock'], true)) {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'tag_edit', $actionLogs, 10);
             $payload = [
@@ -660,7 +672,10 @@ if (is_array($latestJobRequest)) {
 }
 
         $latestPreview = [
-            'path'     => $previewPath,
+            'path'     => ($previewVersion !== null && $previewPath !== '')
+                ? ($previewPath . '?v=' . rawurlencode((string)$previewVersion))
+                : $previewPath,
+            'source_path' => $previewPath,
             'hash'     => $latestJobResponse['preview_hash'] ?? null,
             'width'    => $latestJobResponse['preview_width'] ?? null,
             'height'   => $latestJobResponse['preview_height'] ?? null,
@@ -669,12 +684,10 @@ if (is_array($latestJobRequest)) {
             'data_uri' => $previewDataUri,
             'error'    => $previewError,
             'version'  => $previewVersion,
-            'path'     => ($previewVersion !== null && $previewPath !== '')
-                ? ($previewPath . '?v=' . rawurlencode((string)$previewVersion))
-                : $previewPath,
         ];
     }
 }
+$rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
 ?>
 <!doctype html>
 <html lang="de">
@@ -991,9 +1004,9 @@ if (is_array($latestJobRequest)) {
                     </form>
                     <form method="post" class="stacked">
                         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                        <input type="hidden" name="action" value="rescan_tags">
-                        <button class="btn primary" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Rescan Tags</button>
-                        <div class="hint">Aktualisiert Tags (locked=1 bleibt geschützt) und entfernt scan_stale.</div>
+                        <input type="hidden" name="action" value="rescan_job">
+                        <button class="btn primary" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Rescan (Job)</button>
+                        <div class="hint">Stellt einen Rescan als Job in die Queue (locked=1 bleibt geschützt).</div>
                     </form>
                 </div>
                 <?php if ($forgeInfoNotes !== []): ?>
@@ -1039,6 +1052,33 @@ if (is_array($latestJobRequest)) {
                                 </ul>
                             </details>
                         <?php endif; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="panel rescan-panel">
+                <div class="panel-header">Rescan-Jobs</div>
+                <?php if ($rescanJobs === []): ?>
+                    <div class="job-hint">Keine Rescan-Jobs vorhanden.</div>
+                <?php else: ?>
+                    <div class="timeline">
+                        <?php foreach ($rescanJobs as $job):
+                            $status = strtolower((string)($job['status'] ?? 'queued'));
+                            $statusClass = 'status-' . (in_array($status, ['queued', 'running', 'done', 'error'], true) ? $status : 'queued');
+                            ?>
+                            <div class="timeline-item">
+                                <div class="timeline-header">
+                                    <div class="timeline-title">Job #<?= (int)$job['id'] ?></div>
+                                    <span class="status-badge <?= htmlspecialchars($statusClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                </div>
+                                <div class="timeline-meta"><?= htmlspecialchars((string)($job['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($job['updated_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <div class="timeline-body">
+                                    <div class="meta-line"><span>Pfad</span><strong><?= htmlspecialchars($job['path'] ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                                    <?php if (!empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['completed_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
+                                    <?php if (!empty($job['error'])): ?><div class="job-error"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
                 <?php endif; ?>
             </div>

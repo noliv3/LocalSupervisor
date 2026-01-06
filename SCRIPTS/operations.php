@@ -12,6 +12,7 @@ const SV_FORGE_JOB_TYPE           = 'forge_regen';
 const SV_FORGE_JOB_TYPES          = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
 const SV_FORGE_JOB_STATUSES       = ['queued', 'pending', 'created'];
 const SV_JOB_TYPE_SCAN_PATH       = 'scan_path';
+const SV_JOB_TYPE_RESCAN_MEDIA    = 'rescan_media';
 const SV_JOB_TYPE_LIBRARY_RENAME  = 'library_rename';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
 const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
@@ -25,6 +26,7 @@ const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
+const SV_JOB_STUCK_MINUTES        = 30;
 const SV_LIFECYCLE_ACTIVE         = 'active';
 const SV_LIFECYCLE_REVIEW         = 'review';
 const SV_LIFECYCLE_PENDING_DELETE = 'pending_delete';
@@ -1758,7 +1760,182 @@ function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $lim
     ];
 }
 
-function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, callable $logger): array
+function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
+    if ($mediaId <= 0) {
+        throw new InvalidArgumentException('Ungültige Media-ID für Rescan.');
+    }
+
+    $stmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+    $stmt->execute([':id' => $mediaId]);
+    $mediaRow = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$mediaRow) {
+        throw new InvalidArgumentException('Media-Eintrag nicht gefunden.');
+    }
+
+    $path = (string)($mediaRow['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Dateipfad nicht vorhanden, Rescan nicht möglich.');
+    }
+
+    $pathsCfg = $config['paths'] ?? [];
+    sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_job_enqueue');
+
+    $existing = $pdo->prepare(
+        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued","running") LIMIT 1'
+    );
+    $existing->execute([
+        ':media_id' => $mediaId,
+        ':type'     => SV_JOB_TYPE_RESCAN_MEDIA,
+    ]);
+    $presentId = $existing->fetchColumn();
+    if ($presentId) {
+        $logger('Rescan-Job existiert bereits (#' . (int)$presentId . ').');
+        return [
+            'job_id'          => (int)$presentId,
+            'status'          => 'queued',
+            'already_present' => true,
+        ];
+    }
+
+    $now = date('c');
+    $payload = [
+        'media_id'       => $mediaId,
+        'path'           => str_replace('\\', '/', $path),
+        'nsfw_threshold' => (float)($config['scanner']['nsfw_threshold'] ?? 0.7),
+    ];
+
+    $insert = $pdo->prepare(
+        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
+        . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
+    );
+    $insert->execute([
+        ':media_id'   => $mediaId,
+        ':type'       => SV_JOB_TYPE_RESCAN_MEDIA,
+        ':status'     => 'queued',
+        ':created_at' => $now,
+        ':updated_at' => $now,
+        ':payload'    => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+    ]);
+
+    $jobId = (int)$pdo->lastInsertId();
+    $logger('Rescan-Job angelegt: ID=' . $jobId . ' (Media ' . $mediaId . ')');
+    sv_audit_log($pdo, 'rescan_enqueue', 'jobs', $jobId, [
+        'media_id' => $mediaId,
+        'path'     => $payload['path'],
+    ]);
+
+    return [
+        'job_id' => $jobId,
+        'status' => 'queued',
+        'path'   => $payload['path'],
+    ];
+}
+
+function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
+{
+    $jobId   = (int)($jobRow['id'] ?? 0);
+    $mediaId = isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : 0;
+    if ($jobId <= 0 || $mediaId <= 0) {
+        sv_update_job_status($pdo, $jobId, 'error', null, 'Ungültiger Rescan-Job.');
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error'  => 'Ungültiger Rescan-Job.',
+        ];
+    }
+
+    $payload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true) ?: [];
+    $logger('Starte Rescan-Job #' . $jobId . ' für Media #' . $mediaId);
+
+    $jobLogger = function (string $msg) use ($logger, $jobId): void {
+        $logger('[Rescan ' . $jobId . '] ' . $msg);
+    };
+
+    sv_update_job_status($pdo, $jobId, 'running', null, null);
+
+    try {
+        $stmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+        $stmt->execute([':id' => $mediaId]);
+        $mediaRow = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$mediaRow) {
+            throw new RuntimeException('Media-Eintrag nicht gefunden.');
+        }
+
+        $path         = (string)($mediaRow['path'] ?? '');
+        $pathsCfg     = $config['paths'] ?? [];
+        $scannerCfg   = $config['scanner'] ?? [];
+        $nsfwThreshold = isset($payload['nsfw_threshold']) ? (float)$payload['nsfw_threshold'] : (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
+
+        if ($path === '' || !is_file($path)) {
+            throw new RuntimeException('Dateipfad nicht vorhanden.');
+        }
+        sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_job_run');
+
+        $ok = sv_rescan_media($pdo, $mediaRow, $pathsCfg, $scannerCfg, $nsfwThreshold, $jobLogger);
+
+        $response = [
+            'media_id'     => $mediaId,
+            'path'         => $path,
+            'result'       => $ok ? 'ok' : 'failed',
+            'completed_at' => date('c'),
+        ];
+
+        if ($ok) {
+            sv_update_job_status(
+                $pdo,
+                $jobId,
+                'done',
+                json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                null
+            );
+            sv_audit_log($pdo, 'rescan_job_done', 'jobs', $jobId, [
+                'media_id' => $mediaId,
+                'path'     => $path,
+            ]);
+            return [
+                'job_id' => $jobId,
+                'status' => 'done',
+                'result' => $response,
+            ];
+        }
+
+        $error = 'Rescan fehlgeschlagen';
+        sv_update_job_status(
+            $pdo,
+            $jobId,
+            'error',
+            json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            $error
+        );
+        sv_audit_log($pdo, 'rescan_job_failed', 'jobs', $jobId, [
+            'media_id' => $mediaId,
+            'path'     => $path,
+            'error'    => $error,
+        ]);
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error'  => $error,
+            'result' => $response,
+        ];
+    } catch (Throwable $e) {
+        $message = $e->getMessage();
+        sv_update_job_status($pdo, $jobId, 'error', null, $message);
+        sv_audit_log($pdo, 'rescan_job_failed', 'jobs', $jobId, [
+            'media_id' => $mediaId,
+            'error'    => $message,
+        ]);
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error'  => $message,
+        ];
+    }
+}
+
+
+function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, callable $logger, ?int $mediaId = null): array
 {
     if (!sv_is_cli() && !sv_has_valid_internal_key()) {
         throw new RuntimeException('Internal-Key erforderlich, um Scan-Worker zu starten.');
@@ -1776,6 +1953,9 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     }
     if ($pathFilter !== null && trim($pathFilter) !== '') {
         $parts[] = '--path=' . escapeshellarg($pathFilter);
+    }
+    if ($mediaId !== null && $mediaId > 0) {
+        $parts[] = '--media-id=' . (int)$mediaId;
     }
     $cmd = implode(' ', $parts);
 
@@ -1862,25 +2042,16 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     ];
 }
 
-function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?string $pathFilter = null): array
+function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?string $pathFilter = null, ?int $mediaId = null): array
 {
-    $sql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
-    if ($limit !== null && $limit > 0) {
-        $sql .= ' LIMIT :limit';
-    }
+    sv_mark_stuck_jobs($pdo, [SV_JOB_TYPE_SCAN_PATH, SV_JOB_TYPE_RESCAN_MEDIA], SV_JOB_STUCK_MINUTES, $logger);
 
-    $stmt = $pdo->prepare($sql);
-    $stmt->bindValue(':type', SV_JOB_TYPE_SCAN_PATH, PDO::PARAM_STR);
-    if ($limit !== null && $limit > 0) {
-        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-    }
-    $stmt->execute();
-
-    $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
+    $remaining = $limit !== null && $limit > 0 ? (int)$limit : null;
     $processed = 0;
     $done      = 0;
     $errors    = 0;
+    $rescanProcessed = 0;
+    $scanProcessed   = 0;
 
     $filter = null;
     if ($pathFilter !== null && trim($pathFilter) !== '') {
@@ -1888,7 +2059,76 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
         $filter = $normalized !== false ? rtrim(str_replace('\\', '/', $normalized), '/') : trim($pathFilter);
     }
 
+    // Rescan-Medien zuerst abarbeiten
+    $rescanSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running")';
+    if ($mediaId !== null && $mediaId > 0) {
+        $rescanSql .= ' AND media_id = :media_id';
+    }
+    $rescanSql .= ' ORDER BY id ASC';
+    if ($remaining !== null) {
+        $rescanSql .= ' LIMIT :limit';
+    }
+
+    $rescanStmt = $pdo->prepare($rescanSql);
+    $rescanStmt->bindValue(':type', SV_JOB_TYPE_RESCAN_MEDIA, PDO::PARAM_STR);
+    if ($mediaId !== null && $mediaId > 0) {
+        $rescanStmt->bindValue(':media_id', $mediaId, PDO::PARAM_INT);
+    }
+    if ($remaining !== null) {
+        $rescanStmt->bindValue(':limit', $remaining, PDO::PARAM_INT);
+    }
+    $rescanStmt->execute();
+    $rescanJobs = $rescanStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($rescanJobs as $jobRow) {
+        if ($remaining !== null && $remaining <= 0) {
+            break;
+        }
+        $jobId = (int)($jobRow['id'] ?? 0);
+        try {
+            $processed++;
+            $rescanProcessed++;
+            if ($remaining !== null) {
+                $remaining--;
+            }
+            $logger('Verarbeite Rescan-Job #' . $jobId . ' (Media ' . (int)($jobRow['media_id'] ?? 0) . ')');
+            $result = sv_process_rescan_media_job($pdo, $config, $jobRow, $logger);
+            if (($result['status'] ?? '') === 'done') {
+                $done++;
+            } else {
+                $errors++;
+            }
+        } catch (Throwable $e) {
+            $errors++;
+            sv_update_job_status($pdo, $jobId, 'error', null, $e->getMessage());
+            sv_audit_log($pdo, 'rescan_job_failed', 'jobs', $jobId, [
+                'error'  => $e->getMessage(),
+                'job_id' => $jobId,
+            ]);
+            $logger('Fehler bei Rescan-Job #' . $jobId . ': ' . $e->getMessage());
+        }
+    }
+
+    // Danach Scan-Path-Jobs
+    $scanSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
+    if ($remaining !== null) {
+        $scanSql .= ' LIMIT :limit';
+    }
+
+    $stmt = $pdo->prepare($scanSql);
+    $stmt->bindValue(':type', SV_JOB_TYPE_SCAN_PATH, PDO::PARAM_STR);
+    if ($remaining !== null) {
+        $stmt->bindValue(':limit', $remaining, PDO::PARAM_INT);
+    }
+    $stmt->execute();
+
+    $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
     foreach ($jobs as $jobRow) {
+        if ($remaining !== null && $remaining <= 0) {
+            break;
+        }
+
         $jobId = (int)($jobRow['id'] ?? 0);
         $payload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true) ?: [];
         $jobPath = is_string($payload['path'] ?? null) ? rtrim(str_replace('\\', '/', (string)$payload['path']), '/') : '';
@@ -1899,6 +2139,10 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
 
         try {
             $processed++;
+            $scanProcessed++;
+            if ($remaining !== null) {
+                $remaining--;
+            }
             $logger('Verarbeite Scan-Job #' . $jobId . ' (' . $jobPath . ')');
             sv_process_single_scan_job($pdo, $config, $jobRow, $logger);
             $done++;
@@ -1914,9 +2158,11 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
     }
 
     return [
-        'total' => $processed,
-        'done'  => $done,
-        'error' => $errors,
+        'total'   => $processed,
+        'done'    => $done,
+        'error'   => $errors,
+        'rescan'  => $rescanProcessed,
+        'scan'    => $scanProcessed,
     ];
 }
 
@@ -1958,6 +2204,40 @@ function sv_fetch_scan_jobs(PDO $pdo, ?string $pathFilter = null, int $limit = 2
             'error'       => $row['error_message'] ?? null,
             'worker_pid'  => $response['_sv_worker_pid'] ?? null,
             'worker_started_at' => $response['_sv_worker_started_at'] ?? null,
+        ];
+    }
+
+    return $jobs;
+}
+
+function sv_fetch_rescan_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 5): array
+{
+    $limit = max(1, min(20, $limit));
+
+    $stmt = $pdo->prepare(
+        'SELECT id, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
+        . 'FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT :limit'
+    );
+    $stmt->bindValue(':type', SV_JOB_TYPE_RESCAN_MEDIA, PDO::PARAM_STR);
+    $stmt->bindValue(':media_id', $mediaId, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $jobs = [];
+
+    foreach ($rows as $row) {
+        $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
+        $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
+        $jobs[] = [
+            'id'          => (int)($row['id'] ?? 0),
+            'status'      => (string)($row['status'] ?? ''),
+            'created_at'  => (string)($row['created_at'] ?? ''),
+            'updated_at'  => (string)($row['updated_at'] ?? ''),
+            'path'        => (string)($payload['path'] ?? ''),
+            'result'      => $response['result'] ?? null,
+            'completed_at'=> $response['completed_at'] ?? null,
+            'error'       => $row['error_message'] ?? null,
         ];
     }
 
@@ -3736,6 +4016,54 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
     ]);
 }
 
+function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callable $logger = null): int
+{
+    $types = array_values(array_filter(array_map('strval', $types), static fn ($t) => $t !== ''));
+    if ($types === []) {
+        return 0;
+    }
+
+    $maxAgeMinutes = max(1, $maxAgeMinutes);
+    $threshold     = date('c', time() - ($maxAgeMinutes * 60));
+    $placeholders  = implode(',', array_fill(0, count($types), '?'));
+
+    $stmt = $pdo->prepare(
+        'SELECT id FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ') AND updated_at < ?'
+    );
+    $params = array_merge($types, [$threshold]);
+    $stmt->execute($params);
+    $ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+
+    if ($ids === []) {
+        return 0;
+    }
+
+    $update = $pdo->prepare(
+        'UPDATE jobs SET status = "error", error_message = COALESCE(NULLIF(error_message, ""), :err), updated_at = :now WHERE id = :id'
+    );
+    $now   = date('c');
+    $error = 'job stuck timeout (>' . $maxAgeMinutes . 'm)';
+
+    foreach ($ids as $id) {
+        $update->execute([
+            ':err' => $error,
+            ':now' => $now,
+            ':id'  => $id,
+        ]);
+        sv_audit_log($pdo, 'job_stuck_timeout', 'jobs', $id, [
+            'error'        => $error,
+            'threshold'    => $threshold,
+            'marked_at'    => $now,
+            'types_scoped' => $types,
+        ]);
+        if ($logger) {
+            $logger('Job #' . $id . ' als timeout markiert (running > ' . $maxAgeMinutes . 'm).');
+        }
+    }
+
+    return count($ids);
+}
+
 function sv_log_forge_paths(array $paths): void
 {
     $runtimeLog = sv_base_dir() . '/LOGS/forge_worker_runtime.log';
@@ -4274,6 +4602,8 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
 function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?int $mediaId = null): array
 {
+    sv_mark_stuck_jobs($pdo, SV_FORGE_JOB_TYPES, SV_JOB_STUCK_MINUTES, $logger);
+
     $effectiveLimit = $limit === null ? 1 : max(1, min(10, (int)$limit));
 
     $typePlaceholders = implode(', ', array_fill(0, count(SV_FORGE_JOB_TYPES), '?'));
