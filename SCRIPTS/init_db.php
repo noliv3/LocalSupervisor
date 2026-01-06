@@ -10,6 +10,7 @@ if ($baseDir === false) {
 }
 
 require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/db_helpers.php';
 
 $schemaFile = $baseDir . '/DB/schema.sql';
 
@@ -25,18 +26,9 @@ try {
     exit(1);
 }
 
-if (!isset($config['db']['dsn'])) {
-    fwrite(STDERR, "Fehler: DB-DSN in config.php fehlt.\n");
-    exit(1);
-}
-
-$dsn      = $config['db']['dsn'];
-$user     = $config['db']['user']     ?? null;
-$password = $config['db']['password'] ?? null;
-$options  = $config['db']['options']  ?? [];
-
 try {
-    $pdo = new PDO($dsn, $user, $password, $options);
+    $db  = sv_db_connect($config);
+    $pdo = $db['pdo'];
 } catch (Throwable $e) {
     fwrite(STDERR, "Fehler beim Verbindungsaufbau zur DB: " . $e->getMessage() . "\n");
     exit(1);
@@ -48,11 +40,52 @@ if ($schemaSql === false) {
     exit(1);
 }
 
+$schemaSql = sv_db_filter_schema_sql($schemaSql, $db['driver']);
+
 try {
     $pdo->beginTransaction();
     $pdo->exec($schemaSql);
     $pdo->commit();
-    fwrite(STDOUT, "Datenbank initialisiert.\n");
+    fwrite(STDOUT, "Datenbank initialisiert ({$db['driver']}, " . $db['redacted_dsn'] . ").\n");
+
+    $diff = sv_db_diff_schema($pdo, $db['driver']);
+    if ($diff['missing_tables'] !== [] || $diff['missing_columns'] !== []) {
+        fwrite(STDOUT, "WARNUNG: Schema unvollständig.\n");
+        foreach ($diff['missing_tables'] as $table) {
+            fwrite(STDOUT, "  - Fehlende Tabelle: {$table}\n");
+        }
+        foreach ($diff['missing_columns'] as $table => $columns) {
+            fwrite(STDOUT, "  - Fehlende Spalten in {$table}: " . implode(', ', $columns) . "\n");
+        }
+    } else {
+        fwrite(STDOUT, "Schema-Konsistenz: OK (alle Kerntabellen vorhanden).\n");
+    }
+
+    $migrationDir = $baseDir . '/SCRIPTS/migrations';
+    if (is_dir($migrationDir)) {
+        $migrations = sv_db_load_migrations($migrationDir);
+        $pending    = [];
+        try {
+            $applied = sv_db_load_applied_versions($pdo);
+            foreach ($migrations as $migration) {
+                if (!isset($applied[$migration['version']])) {
+                    $pending[] = $migration['version'];
+                }
+            }
+        } catch (Throwable $e) {
+            $pending = array_column($migrations, 'version');
+        }
+
+        if ($pending !== []) {
+            fwrite(STDOUT, "Ausstehende Migrationen: " . implode(', ', $pending) . "\n");
+            fwrite(STDOUT, "Hinweis: Migrationen nur über php SCRIPTS/migrate.php ausführen.\n");
+        } else {
+            fwrite(STDOUT, "Migrationen: Alle bekannten Versionen eingetragen.\n");
+        }
+    } else {
+        fwrite(STDOUT, "Warnung: Migrationsverzeichnis fehlt, Migrationsstatus unbekannt.\n");
+    }
+
     if (!empty($config['_config_warning'])) {
         fwrite(STDOUT, $config['_config_warning'] . PHP_EOL);
     }

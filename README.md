@@ -14,7 +14,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Persistenz (DB/)**: SQLite/MySQL-Schema aus `DB/schema.sql`, Migrationen in `SCRIPTS/migrations/`, Konfiguration in `CONFIG/config.php`.
 
 ## Baseline (V1)
-- Fallback-Konfiguration: Der Loader nutzt bevorzugt `CONFIG/config.php` und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück, damit Web/CLI auf frischem Checkout ohne Fatal Error starten.
+- Fallback-Konfiguration: Der Loader sucht zuerst nach `/mnt/data/config.php` (z. B. Docker-Volume), nutzt danach `CONFIG/config.php` und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück, damit Web/CLI auf frischem Checkout ohne Fatal Error starten.
 - Schema-Sync: `DB/schema.sql` enthält das Flag `media_tags.locked`; die Migration `20260105_001_add_media_tags_locked.php` bleibt idempotent und füllt fehlende Spalten nach.
 - Locked-Tag-Schutz: Cleanup/Repair entfernen keine gesperrten Tags; fehlende Dateien werden gemeldet, ohne manuelle Tagging-Daten zu löschen.
 - VA/VIDAX-State: `va install` legt das State-Layout an und kopiert Beispielconfigs in `state/config`, falls dort noch nichts liegt.
@@ -56,7 +56,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Installation / Setup
 - **Voraussetzungen**: PHP 8.1+ mit PDO (SQLite/MySQL), JSON, mbstring, fileinfo, gd/imagick; ffmpeg/ffprobe für Videometadaten, Video-Thumbnails und den Selftest; optional exiftool für Metadaten. Datenbank per SQLite-File oder MySQL/MariaDB.
 - **Konfiguration**: `CONFIG/config.php` definiert DB-DSN, Pfade für SFW/NSFW-Bild/Video, Logs/Temp/Backups, optionale Tool-Pfade (ffmpeg/exiftool), Scanner-Endpunkte (Base-URL, Token ODER api_key/api_key_header, Timeout, NSFW-Schwelle), Sicherheitsparameter (internal_api_key, ip_whitelist).
-    - Fehlt `CONFIG/config.php`, nutzt der Loader `CONFIG/config.example.php` mit Warnhinweis im UI/CLI; für Deployments die Example-Datei kopieren und insbesondere `internal_api_key`/Pfad-Settings anpassen.
+    - Primäre Quelle ist `/mnt/data/config.php` (z. B. per Container-Volume). Falls dort nichts liegt, nutzt der Loader `CONFIG/config.php` im Repo und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück; für Deployments die Example-Datei kopieren und insbesondere `internal_api_key`/Pfad-Settings anpassen.
     - Scanner-Auth unterstützt entweder `scanner.token` (Header `Authorization: <token>`) oder das Legacy-Paar `scanner.api_key` + `scanner.api_key_header`. Die Datei wird als `image` und `file` gesendet, `autorefresh=1` bleibt erhalten.
 - **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
@@ -92,6 +92,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `php SCRIPTS/consistency_check.php [--repair=simple] [--limit=N] [--offset=N]` | Konsistenzprüfungen, optional einfache Reparaturen | Repair-Modus, Batches |
 | `php SCRIPTS/db_backup.php` | Manuelles Backup der DB | Zielpfade aus `paths.backups` |
 | `php SCRIPTS/migrate.php` | Führt fehlende Migrationen aus | Keine Auto-Migrationen |
+| `php SCRIPTS/db_status.php` | Konsolidierter Status (Treiber, DSN, Schema-Abgleich, Migrationen) | Liefert non-zero Exit bei fehlenden Tabellen/Spalten oder offenen Migrationen |
 | `php SCRIPTS/meta_inspect.php [--limit=N] [--offset=N]` | Text-Inspektor für Prompts/Metadaten | Batches |
 | `php SCRIPTS/selftest_cli.php` | Lokaler Smoke-Test (PNG/MP4/Scanner-Parser, Video-Thumb) | ffmpeg/ffprobe empfohlen; Exit 2 wenn ffmpeg fehlt |
 | `php SCRIPTS/cleanup_missing_cli.php [--confirm] [--no-dry-run]` | Löscht nur nach explizitem `--confirm`; Default ist Dry-Run mit ID-Listing | Locked-Tags bleiben geschützt, jede Löschung wird auditiert |
@@ -178,6 +179,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Migrationen / Setup (V2)
 - Neue Migration `20260701_001_prompt_history_and_lifecycle.php` anlegen lassen (`php SCRIPTS/migrate.php`). Sie ergänzt Lifecycle-/Quality-Felder, Prompt-Historie und Lifecycle-Event-Log.
 - `DB/schema.sql` enthält die neuen Tabellen/Indizes; Deployment nutzt wie gehabt manuelle Migrationen (kein Auto-DDL).
+- `php SCRIPTS/db_status.php` prüft Treiber/DSN, vergleicht das erwartete Schema (Kerntabellen/-spalten) und listet offene Migrationen. Non-zero Exit signalisiert fehlende Spalten/Tabellen oder nicht eingetragene Migrationen.
 - `schema_migrations` wird ausschließlich durch `SCRIPTS/migrate.php` gepflegt; einzelne Migrationen schreiben nicht selbst in diese Tabelle, Idempotenz bleibt über IF-NOT-EXISTS-DDL erhalten.
 - Nach Migration optional `php SCRIPTS/prompts_rebuild_cli.php --limit=100` ausführen, um fehlende Prompts/Snapshots zu füllen (funktioniert auch ohne Quelldateien, wenn Snapshots vorhanden).
 

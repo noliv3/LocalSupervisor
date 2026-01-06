@@ -24,11 +24,14 @@ function sv_load_config(?string $baseDir = null, bool $allowExampleFallback = tr
     $baseDir = $baseDir ?? sv_base_dir();
     $primary = $baseDir . '/CONFIG/config.php';
     $example = $baseDir . '/CONFIG/config.example.php';
+    $mounted = '/mnt/data/config.php';
 
     $usedFile = null;
     $warning  = null;
 
-    if (is_file($primary)) {
+    if (is_file($mounted)) {
+        $usedFile = $mounted;
+    } elseif (is_file($primary)) {
         $usedFile = $primary;
     } elseif ($allowExampleFallback && is_file($example)) {
         $usedFile = $example;
