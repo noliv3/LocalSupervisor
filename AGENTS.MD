@@ -106,7 +106,7 @@
 - `media_tags.locked` schützt manuelle Tags: Rescan/Regeneration löschen nur Einträge mit `locked=0`.
 - Video-Unterstützung: `thumb.php` erzeugt JPEG-Thumbs via ffmpeg, `media_stream.php` liefert HTTP-Range, UI zeigt Video-Thumb+Player.
 - `SCRIPTS/selftest_cli.php` prüft Import/Parser/Video-Thumb; ffmpeg/ffprobe nötig für den Video-Teil (Exit 2 wenn ffmpeg fehlt).
-- Rescan-Job persistiert `scan_results.run_at`, ersetzt `media_tags` für `locked=0`, räumt `scan_stale` nach Erfolg und auditiert Erfolg/Fehler; UI pollt den Rescan-Status und zeigt letzten Scan (Zeit/Scanner/NSFW).
+- Rescan-Job persistiert `scan_results.run_at` + Scanner + Fehler im `scan_results.raw_json`, ersetzt deduplizierte `media_tags` nur für `locked=0`, räumt `scan_stale` nach Erfolg und auditiert Erfolg/Fehler; UI pollt den Rescan-Status (inkl. started/finished_at) und zeigt letzten Scan (Zeit/Scanner/NSFW/Rating/Tags + Fehler) sowie Scan-Missing/Fehler-Indikatoren in Detail- und Gallery-Ansicht.
 - Forge-Modelle kommen aus der Forge-API (Cache `LOGS/forge_models.cache.json`, ca. 120s) und stehen als Dropdown (Auto/Resolved/Fallback) bereit.
 - Quality-Status (`unknown/ok/review/blocked` + Score/Notes) ist klar von Prompt-Qualität (A/B/C) getrennt; UI zeigt eigene Badges/Hinweise.
 

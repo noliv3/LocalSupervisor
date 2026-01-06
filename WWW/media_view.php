@@ -846,6 +846,20 @@ foreach ($rescanJobs as $job) {
         break;
     }
 }
+$latestScanRunAt       = (string)($latestScan['run_at'] ?? '');
+$latestScanScanner     = (string)($latestScan['scanner'] ?? '');
+$latestScanNsfw        = $latestScan['nsfw_score'] ?? null;
+$latestScanRating      = $latestScan['rating'] ?? null;
+$latestScanHasNsfw     = $latestScan['has_nsfw'] ?? null;
+$latestScanTagsWritten = $latestScan['tags_written'] ?? null;
+$latestScanError       = $latestScan['error'] ?? null;
+$latestScanMetaText    = $latestScan
+    ? ('Scanner: ' . ($latestScanScanner !== '' ? $latestScanScanner : 'unknown')
+        . ' · NSFW: ' . ($latestScanNsfw !== null ? $latestScanNsfw : '–')
+        . ' · Rating: ' . ($latestScanRating !== null ? $latestScanRating : '–')
+        . ' · Flag: ' . ($latestScanHasNsfw === null ? '–' : ((int)$latestScanHasNsfw === 1 ? 'NSFW' : 'SFW')))
+    : 'Kein Eintrag';
+$latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTagsWritten . ' Tags') : '–';
 ?>
 <!doctype html>
 <html lang="de">
@@ -1231,19 +1245,32 @@ foreach ($rescanJobs as $job) {
                 <div class="panel-subsection">
                     <div class="subheader">Tags &amp; Rescan</div>
                     <div class="rescan-summary" id="rescan-summary">
-                        <div class="meta-line"><span>Letzter Scan</span><strong><?= $latestScan ? htmlspecialchars((string)$latestScan['run_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></strong><em class="small"><?= $latestScan ? 'Scanner: ' . htmlspecialchars((string)($latestScan['scanner'] ?? 'unknown'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ' · NSFW: ' . htmlspecialchars((string)($latestScan['nsfw_score'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'Kein Eintrag' ?></em></div>
+                        <div class="meta-line">
+                            <span>Letzter Scan</span>
+                            <strong id="scan-run-at"><?= $latestScanRunAt !== '' ? htmlspecialchars($latestScanRunAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></strong>
+                            <em class="small" id="scan-meta"><?= htmlspecialchars($latestScanMetaText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em>
+                        </div>
+                        <div class="meta-line">
+                            <span>Tags</span>
+                            <strong id="scan-tags"><?= htmlspecialchars($latestScanTagsText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                            <em class="small">locked=1 bleibt geschützt</em>
+                        </div>
+                        <div class="job-error inline" id="scan-error" style="<?= $latestScanError ? '' : 'display:none;' ?>"><?= htmlspecialchars((string)($latestScanError ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <div class="hint small" id="scan-empty" style="<?= ($latestScanRunAt === '' && $latestScanError === null) ? '' : 'display:none;' ?>">Kein Scan-Ergebnis gespeichert.</div>
                         <div class="meta-line" id="rescan-job-line">
                             <?php if ($activeRescanJob): ?>
-                                <?php $status = strtolower((string)$activeRescanJob['status']); ?>
-                                <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars((string)($activeRescanJob['updated_at'] ?? $activeRescanJob['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em>
+                                <?php
+                                $status = strtolower((string)$activeRescanJob['status']);
+                                $jobStart = (string)($activeRescanJob['started_at'] ?? $activeRescanJob['created_at'] ?? '');
+                                $jobFinish = (string)($activeRescanJob['finished_at'] ?? $activeRescanJob['completed_at'] ?? '');
+                                ?>
+                                <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars($jobStart, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $jobFinish !== '' ? ' → ' . htmlspecialchars($jobFinish, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></em>
                                 <?php if (!empty($activeRescanJob['error'])): ?><div class="job-error inline"><?= htmlspecialchars((string)$activeRescanJob['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                             <?php else: ?>
                                 <span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>
                             <?php endif; ?>
                         </div>
-                        <?php if ($rescanLastError !== null): ?>
-                            <div class="job-error inline">Letzter Fehler: <?= htmlspecialchars($rescanLastError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                        <?php endif; ?>
+                        <div class="job-error inline" id="rescan-last-error" style="<?= $rescanLastError !== null ? '' : 'display:none;' ?>"><?= $rescanLastError !== null ? 'Letzter Fehler: ' . htmlspecialchars($rescanLastError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
                         <div class="hint small" id="rescan-poll-meta">Polling aktiv.</div>
                     </div>
                     <form method="post" class="stacked tag-form">
@@ -1333,8 +1360,11 @@ foreach ($rescanJobs as $job) {
                                 <div class="timeline-meta"><?= htmlspecialchars((string)($job['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($job['updated_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                 <div class="timeline-body">
                                     <div class="meta-line"><span>Pfad</span><strong><?= htmlspecialchars($job['path'] ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                                    <?php if (!empty($job['started_at'])): ?><div class="meta-line"><span>Gestartet</span><strong><?= htmlspecialchars((string)$job['started_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
                                     <?php if (!empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['completed_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
+                                    <?php if (!empty($job['finished_at']) && empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['finished_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
                                     <?php if (!empty($job['run_at'])): ?><div class="meta-line"><span>Scan</span><strong><?= htmlspecialchars((string)$job['run_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars((string)($job['scanner'] ?? 'pixai_sensible'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> · NSFW <?= htmlspecialchars((string)($job['nsfw_score'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
+                                    <?php if ($job['tags_written'] !== null): ?><div class="meta-line"><span>Tags</span><strong><?= (int)$job['tags_written'] ?></strong><em class="small">unlocked ersetzt</em></div><?php endif; ?>
                                     <?php if ($job['has_nsfw'] !== null): ?><div class="meta-line"><span>Flag</span><strong><?= (int)$job['has_nsfw'] === 1 ? 'NSFW' : 'SFW' ?></strong><em class="small">Rating <?= htmlspecialchars((string)($job['rating'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
                                     <?php if (!empty($job['error'])): ?><div class="job-error"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                                 </div>
@@ -1815,6 +1845,12 @@ foreach ($rescanJobs as $job) {
     const jobLine = document.getElementById('rescan-job-line');
     const pollMeta = document.getElementById('rescan-poll-meta');
     const rescanButton = document.getElementById('rescan-button');
+    const scanRunAt = document.getElementById('scan-run-at');
+    const scanMeta = document.getElementById('scan-meta');
+    const scanTags = document.getElementById('scan-tags');
+    const scanError = document.getElementById('scan-error');
+    const scanEmpty = document.getElementById('scan-empty');
+    const rescanErrorBox = document.getElementById('rescan-last-error');
     const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'rescan_jobs'])) ?>';
 
     const activeStatuses = ['queued', 'running'];
@@ -1825,20 +1861,70 @@ foreach ($rescanJobs as $job) {
         const latestScan = payload.latest_scan || null;
         const first = jobs[0] || null;
         if (latestScan) {
-            const scanLine = summary.querySelector('.meta-line strong');
-            const scanHint = summary.querySelector('.meta-line em');
-            if (scanLine) {
-                scanLine.textContent = latestScan.run_at || '—';
+            if (scanRunAt) {
+                scanRunAt.textContent = latestScan.run_at || '—';
             }
-            if (scanHint) {
-                scanHint.textContent = 'Scanner: ' + (latestScan.scanner || 'unknown') + ' · NSFW: ' + (latestScan.nsfw_score ?? '–');
+            if (scanMeta) {
+                const hasNsfwVal = (latestScan.has_nsfw === null || typeof latestScan.has_nsfw === 'undefined')
+                    ? null
+                    : Number(latestScan.has_nsfw);
+                const flagText = hasNsfwVal === null ? '–' : (hasNsfwVal === 1 ? 'NSFW' : 'SFW');
+                const metaParts = [
+                    'Scanner: ' + (latestScan.scanner || 'unknown'),
+                    'NSFW: ' + (latestScan.nsfw_score ?? '–'),
+                    'Rating: ' + ((latestScan.rating ?? '–')),
+                    'Flag: ' + flagText,
+                ];
+                scanMeta.textContent = metaParts.join(' · ');
+            }
+            if (scanTags) {
+                const tagsVal = (typeof latestScan.tags_written === 'undefined' || latestScan.tags_written === null)
+                    ? null
+                    : Number(latestScan.tags_written);
+                scanTags.textContent = tagsVal === null ? '–' : (tagsVal + ' Tags');
+            }
+            if (scanEmpty) {
+                scanEmpty.style.display = latestScan.run_at ? 'none' : '';
+            }
+            if (scanError) {
+                const err = latestScan.error || '';
+                scanError.textContent = err;
+                scanError.style.display = err ? '' : 'none';
+            }
+        } else {
+            if (scanRunAt) {
+                scanRunAt.textContent = '—';
+            }
+            if (scanMeta) {
+                scanMeta.textContent = 'Kein Eintrag';
+            }
+            if (scanTags) {
+                scanTags.textContent = '–';
+            }
+            if (scanEmpty) {
+                scanEmpty.style.display = '';
+            }
+            if (scanError) {
+                scanError.style.display = 'none';
             }
         }
         if (first && jobLine) {
             const status = (first.status || 'queued').toLowerCase();
-            jobLine.innerHTML = '<span>Rescan Job</span><strong>' + status + '</strong><em class="small">' + ((first.updated_at || first.created_at || '') || '') + '</em>' + (first.error ? '<div class="job-error inline">' + first.error + '</div>' : '');
+            const startTs = first.started_at || first.created_at || '';
+            const finishTs = first.finished_at || first.completed_at || '';
+            jobLine.innerHTML = '<span>Rescan Job</span><strong>' + status + '</strong><em class="small">' + (startTs || '') + (finishTs ? ' → ' + finishTs : '') + '</em>' + (first.error ? '<div class="job-error inline">' + first.error + '</div>' : '');
         } else if (jobLine) {
             jobLine.innerHTML = '<span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>';
+        }
+        if (rescanErrorBox) {
+            const jobError = jobs.find((job) => (job.error));
+            if (jobError && jobError.error) {
+                rescanErrorBox.textContent = 'Letzter Fehler: ' + jobError.error;
+                rescanErrorBox.style.display = '';
+            } else {
+                rescanErrorBox.textContent = '';
+                rescanErrorBox.style.display = 'none';
+            }
         }
         if (rescanButton) {
             const activeJob = activeStatuses.includes((first?.status || '').toLowerCase());

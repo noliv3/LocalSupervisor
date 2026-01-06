@@ -418,24 +418,13 @@ function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $
     return sv_interpret_scanner_response($data, $logger);
 }
 
-function sv_store_tags(PDO $pdo, int $mediaId, array $tags): void
+function sv_store_tags(PDO $pdo, int $mediaId, array $tags): int
 {
     if (!$tags) {
-        return;
+        return 0;
     }
 
-    $insertTag = $pdo->prepare(
-        "INSERT OR IGNORE INTO tags (name, type, locked) VALUES (?, ?, 0)"
-    );
-    $getTagId = $pdo->prepare(
-        "SELECT id FROM tags WHERE name = ?"
-    );
-    $insertMediaTag = $pdo->prepare(
-        "INSERT INTO media_tags (media_id, tag_id, confidence, locked) VALUES (?, ?, ?, 0)"
-        . " ON CONFLICT(media_id, tag_id) DO UPDATE SET confidence = excluded.confidence"
-        . " WHERE media_tags.locked = 0"
-    );
-
+    $normalized = [];
     foreach ($tags as $tag) {
         if (is_string($tag)) {
             $name       = trim($tag);
@@ -452,20 +441,48 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): void
             continue;
         }
 
-        if ($confidence <= 0.0) {
+        if ($confidence <= 0.0 || $name === '') {
             continue;
         }
 
-        $insertTag->execute([$name, $type]);
+        $key = strtolower($name) . '|' . strtolower($type);
+        if (!isset($normalized[$key]) || $confidence > $normalized[$key]['confidence']) {
+            $normalized[$key] = [
+                'name'       => $name,
+                'type'       => $type,
+                'confidence' => $confidence,
+            ];
+        }
+    }
 
-        $getTagId->execute([$name]);
+    $insertTag = $pdo->prepare(
+        "INSERT OR IGNORE INTO tags (name, type, locked) VALUES (?, ?, 0)"
+    );
+    $getTagId = $pdo->prepare(
+        "SELECT id FROM tags WHERE name = ?"
+    );
+    $insertMediaTag = $pdo->prepare(
+        "INSERT INTO media_tags (media_id, tag_id, confidence, locked) VALUES (?, ?, ?, 0)"
+        . " ON CONFLICT(media_id, tag_id) DO UPDATE SET confidence = excluded.confidence"
+        . " WHERE media_tags.locked = 0"
+    );
+
+    $written = 0;
+
+    foreach ($normalized as $tagInfo) {
+        $insertTag->execute([$tagInfo['name'], $tagInfo['type']]);
+
+        $getTagId->execute([$tagInfo['name']]);
         $tagId = (int)$getTagId->fetchColumn();
         if ($tagId <= 0) {
             continue;
         }
 
-        $insertMediaTag->execute([$mediaId, $tagId, $confidence]);
+        $insertMediaTag->execute([$mediaId, $tagId, $tagInfo['confidence']]);
+        $written += (int)$insertMediaTag->rowCount();
     }
+
+    return $written;
 }
 
 function sv_store_scan_result(
@@ -475,10 +492,20 @@ function sv_store_scan_result(
     ?float $nsfwScore,
     array $flags,
     array $raw,
-    ?string $runAt = null
+    ?string $runAt = null,
+    array $meta = [],
+    ?string $error = null
 ): void
 {
     $runAt = $runAt ?: date('c');
+
+    $payload = is_array($raw) ? $raw : ['raw' => $raw];
+    if ($meta !== []) {
+        $payload['_meta'] = $meta;
+    }
+    if ($error !== null) {
+        $payload['_error'] = $error;
+    }
 
     $stmt = $pdo->prepare("
         INSERT INTO scan_results (media_id, scanner, run_at, nsfw_score, flags, raw_json)
@@ -491,14 +518,14 @@ function sv_store_scan_result(
         $runAt,
         $nsfwScore,
         $flags ? json_encode($flags, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
-        json_encode($raw, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
     ]);
 }
 
 function sv_fetch_latest_scan_result(PDO $pdo, int $mediaId): ?array
 {
     $stmt = $pdo->prepare(
-        'SELECT scanner, run_at, nsfw_score, flags FROM scan_results WHERE media_id = ? ORDER BY run_at DESC, id DESC LIMIT 1'
+        'SELECT scanner, run_at, nsfw_score, flags, raw_json FROM scan_results WHERE media_id = ? ORDER BY run_at DESC, id DESC LIMIT 1'
     );
     $stmt->execute([$mediaId]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -506,11 +533,19 @@ function sv_fetch_latest_scan_result(PDO $pdo, int $mediaId): ?array
         return null;
     }
 
+    $raw      = json_decode((string)($row['raw_json'] ?? ''), true) ?: [];
+    $meta     = is_array($raw['_meta'] ?? null) ? $raw['_meta'] : [];
+    $errorMsg = is_string($raw['_error'] ?? null) ? (string)$raw['_error'] : null;
+
     return [
         'scanner'    => (string)($row['scanner'] ?? ''),
         'run_at'     => (string)($row['run_at'] ?? ''),
         'nsfw_score' => isset($row['nsfw_score']) ? (float)$row['nsfw_score'] : null,
         'flags'      => $row['flags'] ?? null,
+        'error'      => $errorMsg,
+        'tags_written' => isset($meta['tags_written']) ? (int)$meta['tags_written'] : null,
+        'has_nsfw'   => isset($meta['has_nsfw']) ? (int)$meta['has_nsfw'] : null,
+        'rating'     => isset($meta['rating']) ? (int)$meta['rating'] : null,
     ];
 }
 
@@ -1193,8 +1228,23 @@ function sv_import_file(
 
         if ($scanData !== null) {
             $raw = is_array($scanData['raw'] ?? null) ? $scanData['raw'] : [];
-            sv_store_scan_result($pdo, $mediaId, 'pixai_sensible', $nsfwScore, $scanFlags, $raw);
-            sv_store_tags($pdo, $mediaId, $scanTags);
+            $runAt = date('c');
+            $writtenTags = sv_store_tags($pdo, $mediaId, $scanTags);
+            sv_store_scan_result(
+                $pdo,
+                $mediaId,
+                'pixai_sensible',
+                $nsfwScore,
+                $scanFlags,
+                $raw,
+                $runAt,
+                [
+                    'tags_written' => $writtenTags,
+                    'path_after'   => $destPathDb,
+                    'has_nsfw'     => $hasNsfw,
+                    'rating'       => $rating,
+                ]
+            );
         }
 
         $logStmt = $pdo->prepare("
@@ -1374,13 +1424,15 @@ function sv_rescan_media(
     $id   = (int)$mediaRow['id'];
     $path = (string)$mediaRow['path'];
     $type = (string)$mediaRow['type'];
+    $scannerName = (string)($scannerCfg['name'] ?? 'pixai_sensible');
+    $runAt       = date('c');
 
     $resultMeta = [
         'success'      => false,
-        'scanner'      => (string)($scannerCfg['name'] ?? 'pixai_sensible'),
+        'scanner'      => $scannerName,
         'nsfw_score'   => null,
         'tags_written' => 0,
-        'run_at'       => null,
+        'run_at'       => $runAt,
         'has_nsfw'     => null,
         'rating'       => null,
         'path_before'  => $path,
@@ -1400,6 +1452,24 @@ function sv_rescan_media(
         $stmt = $pdo->prepare("UPDATE media SET status = 'missing' WHERE id = ?");
         $stmt->execute([$id]);
 
+        sv_store_scan_result(
+            $pdo,
+            $id,
+            $scannerName,
+            null,
+            [],
+            ['notice' => 'file_missing'],
+            $runAt,
+            [
+                'tags_written' => 0,
+                'path_before'  => $fullPath,
+                'path_after'   => $fullPath,
+                'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
+                'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
+            ],
+            $resultMeta['error']
+        );
+
         return false;
     }
 
@@ -1409,6 +1479,23 @@ function sv_rescan_media(
             $logger("Media ID {$id}: Scanner fehlgeschlagen.");
         }
         $resultMeta['error'] = 'Scanner fehlgeschlagen';
+        sv_store_scan_result(
+            $pdo,
+            $id,
+            $scannerName,
+            null,
+            [],
+            ['notice' => 'scanner_failed'],
+            $runAt,
+            [
+                'tags_written' => 0,
+                'path_before'  => $fullPath,
+                'path_after'   => $fullPath,
+                'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
+                'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
+            ],
+            $resultMeta['error']
+        );
         return false;
     }
 
@@ -1418,7 +1505,6 @@ function sv_rescan_media(
     $raw       = is_array($scanData['raw'] ?? null) ? $scanData['raw'] : [];
 
     $resultMeta['nsfw_score'] = $nsfwScore;
-    $resultMeta['tags_written'] = count($scanTags);
 
     $hasNsfw = 0;
     $rating  = 0;
@@ -1498,10 +1584,26 @@ function sv_rescan_media(
         $delTags = $pdo->prepare("DELETE FROM media_tags WHERE media_id = ? AND locked = 0");
         $delTags->execute([$id]);
 
-        sv_store_tags($pdo, $id, $scanTags);
+        $writtenTags = sv_store_tags($pdo, $id, $scanTags);
+        $resultMeta['tags_written'] = $writtenTags;
         $runAt = date('c');
         $resultMeta['run_at'] = $runAt;
-        sv_store_scan_result($pdo, $id, 'pixai_sensible', $nsfwScore, $scanFlags, $raw, $runAt);
+        sv_store_scan_result(
+            $pdo,
+            $id,
+            $scannerName,
+            $nsfwScore,
+            $scanFlags,
+            $raw,
+            $runAt,
+            [
+                'tags_written' => $writtenTags,
+                'path_before'  => $fullPath,
+                'path_after'   => $newPath,
+                'has_nsfw'     => $hasNsfw,
+                'rating'       => $rating,
+            ]
+        );
 
         $stmt = $pdo->prepare("
             UPDATE media
@@ -1522,6 +1624,23 @@ function sv_rescan_media(
             $logger("Media ID {$id}: DB-Fehler beim Rescan: " . $e->getMessage());
         }
         $resultMeta['error'] = $e->getMessage();
+        sv_store_scan_result(
+            $pdo,
+            $id,
+            $scannerName,
+            $nsfwScore,
+            $scanFlags,
+            $raw ?? [],
+            $runAt,
+            [
+                'tags_written' => $resultMeta['tags_written'] ?? 0,
+                'path_before'  => $fullPath,
+                'path_after'   => $newPath,
+                'has_nsfw'     => $hasNsfw,
+                'rating'       => $rating,
+            ],
+            $resultMeta['error']
+        );
         return false;
     }
 
