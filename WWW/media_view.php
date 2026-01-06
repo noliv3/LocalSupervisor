@@ -363,8 +363,11 @@ $consistencyStatus = sv_media_consistency_status($pdo, $id);
 $issueReport = sv_collect_integrity_issues($pdo, [$id]);
 $mediaIssues = $issueReport['by_media'][$id] ?? [];
 $versions = sv_get_media_versions($pdo, $id);
+$requestedAssetType = isset($_GET['asset']) && is_string($_GET['asset']) ? strtolower(trim((string)$_GET['asset'])) : null;
 $activeVersionIndex = 0;
 foreach ($versions as $idx => $version) {
+    $assetSet = sv_prepare_version_asset_set($version, $media);
+    $versions[$idx]['_asset_set'] = $assetSet;
     if (!empty($version['is_current'])) {
         $activeVersionIndex = $idx;
     }
@@ -374,8 +377,14 @@ if ($requestedVersion >= 0 && $requestedVersion < count($versions)) {
     $activeVersionIndex = $requestedVersion;
 }
 $activeVersion = $versions[$activeVersionIndex] ?? $versions[0];
-$activePath = (string)($activeVersion['output_path'] ?? ($media['path'] ?? ''));
-if ($activePath === '' || !is_file($activePath)) {
+$activeAssetSet = $activeVersion['_asset_set'] ?? sv_prepare_version_asset_set($activeVersion, $media);
+$activeAssetSelection = sv_select_asset_from_set($activeAssetSet, $requestedAssetType);
+$activeAssetWarning = ($requestedAssetType !== null && !in_array($requestedAssetType, $activeAssetSelection['options'], true))
+    ? 'Asset-Auswahl nicht verfügbar, verwende ' . sv_asset_label($activeAssetSelection['type']) . '.'
+    : null;
+$activeUrls = sv_build_asset_urls($id, $showAdult, $activeAssetSelection);
+$activePath = (string)($activeAssetSelection['path'] ?? ($activeVersion['output_path'] ?? ($media['path'] ?? '')));
+if ($activePath === '') {
     $activePath = (string)($media['path'] ?? '');
 }
 $activeHash = (string)($activeVersion['hash_display'] ?? ($media['hash'] ?? ''));
@@ -387,6 +396,17 @@ $activeScheduler = $activeVersion['scheduler'] ?? ($prompt['scheduler'] ?? '');
 $activeSeed = $activeVersion['seed'] ?? ($prompt['seed'] ?? '');
 $activeSteps = $activeVersion['steps'] ?? ($prompt['steps'] ?? '');
 $activeCfg = $activeVersion['cfg_scale'] ?? ($prompt['cfg_scale'] ?? '');
+$activeAssetExists = (bool)($activeAssetSelection['exists'] ?? false);
+$activeThumbUrl = $activeUrls['thumb'] ?? '';
+$activeStreamUrl = $activeUrls['stream'] ?? '';
+$secondaryAssetSelection = null;
+foreach ($activeAssetSelection['options'] as $candidate) {
+    if ($candidate !== $activeAssetSelection['type']) {
+        $secondaryAssetSelection = sv_select_asset_from_set($activeAssetSet, $candidate);
+        break;
+    }
+}
+$secondaryAssetUrls = $secondaryAssetSelection ? sv_build_asset_urls($id, $showAdult, $secondaryAssetSelection) : [];
 $versionCompareA = isset($_GET['compare_a']) ? (int)$_GET['compare_a'] : $activeVersionIndex;
 $versionCompareB = isset($_GET['compare_b']) ? (int)$_GET['compare_b'] : $activeVersionIndex;
 if ($versionCompareA < 0 || $versionCompareA >= count($versions)) {
@@ -397,6 +417,12 @@ if ($versionCompareB < 0 || $versionCompareB >= count($versions)) {
 }
 $compareVersionA = $versions[$versionCompareA] ?? null;
 $compareVersionB = $versions[$versionCompareB] ?? null;
+$compareAssetTypeA = isset($_GET['compare_asset_a']) && is_string($_GET['compare_asset_a']) ? strtolower(trim((string)$_GET['compare_asset_a'])) : null;
+$compareAssetTypeB = isset($_GET['compare_asset_b']) && is_string($_GET['compare_asset_b']) ? strtolower(trim((string)$_GET['compare_asset_b'])) : null;
+$compareAssetSelectionA = $compareVersionA ? sv_select_asset_from_set($compareVersionA['_asset_set'] ?? sv_prepare_version_asset_set($compareVersionA, $media), $compareAssetTypeA) : null;
+$compareAssetSelectionB = $compareVersionB ? sv_select_asset_from_set($compareVersionB['_asset_set'] ?? sv_prepare_version_asset_set($compareVersionB, $media), $compareAssetTypeB) : null;
+$compareAssetUrlsA = $compareAssetSelectionA ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionA) : [];
+$compareAssetUrlsB = $compareAssetSelectionB ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionB) : [];
 $versionDiff = [];
 if ($compareVersionA && $compareVersionB && $versionCompareA !== $versionCompareB) {
     $fields = ['model_used', 'sampler', 'scheduler', 'steps', 'cfg_scale', 'seed', 'width', 'height', 'hash_display', 'prompt_category', 'mode'];
@@ -507,6 +533,92 @@ function sv_simple_line_diff(string $old, string $new): array
     return $diff;
 }
 
+function sv_prepare_version_asset_set(array $version, array $media): array
+{
+    $jobId = isset($version['job_id']) ? (int)$version['job_id'] : null;
+    $mode  = strtolower((string)($version['mode'] ?? ''));
+    $primaryType = $jobId === null ? 'baseline' : ($mode === 'preview' ? 'preview' : 'output');
+
+    $variants = [];
+    $outputPath = (string)($version['output_path'] ?? ($media['path'] ?? ''));
+    if ($outputPath !== '') {
+        $variants[$primaryType] = $outputPath;
+    }
+    if ($jobId === null && ($media['path'] ?? '') !== '') {
+        $variants['baseline'] = (string)$media['path'];
+        $primaryType = 'baseline';
+    }
+    if ($jobId !== null && !empty($version['backup_path'])) {
+        $variants['backup'] = (string)$version['backup_path'];
+    }
+    if (!isset($variants[$primaryType]) && $variants !== []) {
+        $primaryType = array_keys($variants)[0];
+    }
+
+    return [
+        'job_id'        => $jobId,
+        'primary_type'  => $primaryType,
+        'variants'      => $variants,
+        'version_token' => $version['version_token'] ?? null,
+        'status'        => $version['status'] ?? null,
+    ];
+}
+
+function sv_select_asset_from_set(array $assetSet, ?string $requestedType = null): array
+{
+    $type = $assetSet['primary_type'] ?? 'baseline';
+    if ($requestedType !== null && isset($assetSet['variants'][$requestedType])) {
+        $type = $requestedType;
+    } elseif (!isset($assetSet['variants'][$type])) {
+        $keys = array_keys($assetSet['variants']);
+        $type = $keys[0] ?? $type;
+    }
+
+    $path = $assetSet['variants'][$type] ?? '';
+
+    return [
+        'type'          => $type,
+        'path'          => $path,
+        'job_id'        => $assetSet['job_id'] ?? null,
+        'version_token' => $assetSet['version_token'] ?? null,
+        'status'        => $assetSet['status'] ?? null,
+        'exists'        => is_string($path) && $path !== '' && is_file($path),
+        'options'       => array_keys($assetSet['variants']),
+    ];
+}
+
+function sv_asset_label(string $type): string
+{
+    return match ($type) {
+        'preview' => 'Preview',
+        'backup'  => 'Backup',
+        'output'  => 'Output',
+        default   => 'Baseline',
+    };
+}
+
+function sv_build_asset_urls(int $mediaId, bool $adult, array $selection): array
+{
+    $params = ['adult' => $adult ? '1' : '0'];
+    if (!empty($selection['job_id'])) {
+        $params['job_id'] = (int)$selection['job_id'];
+        $params['asset']  = (string)$selection['type'];
+    } else {
+        $params['id'] = $mediaId;
+    }
+
+    if (!empty($selection['version_token'])) {
+        $params['v'] = (string)$selection['version_token'];
+    }
+
+    $query = http_build_query($params);
+
+    return [
+        'thumb'  => 'thumb.php?' . $query,
+        'stream' => 'media_stream.php?' . $query,
+    ];
+}
+
 $promptExists   = $prompt !== null;
 $promptText     = trim((string)($prompt['prompt'] ?? ''));
 $needsRebuild   = !$consistencyStatus['prompt_complete'];
@@ -608,71 +720,66 @@ if ($hasFileIssue) {
 if (!$consistencyStatus['prompt_complete']) {
     $forgeInfoNotes[] = 'Prompt unvollständig; Fallback/Tag-Rebuild greift in operations.php.';
 }
-$thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
-$thumbVersion = (string)($activeVersion['version_token'] ?? $activeHash ?? '');
+$thumbUrl = $activeThumbUrl;
+$thumbHasVersion = strpos($thumbUrl, 'v=') !== false;
+$thumbVersion = (string)($activeAssetSelection['version_token'] ?? $activeVersion['version_token'] ?? $activeHash ?? '');
 if ($thumbVersion === '' && is_file($activePath)) {
     $thumbVersion = (string)@filemtime($activePath);
 }
-if ($thumbVersion !== '') {
+if (!$thumbHasVersion && $thumbVersion !== '') {
     $thumbUrl .= (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode($thumbVersion);
 }
 
 $latestPreview = null;
 $latestJobResponse = null;
 $latestJobRequest = null;
+$manualOverrideActive = false;
 $latestJobStmt = $pdo->prepare('SELECT id, status, forge_response_json, forge_request_json FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT 1');
 $latestJobStmt->execute([':type' => SV_FORGE_JOB_TYPE, ':media_id' => $id]);
 $latestJobRow = $latestJobStmt->fetch(PDO::FETCH_ASSOC);
 if ($latestJobRow) {
+    $latestJobId = (int)$latestJobRow['id'];
     $latestJobResponse = json_decode((string)($latestJobRow['forge_response_json'] ?? ''), true) ?: [];
     $latestJobRequest  = json_decode((string)($latestJobRow['forge_request_json'] ?? ''), true) ?: [];
 
     $responseMode = (string)($latestJobResponse['mode'] ?? $latestJobRequest['_sv_mode'] ?? '');
     $responseResult = is_array($latestJobResponse['result'] ?? null) ? $latestJobResponse['result'] : [];
-    $newHash = $responseResult['new_hash'] ?? null;
-    if ($responseMode === 'replace' && $newHash) {
-        $thumbUrl .= (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode((string)$newHash);
-    }
-
     if ((string)($latestJobRow['status'] ?? '') === 'done' && $responseMode === 'preview') {
         $previewPath = (string)($latestJobResponse['preview_path'] ?? '');
         $previewAllowed = false;
-        $previewDataUri = null;
         $previewError   = null;
         $previewVersion = $latestJobResponse['preview_hash'] ?? null;
         if ($previewPath !== '') {
             try {
-                sv_assert_media_path_allowed($previewPath, $config['paths'] ?? [], 'forge_preview');
+                sv_assert_stream_path_allowed($previewPath, $config, 'forge_preview', true, true);
                 $previewAllowed = true;
             } catch (Throwable $e) {
                 $previewError = $e->getMessage();
             }
 
             if ($previewAllowed && is_file($previewPath)) {
-                if ($previewVersion === null) {
-                    $previewVersion = @filemtime($previewPath) ?: null;
-                }
-                $maxSize = 6 * 1024 * 1024;
-                $fileSize = (int)@filesize($previewPath);
-                if ($fileSize > 0 && $fileSize <= $maxSize) {
-                    $raw = @file_get_contents($previewPath);
-                    if ($raw !== false) {
-                        $mime = @mime_content_type($previewPath) ?: 'image/jpeg';
-                        $previewDataUri = 'data:' . $mime . ';base64,' . base64_encode($raw);
-                    }
-                } else {
-                    $previewError = $fileSize > $maxSize ? 'Preview >6MB, nicht inline geladen.' : null;
+                $previewVersion = $previewVersion ?? (@filemtime($previewPath) ?: null);
+            }
         }
-    }
-}
-$manualOverrideActive = false;
-if (is_array($latestJobRequest)) {
-    $manualOverrideActive = (($latestJobRequest['_sv_prompt_source'] ?? '') === 'manual')
-        || (!empty($latestJobRequest['_sv_regen_plan']['manual_prompt']));
-}
+        $previewUrls = null;
+        if ($previewAllowed) {
+            $previewSelection = [
+                'job_id'        => $latestJobId,
+                'type'          => 'preview',
+                'version_token' => $previewVersion,
+            ];
+            $previewUrls = sv_build_asset_urls($id, $showAdult, $previewSelection);
+        }
+
+        $manualOverrideActive = false;
+        if (is_array($latestJobRequest)) {
+            $manualOverrideActive = (($latestJobRequest['_sv_prompt_source'] ?? '') === 'manual')
+                || (!empty($latestJobRequest['_sv_regen_plan']['manual_prompt']));
+        }
 
         $latestPreview = [
-            'path'     => ($previewVersion !== null && $previewPath !== '')
+            'job_id'      => $latestJobId,
+            'path'        => ($previewVersion !== null && $previewPath !== '')
                 ? ($previewPath . '?v=' . rawurlencode((string)$previewVersion))
                 : $previewPath,
             'source_path' => $previewPath,
@@ -681,9 +788,9 @@ if (is_array($latestJobRequest)) {
             'height'   => $latestJobResponse['preview_height'] ?? null,
             'filesize' => $latestJobResponse['preview_filesize'] ?? null,
             'allowed'  => $previewAllowed,
-            'data_uri' => $previewDataUri,
             'error'    => $previewError,
             'version'  => $previewVersion,
+            'urls'     => $previewUrls ?? [],
         ];
     }
 }
@@ -769,48 +876,110 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                     <label>Version auswählen
                         <select id="version-select">
                             <?php foreach ($versions as $idx => $version): ?>
+                                <?php
+                                $versionAssetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
+                                $versionAssetLabel = sv_asset_label($versionAssetSet['primary_type'] ?? 'baseline');
+                                $versionJobLabel = !empty($version['job_id']) ? (' · Job #' . (int)$version['job_id']) : '';
+                                ?>
                                 <option value="<?= (int)$idx ?>" <?= $idx === $activeVersionIndex ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars('V' . (int)$version['version_index'] . ' · ' . ($version['status'] ?? '')) ?>
+                                    <?= htmlspecialchars('V' . (int)$version['version_index'] . ' · ' . ($version['status'] ?? '') . ' · ' . $versionAssetLabel . $versionJobLabel) ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </label>
-                    <div class="version-meta">Aktiv: <?= htmlspecialchars($activeVersion['source'] ?? 'import', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= !empty($activeVersion['status']) ? ' · ' . htmlspecialchars((string)$activeVersion['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
+                    <div class="version-meta">
+                        Aktiv: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                        <?= $activeAssetSelection['job_id'] ? ' · Job #' . (int)$activeAssetSelection['job_id'] : '' ?>
+                        <?= !empty($activeVersion['status']) ? ' · ' . htmlspecialchars((string)$activeVersion['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?>
+                    </div>
+                    <?php if ($activeAssetWarning): ?>
+                        <div class="version-meta hint"><?= htmlspecialchars($activeAssetWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <?php endif; ?>
+                    <?php if (count($activeAssetSelection['options']) > 1): ?>
+                        <div class="version-meta">
+                            <label>Asset
+                                <select id="asset-select">
+                                    <?php foreach ($activeAssetSelection['options'] as $option): ?>
+                                        <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $activeAssetSelection['type'] ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </label>
+                        </div>
+                    <?php endif; ?>
                 </div>
                 <?php if ($type === 'image'): ?>
                     <div class="preview-grid">
                         <div class="preview-card">
-                            <div class="preview-label original">AKTIVE VERSION</div>
+                            <div class="preview-label original">AKTIV: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                             <div class="preview-frame">
-                                <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
-                                    'path'   => $activePath,
-                                    'hash'   => $activeHash,
-                                    'width'  => $activeWidth,
-                                    'height' => $activeHeight,
-                                    'size'   => (int)($media['filesize'] ?? 0),
-                                ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                            </div>
-                        </div>
-                        <?php if ($latestPreview !== null): ?>
-                            <div class="preview-card">
-                                <div class="preview-label preview">PREVIEW</div>
-                                <?php if ($latestPreview['data_uri']): ?>
-                                    <div class="preview-frame">
-                                        <img src="<?= htmlspecialchars((string)$latestPreview['data_uri'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Preview">
-                                    </div>
+                                <?php if ($activeAssetExists): ?>
+                                    <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
+                                        'path'   => $activePath,
+                                        'hash'   => $activeHash,
+                                        'width'  => $activeWidth,
+                                        'height' => $activeHeight,
+                                        'size'   => (int)($media['filesize'] ?? 0),
+                                    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                 <?php else: ?>
                                     <div class="preview-placeholder">
-                                        <div class="placeholder-title">Keine Inline-Vorschau</div>
-                                        <?php if ($latestPreview['path'] !== ''): ?>
-                                            <div class="placeholder-meta">Pfad: <?= htmlspecialchars((string)$latestPreview['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                        <?php endif; ?>
-                                        <?php if ($latestPreview['error']): ?>
-                                            <div class="placeholder-meta">Hinweis: <?= htmlspecialchars((string)$latestPreview['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                        <?php elseif (!$latestPreview['allowed']): ?>
-                                            <div class="placeholder-meta">Preview nicht streambar, Root nicht erlaubt.</div>
+                                        <div class="placeholder-title">Asset nicht gefunden</div>
+                                        <?php if (!empty($activeAssetSelection['path'])): ?>
+                                            <div class="placeholder-meta"><?= htmlspecialchars((string)$activeAssetSelection['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                         <?php endif; ?>
                                     </div>
                                 <?php endif; ?>
+                            </div>
+                            <div class="preview-meta">
+                                <span><?= htmlspecialchars($activePath !== '' ? basename($activePath) : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <span><?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <?php if ($activeAssetSelection['job_id']): ?><span>Job #<?= (int)$activeAssetSelection['job_id'] ?></span><?php endif; ?>
+                                <?php if (!$activeAssetExists): ?><span class="pill pill-warn">Asset fehlt</span><?php endif; ?>
+                            </div>
+                        </div>
+                        <?php if ($secondaryAssetSelection !== null): ?>
+                            <?php $secondaryLabel = sv_asset_label((string)$secondaryAssetSelection['type']); ?>
+                            <div class="preview-card">
+                                <div class="preview-label preview"><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <div class="preview-frame">
+                                    <?php if (!empty($secondaryAssetUrls['thumb'])): ?>
+                                        <img src="<?= htmlspecialchars((string)$secondaryAssetUrls['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="<?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                    <?php else: ?>
+                                        <div class="preview-placeholder">
+                                            <div class="placeholder-title">Kein Bild verfügbar</div>
+                                            <?php if (!empty($secondaryAssetSelection['path'])): ?>
+                                                <div class="placeholder-meta"><?= htmlspecialchars((string)$secondaryAssetSelection['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                                <div class="preview-meta">
+                                    <span><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                    <?php if (!empty($secondaryAssetSelection['job_id'])): ?><span>Job #<?= (int)$secondaryAssetSelection['job_id'] ?></span><?php endif; ?>
+                                    <?php if (!empty($secondaryAssetSelection['path'])): ?><span class="pill pill-muted" title="<?= htmlspecialchars((string)$secondaryAssetSelection['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad</span><?php endif; ?>
+                                </div>
+                            </div>
+                        <?php elseif ($latestPreview !== null): ?>
+                            <div class="preview-card">
+                                <div class="preview-label preview">PREVIEW</div>
+                                <div class="preview-frame">
+                                    <?php if (!empty($latestPreview['urls']['thumb'])): ?>
+                                        <img src="<?= htmlspecialchars((string)$latestPreview['urls']['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Preview">
+                                    <?php else: ?>
+                                        <div class="preview-placeholder">
+                                            <div class="placeholder-title">Keine Inline-Vorschau</div>
+                                            <?php if ($latestPreview['path'] !== ''): ?>
+                                                <div class="placeholder-meta">Pfad: <?= htmlspecialchars((string)$latestPreview['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                            <?php endif; ?>
+                                            <?php if ($latestPreview['error']): ?>
+                                                <div class="placeholder-meta">Hinweis: <?= htmlspecialchars((string)$latestPreview['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                            <?php elseif (!$latestPreview['allowed']): ?>
+                                                <div class="placeholder-meta">Preview nicht streambar, Root nicht erlaubt.</div>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
                                 <div class="preview-meta">
                                     <span><?= htmlspecialchars((string)($latestPreview['width'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($latestPreview['height'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                     <span>Hash: <?= htmlspecialchars((string)($latestPreview['hash'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -830,12 +999,15 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                         <div class="preview-card">
                             <div class="preview-label preview">PLAYER</div>
                             <div class="preview-frame">
-                                <video controls preload="metadata" width="100%" src="media_stream.php?<?= http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']) ?>"></video>
+                                <video controls preload="metadata" width="100%" src="<?= htmlspecialchars($activeStreamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></video>
                             </div>
                         </div>
                     </div>
                 <?php endif; ?>
                 <div class="media-infobar">
+                    <span class="pill">Ansicht: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $activeAssetSelection['job_id'] ? ' #' . (int)$activeAssetSelection['job_id'] : '' ?></span>
+                    <?php if ($latestJobRow): ?><span class="pill">Letzter Job: #<?= (int)$latestJobRow['id'] ?> <?= htmlspecialchars((string)($latestJobRow['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                    <?php if (!$activeAssetExists): ?><span class="pill pill-warn">Asset fehlt</span><?php endif; ?>
                     <span class="pill">ID: <?= (int)$media['id'] ?></span>
                     <span class="pill">Typ: <?= htmlspecialchars((string)$media['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Auflösung: <?= htmlspecialchars((string)($activeWidth ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($activeHeight ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -1097,16 +1269,19 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                     <div class="job-hint">Keine Versionsdaten verfügbar.</div>
                 <?php else: ?>
                     <div class="version-grid">
-                        <?php foreach ($versions as $version):
-                            $versionToken = (string)($version['version_token'] ?? ($version['timestamp'] ?? $version['version_index']));
-                            $versionCache = $thumbUrl . (strpos($thumbUrl, '?') !== false ? '&' : '?') . 'v=' . rawurlencode($versionToken);
-                            $versionLink = 'media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'v' => $versionToken])) . '#visual';
+                        <?php foreach ($versions as $idx => $version):
+                            $assetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
+                            $primarySelection = sv_select_asset_from_set($assetSet, $assetSet['primary_type'] ?? null);
+                            $primaryUrls = sv_build_asset_urls($id, $showAdult, $primarySelection);
+                            $versionLinkParams = array_merge($filteredParams, ['id' => (int)$id, 'version' => (int)$idx, 'asset' => $primarySelection['type']]);
+                            $versionLink = 'media_view.php?' . http_build_query($versionLinkParams) . '#visual';
+                            $versionAssetLabel = sv_asset_label((string)$primarySelection['type']);
                             ?>
                             <a class="version-tile<?= !empty($version['is_current']) ? ' current' : '' ?>" href="<?= htmlspecialchars($versionLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                 <div class="version-thumb">
-                                    <img src="<?= htmlspecialchars($versionCache, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Version <?= (int)$version['version_index'] ?>">
+                                    <img src="<?= htmlspecialchars((string)$primaryUrls['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Version <?= (int)$version['version_index'] ?>">
                                 </div>
-                                <div class="version-label">V<?= (int)$version['version_index'] ?> <?= !empty($version['is_current']) ? '· aktuell' : '' ?></div>
+                                <div class="version-label">V<?= (int)$version['version_index'] ?> <?= !empty($version['is_current']) ? '· aktuell' : '' ?> · <?= htmlspecialchars($versionAssetLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                 <div class="version-meta-small">Modell: <?= htmlspecialchars((string)($version['model_used'] ?? $version['model_requested'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                             </a>
                         <?php endforeach; ?>
@@ -1127,6 +1302,15 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                             <?php endforeach; ?>
                         </select>
                     </label>
+                    <?php if ($compareAssetSelectionA): ?>
+                        <label>Asset A
+                            <select name="compare_asset_a">
+                                <?php foreach ($compareAssetSelectionA['options'] as $option): ?>
+                                    <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $compareAssetSelectionA['type'] ? 'selected' : '' ?>><?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </label>
+                    <?php endif; ?>
                     <label>Version B
                         <select name="compare_b">
                             <?php foreach ($versions as $idx => $version): ?>
@@ -1134,10 +1318,55 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                             <?php endforeach; ?>
                         </select>
                     </label>
+                    <?php if ($compareAssetSelectionB): ?>
+                        <label>Asset B
+                            <select name="compare_asset_b">
+                                <?php foreach ($compareAssetSelectionB['options'] as $option): ?>
+                                    <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $compareAssetSelectionB['type'] ? 'selected' : '' ?>><?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </label>
+                    <?php endif; ?>
                     <button class="btn secondary" type="submit">Vergleichen</button>
                 </form>
                 <?php if ($compareVersionA && $compareVersionB): ?>
-                    <div class="compare-summary">V<?= (int)$compareVersionA['version_index'] ?> ⇄ V<?= (int)$compareVersionB['version_index'] ?></div>
+                    <div class="compare-summary">V<?= (int)$compareVersionA['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>) ⇄ V<?= (int)$compareVersionB['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</div>
+                    <div class="preview-grid compare-visuals">
+                        <div class="preview-card">
+                            <div class="preview-label original">Quelle A</div>
+                            <div class="preview-frame">
+                                <?php if (!empty($compareAssetUrlsA['thumb'])): ?>
+                                    <img src="<?= htmlspecialchars((string)$compareAssetUrlsA['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Compare A">
+                                <?php else: ?>
+                                    <div class="preview-placeholder">
+                                        <div class="placeholder-title">Kein Bild verfügbar</div>
+                                        <?php if (!empty($compareAssetSelectionA['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars((string)$compareAssetSelectionA['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                            <div class="preview-meta">
+                                <span><?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <?php if (!empty($compareAssetSelectionA['job_id'] ?? null)): ?><span>Job #<?= (int)$compareAssetSelectionA['job_id'] ?></span><?php endif; ?>
+                            </div>
+                        </div>
+                        <div class="preview-card">
+                            <div class="preview-label preview">Quelle B</div>
+                            <div class="preview-frame">
+                                <?php if (!empty($compareAssetUrlsB['thumb'])): ?>
+                                    <img src="<?= htmlspecialchars((string)$compareAssetUrlsB['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Compare B">
+                                <?php else: ?>
+                                    <div class="preview-placeholder">
+                                        <div class="placeholder-title">Kein Bild verfügbar</div>
+                                        <?php if (!empty($compareAssetSelectionB['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars((string)$compareAssetSelectionB['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                            <div class="preview-meta">
+                                <span><?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <?php if (!empty($compareAssetSelectionB['job_id'] ?? null)): ?><span>Job #<?= (int)$compareAssetSelectionB['job_id'] ?></span><?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
                     <?php if ($versionDiff === []): ?>
                         <div class="job-hint">Keine Unterschiede in Kernparametern.</div>
                     <?php else: ?>
@@ -1338,7 +1567,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
     <div id="fullscreen-viewer" class="lightbox hidden">
         <div class="lightbox-inner">
             <button class="lightbox-close" type="button" aria-label="Schließen">×</button>
-            <img src="media_stream.php?<?= http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']) ?>" alt="Fullscreen">
+            <img src="<?= htmlspecialchars($activeStreamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Fullscreen">
             <div class="lightbox-meta">
                 <div>Maße: <?= htmlspecialchars((string)($activeWidth ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($activeHeight ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 <?php if (!empty($media['filesize'])): ?><div>Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</div><?php endif; ?>
@@ -1518,6 +1747,15 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
         versionSelect.addEventListener('change', () => {
             const url = new URL(window.location.href);
             url.searchParams.set('version', versionSelect.value);
+            url.searchParams.delete('asset');
+            window.location.href = url.toString();
+        });
+    }
+    const assetSelect = document.getElementById('asset-select');
+    if (assetSelect) {
+        assetSelect.addEventListener('change', () => {
+            const url = new URL(window.location.href);
+            url.searchParams.set('asset', assetSelect.value);
             window.location.href = url.toString();
         });
     }

@@ -74,3 +74,98 @@ function sv_assert_media_path_allowed(string $path, array $pathsCfg, string $con
 
     throw new RuntimeException('Pfad nicht erlaubt (' . $context . ')');
 }
+
+function sv_normalize_absolute_path(string $path): string
+{
+    $normalized = str_replace('\\', '/', $path);
+    $drivePrefix = '';
+
+    if (preg_match('~^[a-zA-Z]:~', $normalized)) {
+        $drivePrefix = substr($normalized, 0, 2);
+        $normalized = substr($normalized, 2);
+    } elseif (!str_starts_with($normalized, '/')) {
+        $normalized = sv_base_dir() . '/' . ltrim($normalized, '/');
+        $normalized = str_replace('\\', '/', $normalized);
+        if (preg_match('~^[a-zA-Z]:~', $normalized)) {
+            $drivePrefix = substr($normalized, 0, 2);
+            $normalized  = substr($normalized, 2);
+        }
+    }
+
+    $parts = [];
+    foreach (explode('/', $normalized) as $part) {
+        if ($part === '' || $part === '.') {
+            continue;
+        }
+        if ($part === '..') {
+            if ($parts === []) {
+                throw new RuntimeException('Pfad enthält ungültige Traversalbestandteile.');
+            }
+            array_pop($parts);
+            continue;
+        }
+        $parts[] = $part;
+    }
+
+    $normalizedPath = ($drivePrefix !== '' ? $drivePrefix : '') . '/' . implode('/', $parts);
+
+    $normalizedPath = rtrim($normalizedPath, '/');
+
+    if ($normalizedPath === '') {
+        return ($drivePrefix !== '' ? $drivePrefix : '') . '/';
+    }
+
+    return $normalizedPath;
+}
+
+function sv_collect_stream_roots(array $config, bool $allowPreviews = false, bool $allowBackups = false): array
+{
+    $pathsCfg = $config['paths'] ?? [];
+    $rootsMap = sv_media_roots($pathsCfg);
+    $roots    = [];
+
+    foreach ($rootsMap as $root) {
+        $rootNormalized = sv_normalize_absolute_path($root);
+        if ($rootNormalized !== '') {
+            $roots[] = $rootNormalized;
+        }
+    }
+
+    if ($allowPreviews) {
+        $previewCandidate = $pathsCfg['previews'] ?? (sv_base_dir() . '/PREVIEWS');
+        if (is_string($previewCandidate) && trim($previewCandidate) !== '') {
+            $roots[] = sv_normalize_absolute_path((string)$previewCandidate);
+        }
+    }
+
+    if ($allowBackups) {
+        $backupCandidate = $pathsCfg['backups'] ?? (sv_base_dir() . '/BACKUPS');
+        if (is_string($backupCandidate) && trim($backupCandidate) !== '') {
+            $roots[] = sv_normalize_absolute_path((string)$backupCandidate);
+        }
+    }
+
+    $unique = [];
+    foreach ($roots as $root) {
+        if (!in_array($root, $unique, true)) {
+            $unique[] = $root;
+        }
+    }
+
+    return $unique;
+}
+
+function sv_assert_stream_path_allowed(string $path, array $config, string $context, bool $allowPreviews = false, bool $allowBackups = false): void
+{
+    $normalizedPath = sv_normalize_absolute_path($path);
+    $allowedRoots   = sv_collect_stream_roots($config, $allowPreviews, $allowBackups);
+
+    foreach ($allowedRoots as $root) {
+        $normalizedRoot = rtrim($root, '/');
+        if ($normalizedRoot !== '' && str_starts_with($normalizedPath . '/', $normalizedRoot . '/')) {
+            return;
+        }
+    }
+
+    throw new RuntimeException('Pfad nicht erlaubt (' . $context . ')');
+}
