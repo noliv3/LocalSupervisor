@@ -24,6 +24,7 @@
 - Internal-Key-Flow bewahren: Web-Schreibaktionen nur mit `sv_require_internal_access` (Header/Query/Cookie `internal_key` plus IP-Whitelist).
 - Logging-Pflicht für sicherheitsrelevante Aktionen (Backups, Migrationen, Konsistenz-Reparaturen, Web-Starts von Scan/Rescan/Filesync).
 - Pfadvalidierung nicht umgehen: keine Symlinks nutzen, keine Direktzugriffe außerhalb der erlaubten Media-Roots.
+- Forge-Preview/Backup/Output werden in `thumb.php`/`media_stream.php` ausschließlich über `job_id` + `asset` (preview|backup|output) aufgelöst; Pfadfreigabe nur über Preview-/Backup-Roots, NSFW-Check bleibt an `media_id` gekoppelt.
 
 ## Dokumentationspflichten
 - Jede Codeänderung im PR-Output knapp dokumentieren (Kernstellen, keine Diff-Wände).

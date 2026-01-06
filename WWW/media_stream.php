@@ -60,13 +60,65 @@ function sv_normalize_adult_flag(array $input): bool
     return false;
 }
 
-function sv_stream_media(array $config, array $row): void
+$allowedJobTypes = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
+
+function sv_resolve_job_asset(PDO $pdo, array $config, int $jobId, string $asset, array $allowedJobTypes, ?int $expectedMediaId = null): array
+{
+    $jobStmt = $pdo->prepare('SELECT id, media_id, type, status, forge_response_json FROM jobs WHERE id = :id');
+    $jobStmt->execute([':id' => $jobId]);
+    $jobRow = $jobStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$jobRow) {
+        throw new RuntimeException('Job nicht gefunden.');
+    }
+    if (!in_array((string)($jobRow['type'] ?? ''), $allowedJobTypes, true)) {
+        throw new RuntimeException('Job-Typ nicht erlaubt.');
+    }
+
+    $mediaId = isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : 0;
+    if ($expectedMediaId !== null && $mediaId !== $expectedMediaId) {
+        throw new RuntimeException('Job gehört zu einem anderen Medium.');
+    }
+    if ($mediaId <= 0) {
+        throw new RuntimeException('Ungültige Job-Referenz.');
+    }
+
+    $response = json_decode((string)($jobRow['forge_response_json'] ?? ''), true);
+    $result   = is_array($response['result'] ?? null) ? $response['result'] : [];
+
+    $path = null;
+    if ($asset === 'preview') {
+        $path = $result['preview_path'] ?? null;
+    } elseif ($asset === 'backup') {
+        $path = $result['backup_path'] ?? null;
+    } else {
+        $path = $result['output_path'] ?? ($result['preview_path'] ?? null);
+    }
+
+    if (!is_string($path) || trim($path) === '') {
+        throw new RuntimeException('Asset nicht vorhanden.');
+    }
+
+    sv_assert_stream_path_allowed($path, $config, 'media_stream_job_asset', true, true);
+
+    return [
+        'media_id' => $mediaId,
+        'path'     => (string)$path,
+        'status'   => (string)($jobRow['status'] ?? ''),
+    ];
+}
+
+function sv_stream_media(array $config, array $row, ?string $pathOverride = null, bool $allowPreviews = false, bool $allowBackups = false): void
 {
     $pathsCfg = $config['paths'] ?? [];
-    $path     = (string)$row['path'];
+    $path     = $pathOverride !== null ? (string)$pathOverride : (string)$row['path'];
 
     try {
-        sv_assert_media_path_allowed($path, $pathsCfg, 'media_stream');
+        if ($allowPreviews || $allowBackups) {
+            sv_assert_stream_path_allowed($path, $config, 'media_stream', $allowPreviews, $allowBackups);
+        } else {
+            sv_assert_media_path_allowed($path, $pathsCfg, 'media_stream');
+        }
     } catch (Throwable $e) {
         http_response_code(403);
         echo 'Pfad blockiert';
@@ -154,7 +206,29 @@ function sv_stream_media(array $config, array $row): void
 
 $showAdult = sv_normalize_adult_flag($_GET);
 
-$id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
+$jobId   = isset($_GET['job_id']) ? sv_clamp_int((int)$_GET['job_id'], 1, 1_000_000_000, 0) : 0;
+$asset   = isset($_GET['asset']) && is_string($_GET['asset']) ? strtolower(trim((string)$_GET['asset'])) : null;
+$id      = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
+$jobAsset = null;
+$usingJobAsset = false;
+
+if ($jobId > 0) {
+    if (!in_array((string)$asset, ['preview', 'backup', 'output'], true)) {
+        http_response_code(400);
+        echo 'Ungültiges Asset';
+        exit;
+    }
+    try {
+        $jobAsset = sv_resolve_job_asset($pdo, $config, $jobId, (string)$asset, $allowedJobTypes, $id > 0 ? $id : null);
+        $id = (int)$jobAsset['media_id'];
+        $usingJobAsset = true;
+    } catch (Throwable $e) {
+        http_response_code(404);
+        echo 'Asset nicht gefunden';
+        exit;
+    }
+}
+
 if ($id <= 0) {
     http_response_code(400);
     echo 'Ungültige ID';
@@ -177,4 +251,5 @@ if (!$showAdult && (int)($row['has_nsfw'] ?? 0) === 1) {
     exit;
 }
 
-sv_stream_media($config, $row);
+$streamPath = $usingJobAsset && $jobAsset !== null ? (string)$jobAsset['path'] : null;
+sv_stream_media($config, $row, $streamPath, $usingJobAsset, $usingJobAsset);
