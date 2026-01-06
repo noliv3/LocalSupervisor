@@ -21,6 +21,7 @@ if ($dsn === '') {
     fwrite(STDERR, "DB-DSN in config.php fehlt.\n");
     exit(1);
 }
+$redactedDsn = sv_db_redact_dsn($dsn);
 
 $baseDir = sv_base_dir();
 $pdo     = null;
@@ -110,22 +111,30 @@ if ($copySuccess) {
 }
 
 $metadataFile = $backupDir . "/supervisor_{$timestamp}.meta.json";
+$redactedPath = str_replace('\\', '/', $dbPath);
+$redactedPath = str_replace(str_replace('\\', '/', $baseDir), '<base>', $redactedPath);
 $metadata     = [
     'created_at'     => date('c'),
-    'database_dsn'   => sv_db_redact_dsn($dsn),
-    'database_path'  => $dbPath,
+    'database_dsn'   => $redactedDsn,
+    'database_path'  => $redactedPath,
     'backup_file'    => $backupFile,
     'backup_gzip'    => $gzipSuccess ? $backupGzip : null,
     'driver'         => $pdo instanceof PDO ? (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME) : 'unknown',
     'config_path'    => $config['_config_path'] ?? null,
     'restore_hint'   => 'Restore: Anwendung stoppen, Backup-Datei an den Zielpfad kopieren (bestehende Datei sichern) und Dienst neu starten.',
     'schema_tables'  => [],
+    'schema_overview'=> [
+        'table_count' => null,
+        'tables_sample' => [],
+    ],
 ];
 
 if ($pdo instanceof PDO) {
     try {
         $tablesStmt = $pdo->query("SELECT name FROM sqlite_master WHERE type='table'");
         $metadata['schema_tables'] = $tablesStmt ? $tablesStmt->fetchAll(PDO::FETCH_COLUMN) : [];
+        $metadata['schema_overview']['table_count'] = is_array($metadata['schema_tables']) ? count($metadata['schema_tables']) : null;
+        $metadata['schema_overview']['tables_sample'] = array_slice($metadata['schema_tables'], 0, 10);
     } catch (Throwable $e) {
         $metadata['schema_tables'] = ['<nicht lesbar: ' . $e->getMessage() . '>'];
     }
@@ -144,6 +153,6 @@ if ($pdo instanceof PDO) {
         'target'       => $backupFile,
         'compressed'   => $gzipSuccess,
         'backup_dir'   => $backupDir,
-        'database_dsn' => $dsn,
+        'database_dsn' => $redactedDsn,
     ]);
 }

@@ -5,6 +5,7 @@
 - Erlaubt: Zielgerichtete Änderungen an PHP/SQL/Config/Docs, wenn explizit beauftragt.
 - Nicht erlaubt ohne Auftrag: Änderungen an `CONFIG/`, `DB/`, `SCRIPTS/migrations/`, sicherheitsrelevanten Parametern oder Logik, die Datenfluss oder Zugriffsmodell beeinflusst.
 - Gefährliche Bereiche: `CONFIG/config.php`, `SCRIPTS/migrations/*`, `DB/schema.sql`, `SCRIPTS/security.php`, `WWW/media_stream.php`, `WWW/thumb.php` (Pfadvalidierung), `SCRIPTS/paths.php`.
+- Keine neuen Repository-Dateien oder Ordner anlegen; bestehende Strukturen nutzen.
 
 ## Arbeitsanweisungen
 - Refactor nur mit klarer Zielsetzung; keine breitflächigen Umbenennungen oder Formatierungen.
@@ -33,8 +34,9 @@
 - Prompt-Qualität wird zentral in `SCRIPTS/operations.php` bewertet; Web-Views und Forge-Fallbacks nutzen ausschließlich diese
   Funktionen (keine eigenen Heuristiken in den PHP-Views).
 - Internal-Key kann einmalig per `?internal_key=` gesetzt werden; bei gültigem Key (IP-Whitelist vorausgesetzt) wird er für die Session/als HttpOnly-Cookie gemerkt, ohne den Wert in Klartext zu loggen.
-- Health-Snapshot-Standard: DB/Job/Scan-Health kommt aus `operations.php` (Issues nach Check/Severity, stuck Jobs, letzte Jobs/Scans, Trigger aus Audit-Log); neue Prüfungen dort anhängen, Format in Dashboard/CLI beibehalten.
-- `db_backup.php` schreibt neben dem SQLite-/GZIP-Backup eine `.meta.json` (redacted DSN, Tabellenliste, Restore-Hinweis); Restore erfolgt durch Stopp des Dienstes und Kopie des Backups an den DB-Pfad (Bestand sichern).
+- Health-Snapshot-Standard: DB/Job/Scan-Health kommt aus `operations.php` (Issues nach Check/Severity, stuck Jobs, letzte Jobs/Scans, Trigger aus Audit-Log); neue Prüfungen dort anhängen, Format in Dashboard/CLI beibehalten. Snapshot enthält Treiber, redigierten DSN, offene Migrationen/Schema-Diff, stuck_jobs_count, letzte Job-Fehler sowie letzte Scan-Zeit/Scan-Job-Errors.
+- `consistency_check.php` liefert Exit-Code ≠ 0 bei Findings (Report und Simple-Repair); Snapshot-Ausgabe in CLI/Dashboard ist strukturgleich.
+- `db_backup.php` schreibt neben dem SQLite-/GZIP-Backup eine `.meta.json` (redacted DSN/Pfad, Tabellenliste + Schema-Überblick, Restore-Hinweis); Restore erfolgt durch Stopp des Dienstes und Kopie des Backups an den DB-Pfad (Bestand sichern).
 - Neuer VA/VIDAX-Setup-Flow: `va doctor` (Runtime-Checks), `va install` (StateDir + Assets, kopiert fehlende Example-Configs nach `state/config`), VIDAX-Install-Endpunkte (`/install`, `/install/status`, `/jobs/:id/start` blockiert ohne Assets). Änderungen daran immer in README.md dokumentieren (keine separaten docs/SETUP.md oder docs/ASSETS.md vorhanden).
 - Forge-Regen-Buttons werden bei allen Bildmedien angezeigt; Ausführung erfordert weiterhin Internal-Key/IP-Whitelist, Hinweise zum Zustand genügen.
 - Prompt-Historie und Snapshot-Rebuild: `prompt_history` hält Versionen inkl. Raw-Text, Schreibpfade (Scan/Rescan/Forge/Snapshot-Rebuild) müssen die Historie füllen. Prompt-Rebuild nutzt vorhandene `media_meta.prompt_raw`-Snapshots, wenn Originaldateien fehlen, sonst Originaldatei. UI zeigt Timeline + einfachen Diff; keine Restore-Funktion.

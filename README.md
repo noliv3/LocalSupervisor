@@ -103,9 +103,10 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `WWW/media_stream.php?job_id=<id>&asset=preview|backup|output` | Streamt Forge-Preview/Backup/Output (Pfad aus Job-Response, NSFW-Regeln via media_id) | job_id, asset, optional adult |
 | `WWW/thumb.php?path=<path>` | Thumbnails nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
 | `WWW/thumb.php?job_id=<id>&asset=preview|backup|output` | Thumb aus Forge-Preview/Backup/Output (Pfad aus Job-Response, read-only Roots) | job_id, asset, optional adult |
+> Hinweis: `SCRIPTS/consistency_check.php` beendet sich mit Exit-Code ≠ 0, sobald Findings erkannt werden (Report und Simple-Repair). Snapshot-Format (DB/Job/Scan) ist identisch in CLI und Dashboard.
 
 ## Backup/Restore
-- `db_backup.php` legt neben dem SQLite-Backup (optional GZIP) eine `.meta.json` mit redacted DSN, Tabellenliste, Zeitstempel und Restore-Hinweis ab.
+- `db_backup.php` legt neben dem SQLite-Backup (optional GZIP) eine `.meta.json` als Runtime-Artefakt mit redigiertem DSN/Pfad, Schema-Überblick (Tabellenliste, Anzahl/Sample) und Restore-Hinweis ab.
 - Restore-Pfad: Anwendung stoppen, Backup-Datei an den konfigurierten DB-Pfad kopieren (bestehende Datei vorher sichern), Dienst neu starten. Die Metadaten-Datei dient als Nachweis/Beiblatt für Artefakt/Zeitpunkt.
 
 ## Konsistenz-Tools
@@ -113,10 +114,10 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Mini-Konsistenzcheck**: Direkt in der Detailansicht werden pro Medium die Stati (Prompt vollständig, Tags, Metadaten) angezeigt.
 - **Komfort-Rebuild**: Im Dashboard steht ein Button „Rebuild fehlender Prompts“, der nur Medien mit fehlenden Prompt-Kernfeldern (internes Limit 100) per Einzel-Rebuild anstößt und Audit-Log-Einträge schreibt.
 - **Stale-Scan-Indikator**: Wenn beim Forge-Refresh kein Scanner erreichbar war, wird ein `scan_stale`-Flag in `media_meta` hinterlegt und als Badge in `mediadb.php` sowie der Detailansicht angezeigt.
-- **Health Snapshot**: Dashboard und `SCRIPTS/consistency_check.php` zeigen ein kompaktes DB/Job/Scan-Health-Panel (Issues nach Check/Severity, stuck Jobs, letzte Jobs/Scans, Trigger aus Audit-Log). Es meldet u. a. Tag-Lock-Konflikte, fehlende `scan_results.run_at/scanner`, Job-State-Lücken und verwaiste `prompt_history`-Links.
+- **Health Snapshot**: Dashboard und `SCRIPTS/consistency_check.php` zeigen ein kompaktes DB/Job/Scan-Health-Panel (Issues nach Check/Severity, stuck Jobs, letzte Jobs/Scans, Trigger aus Audit-Log). Der Snapshot enthält Treiber/DSN (redacted), offene Migrationen, Schema-Diff, stuck_jobs_count, letzten Job-Fehler, letzte Scan-Zeit und Scan-Job-Fehler. Die Checks erkennen u. a. Tag-Lock-Konflikte, doppelte Tag-Zuordnungen (locked/unlocked), fehlende `scan_results.run_at/scanner` bzw. fehlende Scan-Verknüpfungen, Job-State-Lücken (fehlende Zeiten/Progress/Errortext) sowie verwaiste `prompt_history`-Einträge (inkl. fehlendem Media/Version).
 
 ## Integritätsanalyse und einfache Reparatur
-- **Analyse (read-only)**: `SCRIPTS/operations.php` stellt Prüfungen bereit, die fehlende Hashes, fehlende Dateien (Status `active`), Prompts ohne Roh-Metadaten, Tag-Zuordnungen ohne Confidence oder widersprüchliche Locks, fehlende `scan_results.run_at/scanner`, Job-State-Lücken sowie verwaiste `prompt_history`-Verweise erkennen. Ergebnisse werden strukturiert pro Medium/Typ zurückgegeben.
+- **Analyse (read-only)**: `SCRIPTS/operations.php` stellt Prüfungen bereit, die fehlende Hashes, fehlende Dateien (Status `active`), Prompts ohne Roh-Metadaten, doppelte Tag-Zuordnungen (locked/unlocked), Tag-Zuordnungen ohne Confidence, fehlende `scan_results.run_at/scanner` oder komplett fehlende Scan-Verknüpfungen, Job-State-Lücken (fehlende Timestamps/Progress/Errortext) sowie verwaiste oder versionslose `prompt_history`-Verweise erkennen. Ergebnisse werden strukturiert pro Medium/Typ zurückgegeben.
 - **UI-Anzeigen**: `media_view.php` listet konkrete Probleme des Mediums (erste drei Zeilen, Rest aufklappbar). `mediadb.php` bietet einen Filter `?issues=1` und markiert betroffene Medien in der Grid-Ansicht. Das Dashboard (`index.php`) zeigt die Anzahl der problematischen Medien im Abschnitt „Integritätsstatus“.
 - **Einfache Reparatur**: Über das Dashboard (Internal-Key/IP-Whitelist erforderlich) kann eine minimale Reparatur ausgelöst werden. Sie setzt nur den Status auf `missing`, wenn Dateien fehlen, entfernt `media_tags`-Einträge ohne Confidence (locked-Einträge bleiben erhalten) und löscht komplett leere Prompt-Objekte. Alle Schritte laufen über `SCRIPTS/operations.php` und werden auditgeloggt.
 

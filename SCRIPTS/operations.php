@@ -4,6 +4,7 @@ declare(strict_types=1);
 // Zentrale Operationsbibliothek für Web- und CLI-Aufrufer.
 
 require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/db_helpers.php';
 require_once __DIR__ . '/logging.php';
 require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
@@ -5773,7 +5774,9 @@ function sv_run_consistency_checks(PDO $pdo, callable $logFinding, string $repai
     sv_check_duplicate_hashes($pdo, $logFinding);
     sv_check_missing_files($pdo, $logFinding, $repairMode);
     sv_check_tag_lock_conflicts($pdo, $logFinding);
+    sv_check_duplicate_media_tags($pdo, $logFinding);
     sv_check_scan_metadata_gaps($pdo, $logFinding);
+    sv_check_scan_missing_links($pdo, $logFinding);
     sv_check_job_state_gaps($pdo, $logFinding);
     sv_check_prompt_history_links($pdo, $logFinding);
 }
@@ -5976,6 +5979,24 @@ function sv_check_tag_lock_conflicts(PDO $pdo, callable $logFinding): void
     }
 }
 
+function sv_check_duplicate_media_tags(PDO $pdo, callable $logFinding): void
+{
+    $stmt = $pdo->query(
+        'SELECT media_id, tag_id, COUNT(*) AS cnt, SUM(CASE WHEN locked = 1 THEN 1 ELSE 0 END) AS locked_cnt '
+        . 'FROM media_tags GROUP BY media_id, tag_id HAVING cnt > 1'
+    );
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $lockedCnt  = (int)($row['locked_cnt'] ?? 0);
+        $unlocked   = ((int)($row['cnt'] ?? 0)) - $lockedCnt;
+        $logFinding(
+            $lockedCnt > 0 && $unlocked > 0 ? 'media_tags_locked_mix' : 'media_tags_duplicate',
+            'warn',
+            'Media_ID=' . $row['media_id'] . ', Tag_ID=' . $row['tag_id'] . ', Rows=' . $row['cnt']
+                . ' (locked=' . $lockedCnt . ', unlocked=' . $unlocked . ')'
+        );
+    }
+}
+
 function sv_check_scan_metadata_gaps(PDO $pdo, callable $logFinding): void
 {
     $stmt = $pdo->query(
@@ -5992,11 +6013,21 @@ function sv_check_scan_metadata_gaps(PDO $pdo, callable $logFinding): void
     }
 }
 
+function sv_check_scan_missing_links(PDO $pdo, callable $logFinding): void
+{
+    $stmt = $pdo->query(
+        'SELECT m.id FROM media m LEFT JOIN scan_results s ON s.media_id = m.id WHERE s.id IS NULL LIMIT 200'
+    );
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $logFinding('scan_missing_latest', 'warn', 'Media_ID=' . $row['id'] . ' ohne Scan-Ergebnis');
+    }
+}
+
 function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
 {
     $allowedStatuses = ['queued', 'pending', 'created', 'running', 'done', 'error', 'canceled'];
     $stmt = $pdo->query(
-        'SELECT id, type, status, created_at, updated_at, error_message FROM jobs ORDER BY id DESC LIMIT 500'
+        'SELECT id, type, status, created_at, updated_at, error_message, forge_response_json FROM jobs ORDER BY id DESC LIMIT 500'
     );
 
     $now = time();
@@ -6011,6 +6042,7 @@ function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
         $id         = (int)$row['id'];
         $type       = (string)($row['type'] ?? '');
         $errorMsg   = trim((string)($row['error_message'] ?? ''));
+        $response   = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
 
         if (!in_array($status, $allowedStatuses, true)) {
             $logFinding('job_state_invalid', 'warn', 'Job #' . $id . ' (' . $type . ') mit unbekanntem Status: ' . $status);
@@ -6031,6 +6063,18 @@ function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
         if ($errorMsg !== '' && $status === 'running') {
             $logFinding('job_state_gap', 'info', 'Job #' . $id . ' (' . $type . ') running mit Error-Meldung: ' . $errorMsg);
         }
+
+        if ($status === 'running' && $updatedAt === '') {
+            $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') running ohne Fortschritt/Timeout-Update');
+        }
+
+        if ($status === 'running' && empty($response['_sv_timeout_at']) && empty($response['progress'])) {
+            $logFinding('job_state_gap', 'info', 'Job #' . $id . ' (' . $type . ') running ohne Progress-/Timeout-Indikator');
+        }
+
+        if ($status === 'error' && $errorMsg === '') {
+            $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') im Status error ohne Fehlermeldung');
+        }
     }
 }
 
@@ -6049,9 +6093,32 @@ function sv_check_prompt_history_links(PDO $pdo, callable $logFinding): void
             'History_ID=' . $row['id'] . ', Prompt_ID=' . $row['prompt_id'] . ', Media_ID=' . $row['media_id']
         );
     }
+
+    $mediaStmt = $pdo->query(
+        'SELECT ph.id, ph.media_id FROM prompt_history ph '
+        . 'LEFT JOIN media m ON m.id = ph.media_id WHERE m.id IS NULL LIMIT 200'
+    );
+    while ($row = $mediaStmt->fetch(PDO::FETCH_ASSOC)) {
+        $logFinding(
+            'prompt_history_media_missing',
+            'warn',
+            'History_ID=' . $row['id'] . ', Media_ID=' . $row['media_id'] . ' ohne gültiges Medium'
+        );
+    }
+
+    $versionStmt = $pdo->query(
+        'SELECT id, media_id, version FROM prompt_history WHERE version IS NULL OR version <= 0 LIMIT 200'
+    );
+    while ($row = $versionStmt->fetch(PDO::FETCH_ASSOC)) {
+        $logFinding(
+            'prompt_history_version_gap',
+            'warn',
+            'History_ID=' . $row['id'] . ', Media_ID=' . $row['media_id'] . ' ohne gültige Versionsnummer'
+        );
+    }
 }
 
-function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
+function sv_collect_health_snapshot(PDO $pdo, array $config = [], int $jobLimit = 5): array
 {
     $jobLimit = max(1, min(50, $jobLimit));
     $findings = [];
@@ -6075,6 +6142,44 @@ function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
     }
 
     $mediaTotal = 0;
+    $driver     = 'unknown';
+    $redactedDsn = '<unbekannt>';
+    try {
+        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    } catch (Throwable $e) {
+        $driver = 'unknown';
+    }
+
+    if (isset($config['db']['dsn']) && is_string($config['db']['dsn'])) {
+        $redactedDsn = sv_db_redact_dsn((string)$config['db']['dsn']);
+    }
+
+    $pendingMigrations = [];
+    $migrationError    = null;
+    $dbDiff            = ['missing_tables' => [], 'missing_columns' => [], 'ok_tables' => []];
+    try {
+        $dbDiff = sv_db_diff_schema($pdo, $driver);
+    } catch (Throwable $e) {
+        $migrationError = 'Schema-Abgleich fehlgeschlagen: ' . $e->getMessage();
+    }
+
+    $migrationDir = realpath(__DIR__ . '/migrations');
+    if ($migrationDir !== false && is_dir($migrationDir)) {
+        try {
+            $migrations = sv_db_load_migrations($migrationDir);
+            $applied    = sv_db_load_applied_versions($pdo);
+            foreach ($migrations as $migration) {
+                if (!isset($applied[$migration['version']])) {
+                    $pendingMigrations[] = $migration['version'];
+                }
+            }
+        } catch (Throwable $e) {
+            $migrationError = 'Migrationsstand nicht lesbar: ' . $e->getMessage();
+        }
+    } else {
+        $migrationError = 'Migrationsverzeichnis fehlt.';
+    }
+
     try {
         $mediaTotal = (int)$pdo->query('SELECT COUNT(*) FROM media')->fetchColumn();
     } catch (Throwable $e) {
@@ -6085,6 +6190,7 @@ function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
         'stuck_jobs'   => 0,
         'recent_jobs'  => [],
         'operations'   => [],
+        'last_error'   => null,
     ];
 
     try {
@@ -6131,6 +6237,19 @@ function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
         );
         $stuckStmt->execute([':threshold' => date('c', time() - (SV_JOB_STUCK_MINUTES * 60))]);
         $jobHealth['stuck_jobs'] = (int)$stuckStmt->fetchColumn();
+
+        $lastErrorStmt = $pdo->query(
+            "SELECT id, type, error_message, forge_response_json FROM jobs WHERE status = 'error' ORDER BY id DESC LIMIT 1"
+        );
+        $lastErrorRow = $lastErrorStmt ? $lastErrorStmt->fetch(PDO::FETCH_ASSOC) : null;
+        if (is_array($lastErrorRow)) {
+            $responseErr = json_decode((string)($lastErrorRow['forge_response_json'] ?? ''), true);
+            $jobHealth['last_error'] = [
+                'id'      => (int)$lastErrorRow['id'],
+                'type'    => (string)$lastErrorRow['type'],
+                'message' => (string)($lastErrorRow['error_message'] ?? ($responseErr['error'] ?? '')),
+            ];
+        }
     } catch (Throwable $e) {
         $jobHealth['recent_jobs'] = [];
         $jobHealth['stuck_jobs']  = 0;
@@ -6162,6 +6281,8 @@ function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
     $scanHealth = [
         'missing_run_at' => 0,
         'latest'         => [],
+        'last_scan_time' => null,
+        'scan_job_errors'=> 0,
     ];
 
     try {
@@ -6184,12 +6305,27 @@ function sv_collect_health_snapshot(PDO $pdo, int $jobLimit = 5): array
                 'nsfw_score'=> isset($row['nsfw_score']) ? (float)$row['nsfw_score'] : null,
             ];
         }
+
+        $lastScanStmt = $pdo->query('SELECT MAX(run_at) AS last_run FROM scan_results');
+        $scanHealth['last_scan_time'] = $lastScanStmt ? (string)$lastScanStmt->fetchColumn() : null;
+
+        $scanErrorStmt = $pdo->prepare(
+            "SELECT COUNT(*) FROM jobs WHERE type IN (?, ?) AND status = 'error'"
+        );
+        $scanErrorStmt->execute([SV_JOB_TYPE_SCAN_PATH, SV_JOB_TYPE_RESCAN_MEDIA]);
+        $scanHealth['scan_job_errors'] = (int)$scanErrorStmt->fetchColumn();
     } catch (Throwable $e) {
         $scanHealth['latest'] = [];
     }
 
     return [
         'db_health' => [
+            'driver'            => $driver,
+            'redacted_dsn'      => $redactedDsn,
+            'pending_migrations'=> $pendingMigrations,
+            'pending_migrations_count' => count($pendingMigrations),
+            'migration_error'   => $migrationError,
+            'schema_diff'       => $dbDiff,
             'media_total'       => $mediaTotal,
             'issues_total'      => count($findings),
             'issues_by_check'   => $issueByCheck,
