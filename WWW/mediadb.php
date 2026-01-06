@@ -242,7 +242,7 @@ if ($issueFilter) {
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
-           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \"scan_stale\") AS scan_stale
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \'scan_stale\') AS scan_stale
 FROM media m
 LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1)
 WHERE m.id IN (' . $placeholders . ')
@@ -269,7 +269,7 @@ $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.li
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
-           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \"scan_stale\") AS scan_stale
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \'scan_stale\') AS scan_stale
 FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
@@ -312,7 +312,7 @@ ORDER BY m.id DESC';
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
            EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
-           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \"scan_stale\") AS scan_stale
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \'scan_stale\') AS scan_stale
 FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
