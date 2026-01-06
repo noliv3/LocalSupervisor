@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
+require_once __DIR__ . '/../SCRIPTS/db_helpers.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 
@@ -20,12 +21,44 @@ $password      = $config['db']['password']   ?? null;
 $options       = $config['db']['options']    ?? [];
 
 try {
-    $pdo = new PDO((string)$dsn, $user, $password, $options);
-    $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name");
-    $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $db   = sv_db_connect($config);
+    $pdo  = $db['pdo'];
+    $dbDiff = sv_db_diff_schema($pdo, $db['driver']);
+    $dbStatus = [
+        'driver'          => $db['driver'],
+        'dsn'             => $db['redacted_dsn'],
+        'missing_tables'  => $dbDiff['missing_tables'],
+        'missing_columns' => $dbDiff['missing_columns'],
+        'ok_tables'       => $dbDiff['ok_tables'],
+        'pending_migrations' => [],
+        'migration_error'    => null,
+    ];
+
+    $migrationDir = realpath(__DIR__ . '/../SCRIPTS/migrations');
+    if ($migrationDir !== false && is_dir($migrationDir)) {
+        $migrations = sv_db_load_migrations($migrationDir);
+        try {
+            $applied = sv_db_load_applied_versions($pdo);
+            foreach ($migrations as $migration) {
+                if (!isset($applied[$migration['version']])) {
+                    $dbStatus['pending_migrations'][] = $migration['version'];
+                }
+            }
+        } catch (Throwable $e) {
+            $dbStatus['migration_error'] = 'Migrationsstand nicht lesbar: ' . $e->getMessage();
+        }
+    } else {
+        $dbStatus['migration_error'] = 'Migrationsverzeichnis fehlt.';
+    }
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo "<pre>DB-Fehler: " . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</pre>";
+    http_response_code(503);
+    echo "<h1>DB-Fehler</h1>";
+    echo "<p>Konfig: " . htmlspecialchars((string)($config['_config_path'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</p>";
+    $safeMessage = htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    echo "<pre>{$safeMessage}</pre>";
+    if (!empty($configWarning)) {
+        echo "<p>" . htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</p>";
+    }
     exit;
 }
 
@@ -571,12 +604,32 @@ $cliEntries = [
     <p style="color: #555; font-size: 0.9rem;">Hinweis: Das neue Card-Grid liegt unter <code>mediadb.php</code>; die alte Grid-Ansicht (<code>media.php</code>) bleibt nur als Legacy-Option bestehen.</p>
 
     <h2>DB-Status</h2>
-    <p>DB-Verbindung: OK</p>
-    <ul>
-        <?php foreach ($tables as $t): ?>
-            <li><?= htmlspecialchars($t, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-        <?php endforeach; ?>
-    </ul>
+    <p>Treiber: <?= htmlspecialchars($dbStatus['driver'] ?? 'unbekannt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> / DSN: <?= htmlspecialchars($dbStatus['dsn'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
+    <?php if (($dbStatus['missing_tables'] ?? []) === [] && ($dbStatus['missing_columns'] ?? []) === []): ?>
+        <p>Schema: OK (Kerntabellen vorhanden)</p>
+    <?php else: ?>
+        <div style="padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba; margin-top: 0.6rem;">
+            <strong>Schema-Abweichungen:</strong>
+            <?php foreach (($dbStatus['missing_tables'] ?? []) as $t): ?>
+                <div>Fehlende Tabelle: <?= htmlspecialchars($t, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <?php endforeach; ?>
+            <?php foreach (($dbStatus['missing_columns'] ?? []) as $table => $cols): ?>
+                <div>Fehlende Spalten in <?= htmlspecialchars($table, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>: <?= htmlspecialchars(implode(', ', $cols), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+
+    <?php if (!empty($dbStatus['migration_error'])): ?>
+        <div style="padding: 0.6rem 0.8rem; background: #f8d7da; color: #842029; border: 1px solid #f5c2c7; margin-top: 0.6rem;">
+            <strong>Migrationen:</strong> <?= htmlspecialchars($dbStatus['migration_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </div>
+    <?php elseif (!empty($dbStatus['pending_migrations'])): ?>
+        <div style="padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba; margin-top: 0.6rem;">
+            <strong>Ausstehende Migrationen:</strong> <?= htmlspecialchars(implode(', ', $dbStatus['pending_migrations']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (bitte <code>php SCRIPTS/migrate.php</code> ausführen)
+        </div>
+    <?php else: ?>
+        <p>Migrationen: Alle Versionen eingetragen.</p>
+    <?php endif; ?>
 
     <h2>Pfad scannen (Import)</h2>
     <form method="post">
