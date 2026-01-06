@@ -24,6 +24,7 @@ const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetenso
 const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
+const SV_FORGE_MODEL_CACHE_TTL    = 120;
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
 const SV_JOB_STUCK_MINUTES        = 30;
@@ -918,6 +919,85 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
     }
 
     return $decoded;
+}
+
+function sv_forge_model_cache_path(): string
+{
+    return sv_base_dir() . '/LOGS/forge_models.cache.json';
+}
+
+function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds = SV_FORGE_MODEL_CACHE_TTL): array
+{
+    $cacheFile = sv_forge_model_cache_path();
+    $now       = time();
+    if (is_file($cacheFile) && is_readable($cacheFile)) {
+        $raw = @file_get_contents($cacheFile);
+        if ($raw !== false) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded) && isset($decoded['fetched_at'], $decoded['models'])) {
+                $age = $now - (int)$decoded['fetched_at'];
+                if ($age >= 0 && $age <= max(10, $ttlSeconds)) {
+                    $logger('Forge-Modelliste aus Cache (' . $age . 's alt).');
+                    return is_array($decoded['models']) ? $decoded['models'] : [];
+                }
+            }
+        }
+    }
+
+    $modelsRaw = sv_forge_fetch_model_list($config, $logger) ?? [];
+    $models    = [];
+    $seen      = [];
+
+    foreach ($modelsRaw as $model) {
+        if (!is_array($model)) {
+            continue;
+        }
+        $name = '';
+        foreach (['model_name', 'title', 'filename', 'name'] as $field) {
+            if (isset($model[$field]) && is_string($model[$field]) && trim((string)$model[$field]) !== '') {
+                $candidate = trim((string)$model[$field]);
+                if ($candidate !== '') {
+                    $name = $candidate;
+                    break;
+                }
+            }
+        }
+        if ($name === '') {
+            continue;
+        }
+        $lower = strtolower($name);
+        if (isset($seen[$lower])) {
+            continue;
+        }
+        $seen[$lower] = true;
+        $models[] = [
+            'name'  => $name,
+            'title' => isset($model['title']) && is_string($model['title']) ? (string)$model['title'] : null,
+            'hash'  => isset($model['hash']) && is_string($model['hash']) ? (string)$model['hash'] : null,
+        ];
+    }
+
+    $fallback = sv_forge_fallback_model($config);
+    if ($fallback !== '' && !isset($seen[strtolower($fallback)])) {
+        $models[] = [
+            'name'  => $fallback,
+            'title' => 'Fallback',
+            'hash'  => null,
+        ];
+    }
+
+    if ($models !== []) {
+        $payload = json_encode(['fetched_at' => $now, 'models' => $models], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($payload !== false) {
+            $cacheDir = dirname($cacheFile);
+            if (!is_dir($cacheDir)) {
+                @mkdir($cacheDir, 0775, true);
+            }
+            @file_put_contents($cacheFile, $payload);
+        }
+    }
+
+    return $models;
 }
 
 function sv_resolve_forge_model(array $config, ?string $requestedModelName, callable $logger): string
@@ -1911,7 +1991,13 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         $logger('[Rescan ' . $jobId . '] ' . $msg);
     };
 
-    sv_update_job_status($pdo, $jobId, 'running', null, null);
+    $response = [
+        'media_id' => $mediaId,
+        'path'     => null,
+        'result'   => null,
+    ];
+
+    sv_update_job_status($pdo, $jobId, 'running', json_encode(['started_at' => date('c')], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), null);
 
     try {
         $stmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
@@ -1921,9 +2007,9 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             throw new RuntimeException('Media-Eintrag nicht gefunden.');
         }
 
-        $path         = (string)($mediaRow['path'] ?? '');
-        $pathsCfg     = $config['paths'] ?? [];
-        $scannerCfg   = $config['scanner'] ?? [];
+        $path          = (string)($mediaRow['path'] ?? '');
+        $pathsCfg      = $config['paths'] ?? [];
+        $scannerCfg    = $config['scanner'] ?? [];
         $nsfwThreshold = isset($payload['nsfw_threshold']) ? (float)$payload['nsfw_threshold'] : (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
         if ($path === '' || !is_file($path)) {
@@ -1931,16 +2017,25 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         }
         sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_job_run');
 
-        $ok = sv_rescan_media($pdo, $mediaRow, $pathsCfg, $scannerCfg, $nsfwThreshold, $jobLogger);
+        $resultMeta = [];
+        $ok = sv_rescan_media($pdo, $mediaRow, $pathsCfg, $scannerCfg, $nsfwThreshold, $jobLogger, $resultMeta);
 
-        $response = [
+        $response = array_merge($response, [
             'media_id'     => $mediaId,
             'path'         => $path,
             'result'       => $ok ? 'ok' : 'failed',
             'completed_at' => date('c'),
-        ];
+            'scanner'      => $resultMeta['scanner'] ?? null,
+            'nsfw_score'   => $resultMeta['nsfw_score'] ?? null,
+            'tags_written' => $resultMeta['tags_written'] ?? null,
+            'run_at'       => $resultMeta['run_at'] ?? null,
+            'path_after'   => $resultMeta['path_after'] ?? null,
+            'has_nsfw'     => $resultMeta['has_nsfw'] ?? null,
+            'rating'       => $resultMeta['rating'] ?? null,
+        ]);
 
         if ($ok) {
+            $pdo->prepare("DELETE FROM media_meta WHERE media_id = ? AND meta_key = 'scan_stale'")->execute([$mediaId]);
             sv_update_job_status(
                 $pdo,
                 $jobId,
@@ -1959,7 +2054,8 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             ];
         }
 
-        $error = 'Rescan fehlgeschlagen';
+        $error = $resultMeta['error'] ?? 'Rescan fehlgeschlagen';
+        $response['error'] = $error;
         sv_update_job_status(
             $pdo,
             $jobId,
@@ -1990,6 +2086,14 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             'status' => 'error',
             'error'  => $message,
         ];
+    } finally {
+        $now = date('c');
+        $response['updated_at'] = $now;
+        $update = $pdo->prepare('UPDATE jobs SET updated_at = :updated_at WHERE id = :id');
+        $update->execute([
+            ':updated_at' => $now,
+            ':id'         => $jobId,
+        ]);
     }
 }
 
@@ -2296,7 +2400,12 @@ function sv_fetch_rescan_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 5):
             'path'        => (string)($payload['path'] ?? ''),
             'result'      => $response['result'] ?? null,
             'completed_at'=> $response['completed_at'] ?? null,
-            'error'       => $row['error_message'] ?? null,
+            'error'       => $row['error_message'] ?? ($response['error'] ?? null),
+            'scanner'     => $response['scanner'] ?? null,
+            'nsfw_score'  => $response['nsfw_score'] ?? null,
+            'run_at'      => $response['run_at'] ?? null,
+            'has_nsfw'    => $response['has_nsfw'] ?? null,
+            'rating'      => $response['rating'] ?? null,
         ];
     }
 

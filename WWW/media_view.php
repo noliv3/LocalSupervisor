@@ -16,6 +16,8 @@ try {
 
 $configWarning     = $config['_config_warning'] ?? null;
 $hasInternalAccess = sv_validate_internal_access($config, 'media_view', false);
+$forgeModels       = [];
+$forgeModelError   = null;
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -96,6 +98,16 @@ $actionSuccess = null;
 $actionLogs    = [];
 $actionLogFile = null;
 
+if ($hasInternalAccess) {
+    try {
+        $forgeModels = sv_forge_list_models($config, function (string $msg) use (&$actionLogs): void {
+            $actionLogs[] = '[Forge Model] ' . $msg;
+        });
+    } catch (Throwable $e) {
+        $forgeModelError = $e->getMessage();
+    }
+}
+
 $id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
 if ($id <= 0) {
     http_response_code(400);
@@ -111,6 +123,22 @@ if ($ajaxAction === 'forge_jobs') {
         echo json_encode([
             'server_time' => date('c'),
             'jobs'        => $jobs,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+    exit;
+}
+$latestScanAjax = sv_fetch_latest_scan_result($pdo, $id);
+if ($ajaxAction === 'rescan_jobs') {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $jobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
+        echo json_encode([
+            'server_time' => date('c'),
+            'jobs'        => $jobs,
+            'latest_scan' => $latestScanAjax,
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     } catch (Throwable $e) {
         http_response_code(500);
@@ -358,6 +386,7 @@ $hasStaleScan = false;
 $tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence, mt.locked FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :id ORDER BY t.type, t.name');
 $tagStmt->execute([':id' => $id]);
 $tags = $tagStmt->fetchAll(PDO::FETCH_ASSOC);
+$latestScan = sv_fetch_latest_scan_result($pdo, $id);
 
 $consistencyStatus = sv_media_consistency_status($pdo, $id);
 $issueReport = sv_collect_integrity_issues($pdo, [$id]);
@@ -391,6 +420,8 @@ $activeHash = (string)($activeVersion['hash_display'] ?? ($media['hash'] ?? ''))
 $activeWidth = $activeVersion['width'] ?? $media['width'] ?? null;
 $activeHeight = $activeVersion['height'] ?? $media['height'] ?? null;
 $activeModel = $activeVersion['model_used'] ?? $activeVersion['model_requested'] ?? ($prompt['model'] ?? '');
+$forgeFallbackModel = sv_forge_fallback_model($config);
+$resolvedModelLabel = $activeModel !== '' ? $activeModel : ($forgeFallbackModel ?: 'Auto');
 $activeSampler = $activeVersion['sampler'] ?? ($prompt['sampler'] ?? '');
 $activeScheduler = $activeVersion['scheduler'] ?? ($prompt['scheduler'] ?? '');
 $activeSeed = $activeVersion['seed'] ?? ($prompt['seed'] ?? '');
@@ -423,6 +454,9 @@ $compareAssetSelectionA = $compareVersionA ? sv_select_asset_from_set($compareVe
 $compareAssetSelectionB = $compareVersionB ? sv_select_asset_from_set($compareVersionB['_asset_set'] ?? sv_prepare_version_asset_set($compareVersionB, $media), $compareAssetTypeB) : null;
 $compareAssetUrlsA = $compareAssetSelectionA ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionA) : [];
 $compareAssetUrlsB = $compareAssetSelectionB ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionB) : [];
+$compareIdenticalSources = $compareAssetSelectionA && $compareAssetSelectionB
+    ? (($compareAssetSelectionA['path'] ?? '') !== '' && ($compareAssetSelectionA['path'] ?? '') === ($compareAssetSelectionB['path'] ?? ''))
+    : false;
 $versionDiff = [];
 if ($compareVersionA && $compareVersionB && $versionCompareA !== $versionCompareB) {
     $fields = ['model_used', 'sampler', 'scheduler', 'steps', 'cfg_scale', 'seed', 'width', 'height', 'hash_display', 'prompt_category', 'mode'];
@@ -666,6 +700,12 @@ $lifecycleReason = (string)($media['lifecycle_reason'] ?? '');
 $qualityStatus   = (string)($media['quality_status'] ?? SV_QUALITY_UNKNOWN);
 $qualityScore    = $media['quality_score'] ?? null;
 $qualityNotes    = (string)($media['quality_notes'] ?? '');
+$qualityBadgeClass = match ($qualityStatus) {
+    SV_QUALITY_OK      => 'pill',
+    SV_QUALITY_REVIEW  => 'pill-warn',
+    SV_QUALITY_BLOCKED => 'pill-bad',
+    default            => 'pill-muted',
+};
 
 $compareFromId = (int)($_GET['compare_from'] ?? 0);
 $compareToId   = (int)($_GET['compare_to'] ?? 0);
@@ -795,6 +835,17 @@ if ($latestJobRow) {
     }
 }
 $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
+$rescanLastError = null;
+$activeRescanJob = null;
+foreach ($rescanJobs as $job) {
+    if ($activeRescanJob === null) {
+        $activeRescanJob = $job;
+    }
+    if (!empty($job['error'])) {
+        $rescanLastError = $job['error'];
+        break;
+    }
+}
 ?>
 <!doctype html>
 <html lang="de">
@@ -843,7 +894,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
             <div class="badge-row">
                 <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                <span class="pill">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <?php if ($hasStaleScan): ?><span class="pill pill-warn">Scan stale</span><?php endif; ?>
                 <?php if (!empty($media['rating'])): ?><span class="pill">Rating <?= htmlspecialchars((string)$media['rating'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
             </div>
@@ -1018,7 +1069,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                     <?php if ($activePath !== ''): ?><span class="pill pill-muted" title="<?= htmlspecialchars($activePath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad gesetzt</span><?php endif; ?>
                     <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="pill">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 </div>
             </div>
         </div>
@@ -1107,7 +1158,25 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                                     <option value="Exponential" <?= $activeScheduler === 'Exponential' ? 'selected' : '' ?>>Exponential</option>
                                 </select>
                             </label>
-                            <label>Model Override<input type="text" name="_sv_model" maxlength="200" placeholder="leer = Default/Fallback" value="<?= htmlspecialchars((string)$activeModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
+                            <label>Model Override
+                                <select name="_sv_model" <?= $hasInternalAccess ? '' : 'disabled' ?>>
+                                    <option value="">Auto (Healthcheck / Fallback)</option>
+                                    <?php foreach ($forgeModels as $model): ?>
+                                        <?php $name = (string)($model['name'] ?? ''); if ($name === '') { continue; } ?>
+                                        <option value="<?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $name === $activeModel ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                            <?php if (!empty($model['title'])): ?> (<?= htmlspecialchars((string)$model['title'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                    <?php if ($activeModel !== '' && !array_filter($forgeModels, fn($m) => isset($m['name']) && $m['name'] === $activeModel)): ?>
+                                        <option value="<?= htmlspecialchars((string)$activeModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" selected>Manuell: <?= htmlspecialchars((string)$activeModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                                    <?php endif; ?>
+                                </select>
+                            </label>
+                            <div class="hint">Auto/Resolved: <?= htmlspecialchars($resolvedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $forgeFallbackModel ? ' · Fallback: ' . htmlspecialchars($forgeFallbackModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
+                            <?php if ($forgeModelError !== null): ?>
+                                <div class="action-note error">Modelliste nicht geladen: <?= htmlspecialchars($forgeModelError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php endif; ?>
                         </div>
                         <div class="form-block">
                             <label class="checkbox-inline"><input type="checkbox" name="_sv_use_hybrid" value="1"> Hybrid (Prompt + Tags)</label>
@@ -1131,6 +1200,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                 </div>
                 <div class="panel-subsection">
                     <div class="subheader">Quality-Status</div>
+                    <div class="hint">Quality-Status (unknown/ok/review/blocked) bewertet das Medium, nicht den Prompt (Prompt-Qualität A/B/C bleibt separat).</div>
                     <form method="post" class="stacked">
                         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
                         <input type="hidden" name="action" value="quality_flag">
@@ -1160,6 +1230,22 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                 </div>
                 <div class="panel-subsection">
                     <div class="subheader">Tags &amp; Rescan</div>
+                    <div class="rescan-summary" id="rescan-summary">
+                        <div class="meta-line"><span>Letzter Scan</span><strong><?= $latestScan ? htmlspecialchars((string)$latestScan['run_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></strong><em class="small"><?= $latestScan ? 'Scanner: ' . htmlspecialchars((string)($latestScan['scanner'] ?? 'unknown'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ' · NSFW: ' . htmlspecialchars((string)($latestScan['nsfw_score'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'Kein Eintrag' ?></em></div>
+                        <div class="meta-line" id="rescan-job-line">
+                            <?php if ($activeRescanJob): ?>
+                                <?php $status = strtolower((string)$activeRescanJob['status']); ?>
+                                <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars((string)($activeRescanJob['updated_at'] ?? $activeRescanJob['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em>
+                                <?php if (!empty($activeRescanJob['error'])): ?><div class="job-error inline"><?= htmlspecialchars((string)$activeRescanJob['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                            <?php else: ?>
+                                <span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>
+                            <?php endif; ?>
+                        </div>
+                        <?php if ($rescanLastError !== null): ?>
+                            <div class="job-error inline">Letzter Fehler: <?= htmlspecialchars($rescanLastError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php endif; ?>
+                        <div class="hint small" id="rescan-poll-meta">Polling aktiv.</div>
+                    </div>
                     <form method="post" class="stacked tag-form">
                         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
                         <input type="hidden" name="action" value="tag_add" id="tag-action-field">
@@ -1177,7 +1263,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                     <form method="post" class="stacked">
                         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
                         <input type="hidden" name="action" value="rescan_job">
-                        <button class="btn primary" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Rescan (Job)</button>
+                        <button class="btn primary" id="rescan-button" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Rescan (Job)</button>
                         <div class="hint">Stellt einen Rescan als Job in die Queue (locked=1 bleibt geschützt).</div>
                     </form>
                 </div>
@@ -1205,6 +1291,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                 <div class="lifecycle-row">
                     <div>Quality: <strong><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if ($qualityScore !== null): ?> (Score <?= htmlspecialchars((string)$qualityScore, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?></div>
                     <?php if ($qualityNotes !== ''): ?><div class="hint">Notiz: <?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                    <div class="hint">Quality-Status ≠ Prompt-Qualität; siehe Badge.</div>
                 </div>
                 <?php if ($mediaIssues !== []): ?>
                     <div class="issues-list">
@@ -1247,6 +1334,8 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                                 <div class="timeline-body">
                                     <div class="meta-line"><span>Pfad</span><strong><?= htmlspecialchars($job['path'] ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
                                     <?php if (!empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['completed_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
+                                    <?php if (!empty($job['run_at'])): ?><div class="meta-line"><span>Scan</span><strong><?= htmlspecialchars((string)$job['run_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars((string)($job['scanner'] ?? 'pixai_sensible'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> · NSFW <?= htmlspecialchars((string)($job['nsfw_score'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
+                                    <?php if ($job['has_nsfw'] !== null): ?><div class="meta-line"><span>Flag</span><strong><?= (int)$job['has_nsfw'] === 1 ? 'NSFW' : 'SFW' ?></strong><em class="small">Rating <?= htmlspecialchars((string)($job['rating'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
                                     <?php if (!empty($job['error'])): ?><div class="job-error"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                                 </div>
                             </div>
@@ -1261,6 +1350,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                     <div class="job-hint">Jobs werden geladen …</div>
                 </div>
                 <div class="job-hint">Automatische Aktualisierung aktiv.</div>
+                <div class="hint small" id="forge-poll-meta">Polling aktiv.</div>
             </div>
 
             <div class="panel versions-panel">
@@ -1331,6 +1421,9 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
                 </form>
                 <?php if ($compareVersionA && $compareVersionB): ?>
                     <div class="compare-summary">V<?= (int)$compareVersionA['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>) ⇄ V<?= (int)$compareVersionB['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</div>
+                    <?php if ($compareIdenticalSources): ?>
+                        <div class="action-note highlight">Identische Quelle gewählt – Vergleiche können identisch aussehen.</div>
+                    <?php endif; ?>
                     <div class="preview-grid compare-visuals">
                         <div class="preview-card">
                             <div class="preview-label original">Quelle A</div>
@@ -1584,6 +1677,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
     if (!container) return;
     const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'forge_jobs'])) ?>';
     const thumbUrl = <?= json_encode($thumbUrl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const pollMeta = document.getElementById('forge-poll-meta');
 
     function statusClass(status) {
         if (!status) return 'status-queued';
@@ -1658,9 +1752,17 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
 
     const activeStatuses = ['queued', 'pending', 'created', 'running'];
     let pollTimer = null;
+    let lastStatusLabel = '';
+
+    function updatePollMeta(timeLabel, active) {
+        if (!pollMeta) return;
+        const suffix = active ? 'laufend' : 'inaktiv';
+        pollMeta.textContent = 'Letzter Poll: ' + (timeLabel || new Date().toISOString()) + ' · ' + suffix + (lastStatusLabel ? ' · ' + lastStatusLabel : '');
+    }
 
     function renderError(message) {
         container.innerHTML = '<div class="job-hint error">' + message + '</div>';
+        updatePollMeta(null, true);
     }
 
     function scheduleNext(active) {
@@ -1670,6 +1772,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
         if (active) {
             pollTimer = setTimeout(loadJobs, 2000);
         }
+        updatePollMeta(new Date().toISOString(), active);
     }
 
     function loadJobs() {
@@ -1682,6 +1785,7 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
             })
             .then((data) => {
                 const jobs = data.jobs || [];
+                lastStatusLabel = jobs.length ? ('Status: ' + jobs.map((j) => j.status || 'queued').join(', ')) : 'Keine Jobs';
                 renderJobs(jobs);
                 const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
                 scheduleNext(active);
@@ -1703,6 +1807,73 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
     }
 
     loadJobs();
+})();
+
+(function() {
+    const summary = document.getElementById('rescan-summary');
+    if (!summary) return;
+    const jobLine = document.getElementById('rescan-job-line');
+    const pollMeta = document.getElementById('rescan-poll-meta');
+    const rescanButton = document.getElementById('rescan-button');
+    const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'rescan_jobs'])) ?>';
+
+    const activeStatuses = ['queued', 'running'];
+    let pollTimer = null;
+
+    function renderState(payload) {
+        const jobs = payload.jobs || [];
+        const latestScan = payload.latest_scan || null;
+        const first = jobs[0] || null;
+        if (latestScan) {
+            const scanLine = summary.querySelector('.meta-line strong');
+            const scanHint = summary.querySelector('.meta-line em');
+            if (scanLine) {
+                scanLine.textContent = latestScan.run_at || '—';
+            }
+            if (scanHint) {
+                scanHint.textContent = 'Scanner: ' + (latestScan.scanner || 'unknown') + ' · NSFW: ' + (latestScan.nsfw_score ?? '–');
+            }
+        }
+        if (first && jobLine) {
+            const status = (first.status || 'queued').toLowerCase();
+            jobLine.innerHTML = '<span>Rescan Job</span><strong>' + status + '</strong><em class="small">' + ((first.updated_at || first.created_at || '') || '') + '</em>' + (first.error ? '<div class="job-error inline">' + first.error + '</div>' : '');
+        } else if (jobLine) {
+            jobLine.innerHTML = '<span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>';
+        }
+        if (rescanButton) {
+            const activeJob = activeStatuses.includes((first?.status || '').toLowerCase());
+            rescanButton.disabled = activeJob || !<?= $hasInternalAccess ? 'true' : 'false' ?>;
+            rescanButton.classList.toggle('muted', rescanButton.disabled);
+        }
+        const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
+        if (pollMeta) {
+            pollMeta.textContent = 'Letzter Poll: ' + (payload.server_time || new Date().toISOString()) + ' · ' + (active ? 'laufend' : 'inaktiv');
+        }
+        return active;
+    }
+
+    function scheduleNext(active) {
+        if (pollTimer) {
+            clearTimeout(pollTimer);
+        }
+        if (active) {
+            pollTimer = setTimeout(loadState, 2000);
+        }
+    }
+
+    function loadState() {
+        fetch(endpoint, { headers: { 'Accept': 'application/json' } })
+            .then((resp) => resp.json())
+            .then((data) => {
+                const active = renderState(data);
+                scheduleNext(active);
+            })
+            .catch(() => {
+                scheduleNext(true);
+            });
+    }
+
+    loadState();
 })();
 
 (function() {
@@ -1748,7 +1919,8 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
             const url = new URL(window.location.href);
             url.searchParams.set('version', versionSelect.value);
             url.searchParams.delete('asset');
-            window.location.href = url.toString();
+            history.replaceState({}, '', url.toString());
+            window.location.reload();
         });
     }
     const assetSelect = document.getElementById('asset-select');
@@ -1756,7 +1928,8 @@ $rescanJobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
         assetSelect.addEventListener('change', () => {
             const url = new URL(window.location.href);
             url.searchParams.set('asset', assetSelect.value);
-            window.location.href = url.toString();
+            history.replaceState({}, '', url.toString());
+            window.location.reload();
         });
     }
 

@@ -589,6 +589,14 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $status  = (string)($row['status'] ?? '');
             $lifecycleStatus = (string)($row['lifecycle_status'] ?? '');
             $qualityStatus = (string)($row['quality_status'] ?? '');
+            $qualityBadge = 'pill-muted';
+            if ($qualityStatus === SV_QUALITY_OK) {
+                $qualityBadge = 'pill';
+            } elseif ($qualityStatus === SV_QUALITY_REVIEW) {
+                $qualityBadge = 'pill-warn';
+            } elseif ($qualityStatus === SV_QUALITY_BLOCKED) {
+                $qualityBadge = 'pill-bad';
+            }
             $hash    = (string)($row['hash'] ?? '');
             $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
             $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
@@ -660,7 +668,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         <span class="pill pill-warn" title="Lifecycle"><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <?php if ($qualityStatus !== '' && $qualityStatus !== SV_QUALITY_UNKNOWN): ?>
-                        <span class="pill pill-muted" title="Quality"><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <span class="<?= htmlspecialchars($qualityBadge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Quality-Status"><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <?php if ($jobRunning): ?>
                         <span class="pill pill-warn">Job running</span>
@@ -727,6 +735,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <th>Tags</th>
                             <th>Issues</th>
                             <th>Rating</th>
+                            <th>Quality</th>
                             <th>Status</th>
                             <th>Aktion</th>
                         </tr>
@@ -736,6 +745,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         $id      = (int)$row['id'];
                         $path    = (string)$row['path'];
                         $type    = (string)$row['type'];
+                        $qualityStatus = (string)($row['quality_status'] ?? '');
                         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
                         $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
                         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
@@ -756,6 +766,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <td><?= $hasTags ? 'ja' : 'nein' ?></td>
                             <td><?= $hasIssues ? 'ja' : '—' ?></td>
                             <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
+                            <td><?= $qualityStatus !== '' ? htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'unknown' ?></td>
                             <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?><?= $scanStale ? ' (stale)' : '' ?><?= $jobRunning ? ' (job)' : '' ?></td>
                             <td><a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a></td>
                         </tr>

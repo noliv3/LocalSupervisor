@@ -468,8 +468,18 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): void
     }
 }
 
-function sv_store_scan_result(PDO $pdo, int $mediaId, string $scannerName, ?float $nsfwScore, array $flags, array $raw): void
+function sv_store_scan_result(
+    PDO $pdo,
+    int $mediaId,
+    string $scannerName,
+    ?float $nsfwScore,
+    array $flags,
+    array $raw,
+    ?string $runAt = null
+): void
 {
+    $runAt = $runAt ?: date('c');
+
     $stmt = $pdo->prepare("
         INSERT INTO scan_results (media_id, scanner, run_at, nsfw_score, flags, raw_json)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -478,11 +488,30 @@ function sv_store_scan_result(PDO $pdo, int $mediaId, string $scannerName, ?floa
     $stmt->execute([
         $mediaId,
         $scannerName,
-        date('c'),
+        $runAt,
         $nsfwScore,
         $flags ? json_encode($flags, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
         json_encode($raw, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
     ]);
+}
+
+function sv_fetch_latest_scan_result(PDO $pdo, int $mediaId): ?array
+{
+    $stmt = $pdo->prepare(
+        'SELECT scanner, run_at, nsfw_score, flags FROM scan_results WHERE media_id = ? ORDER BY run_at DESC, id DESC LIMIT 1'
+    );
+    $stmt->execute([$mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        return null;
+    }
+
+    return [
+        'scanner'    => (string)($row['scanner'] ?? ''),
+        'run_at'     => (string)($row['run_at'] ?? ''),
+        'nsfw_score' => isset($row['nsfw_score']) ? (float)$row['nsfw_score'] : null,
+        'flags'      => $row['flags'] ?? null,
+    ];
 }
 
 
@@ -1339,17 +1368,33 @@ function sv_rescan_media(
     array $pathsCfg,
     array $scannerCfg,
     float $nsfwThreshold,
-    ?callable $logger = null
+    ?callable $logger = null,
+    ?array &$resultMeta = null
 ): bool {
     $id   = (int)$mediaRow['id'];
     $path = (string)$mediaRow['path'];
     $type = (string)$mediaRow['type'];
+
+    $resultMeta = [
+        'success'      => false,
+        'scanner'      => (string)($scannerCfg['name'] ?? 'pixai_sensible'),
+        'nsfw_score'   => null,
+        'tags_written' => 0,
+        'run_at'       => null,
+        'has_nsfw'     => null,
+        'rating'       => null,
+        'path_before'  => $path,
+        'path_after'   => $path,
+        'error'        => null,
+    ];
 
     $fullPath = str_replace('\\', '/', $path);
     if (!is_file($fullPath)) {
         if ($logger) {
             $logger("Media ID {$id}: Datei nicht gefunden: {$fullPath}");
         }
+
+        $resultMeta['error'] = 'Datei nicht gefunden';
 
         // Status auf missing setzen
         $stmt = $pdo->prepare("UPDATE media SET status = 'missing' WHERE id = ?");
@@ -1363,6 +1408,7 @@ function sv_rescan_media(
         if ($logger) {
             $logger("Media ID {$id}: Scanner fehlgeschlagen.");
         }
+        $resultMeta['error'] = 'Scanner fehlgeschlagen';
         return false;
     }
 
@@ -1370,6 +1416,9 @@ function sv_rescan_media(
     $scanTags  = is_array($scanData['tags'] ?? null) ? $scanData['tags'] : [];
     $scanFlags = is_array($scanData['flags'] ?? null) ? $scanData['flags'] : [];
     $raw       = is_array($scanData['raw'] ?? null) ? $scanData['raw'] : [];
+
+    $resultMeta['nsfw_score'] = $nsfwScore;
+    $resultMeta['tags_written'] = count($scanTags);
 
     $hasNsfw = 0;
     $rating  = 0;
@@ -1397,6 +1446,7 @@ function sv_rescan_media(
         if ($logger) {
             $logger("Media ID {$id}: kein Zielpfad konfiguriert für Typ {$type}.");
         }
+        $resultMeta['error'] = 'kein Zielpfad';
         return false;
     }
 
@@ -1440,6 +1490,8 @@ function sv_rescan_media(
         $newPath = str_replace('\\', '/', $candidateTest);
     }
 
+    $resultMeta['path_after'] = $newPath;
+
     try {
         $pdo->beginTransaction();
 
@@ -1447,7 +1499,9 @@ function sv_rescan_media(
         $delTags->execute([$id]);
 
         sv_store_tags($pdo, $id, $scanTags);
-        sv_store_scan_result($pdo, $id, 'pixai_sensible', $nsfwScore, $scanFlags, $raw);
+        $runAt = date('c');
+        $resultMeta['run_at'] = $runAt;
+        sv_store_scan_result($pdo, $id, 'pixai_sensible', $nsfwScore, $scanFlags, $raw, $runAt);
 
         $stmt = $pdo->prepare("
             UPDATE media
@@ -1467,8 +1521,13 @@ function sv_rescan_media(
         if ($logger) {
             $logger("Media ID {$id}: DB-Fehler beim Rescan: " . $e->getMessage());
         }
+        $resultMeta['error'] = $e->getMessage();
         return false;
     }
+
+    $resultMeta['success']  = true;
+    $resultMeta['has_nsfw'] = $hasNsfw;
+    $resultMeta['rating']   = $rating;
 
     if ($logger) {
         $logger("Media ID {$id}: Rescan OK (has_nsfw={$hasNsfw}, rating={$rating})");
