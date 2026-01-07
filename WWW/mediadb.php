@@ -268,7 +268,7 @@ if ($issueFilter) {
         $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
         $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            ' . $latestScanCols . '
-           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
@@ -297,7 +297,7 @@ ORDER BY m.id DESC';
 $qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            m.width, m.height, m.duration, m.fps, m.filesize,
            ' . $latestScanCols . '
-           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
@@ -342,7 +342,7 @@ ORDER BY m.id DESC';
     $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
            m.width, m.height, m.duration, m.fps, m.filesize,
            ' . $latestScanCols . '
-           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height,
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
@@ -644,6 +644,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
             $lastScanError = $scanInfo['error'] ?? null;
             $scanTagsWritten = $scanInfo['tags_written'] ?? null;
+            $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
 
             $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
                 $row['prompt_text'] ?? null,
@@ -743,6 +744,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <span class="info-chip"><?= htmlspecialchars(number_format($duration, 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span>
                         <?php endif; ?>
                         <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">PQ <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <?php if ($promptModel !== ''): ?><span class="info-chip">Model <?= htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                         <?php if ($hasMeta): ?><span class="info-chip">Meta</span><?php endif; ?>
                         <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
                         <?php if ($hasPrompt && !$promptComplete): ?><span class="info-chip chip-warn">Prompt unvollständig</span><?php endif; ?>
@@ -782,6 +784,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <th>Prompt</th>
                             <th>Meta</th>
                             <th>Tags</th>
+                            <th>Modell</th>
                             <th>Scan</th>
                             <th>Issues</th>
                             <th>Rating</th>
@@ -809,6 +812,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         $lastScanError = $scanInfo['error'] ?? null;
                         $rating  = (int)($row['rating'] ?? 0);
                         $status  = (string)($row['status'] ?? '');
+                        $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
                         $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
                         ?>
                         <tr style="border-bottom:1px solid #111827;">
@@ -818,6 +822,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
                             <td><?= $hasMeta ? 'ja' : 'nein' ?></td>
                             <td><?= $hasTags ? 'ja' : 'nein' ?></td>
+                            <td><?= $promptModel !== '' ? htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></td>
                             <td><?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?><?php if ($lastScanScanner !== ''): ?> (<?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?><?php if ($lastScanError): ?> · <span title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?></td>
                             <td><?= $hasIssues ? 'ja' : '—' ?></td>
                             <td><?= $rating > 0 ? (int)$rating : '—' ?></td>

@@ -22,10 +22,10 @@ const SV_FORGE_IMG2IMG_PATH       = '/sdapi/v1/img2img';
 const SV_FORGE_OPTIONS_PATH       = '/sdapi/v1/options';
 const SV_FORGE_PROGRESS_PATH      = '/sdapi/v1/progress';
 const SV_FORGE_FALLBACK_MODEL     = 'SDXL_FP16_waiNSFWIllustrious_v120.safetensors';
+const SV_FORGE_MODEL_CACHE_TTL    = 90;
 const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
-const SV_FORGE_MODEL_CACHE_TTL    = 120;
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
 const SV_JOB_STUCK_MINUTES        = 30;
@@ -37,6 +37,20 @@ const SV_QUALITY_UNKNOWN          = 'unknown';
 const SV_QUALITY_OK               = 'ok';
 const SV_QUALITY_REVIEW           = 'review';
 const SV_QUALITY_BLOCKED          = 'blocked';
+
+function sv_forge_limit_error(string $value, int $maxLen = 240): string
+{
+    $value = trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    if (function_exists('mb_substr')) {
+        return mb_strlen($value) > $maxLen ? mb_substr($value, 0, $maxLen) : $value;
+    }
+
+    return strlen($value) > $maxLen ? substr($value, 0, $maxLen) : $value;
+}
 
 class SvForgeHttpException extends RuntimeException
 {
@@ -873,9 +887,20 @@ function sv_forge_healthcheck(array $endpoint, callable $logger): array
 
 function sv_forge_fetch_model_list(array $config, callable $logger): ?array
 {
+    $result = [
+        'ok'         => false,
+        'status'     => 'unavailable',
+        'error'      => null,
+        'http_code'  => null,
+        'models'     => null,
+        'target_url' => null,
+        'fetched_at' => time(),
+    ];
+
     if (!sv_is_forge_enabled($config)) {
         $logger('Forge deaktiviert; Modellliste wird nicht abgefragt.');
-        return null;
+        $result['status'] = 'disabled';
+        return $result;
     }
 
     $endpoint = sv_forge_endpoint_config($config) ?? [
@@ -884,6 +909,7 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
     ];
     $baseUrl = rtrim((string)($endpoint['base_url'] ?? sv_forge_base_url($config)), '/');
     $url     = $baseUrl . SV_FORGE_MODEL_LIST_PATH;
+    $result['target_url'] = sv_sanitize_url($url);
 
     $timeout = (int)($endpoint['timeout'] ?? sv_forge_timeout($config));
 
@@ -901,25 +927,66 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
         ],
     ]);
 
+    $lastError = null;
+    set_error_handler(static function ($severity, $message) use (&$lastError): bool {
+        $lastError = $message;
+        return false;
+    });
     try {
         $responseBody = @file_get_contents($url, false, $context);
     } catch (Throwable $e) {
-        $logger('Forge-Modelliste konnte nicht geladen werden: ' . $e->getMessage());
-        return null;
+        restore_error_handler();
+        $msg = sv_forge_limit_error($e->getMessage());
+        $logger('Forge-Modelliste konnte nicht geladen werden: ' . $msg);
+        $result['status'] = 'transport_error';
+        $result['error']  = $msg;
+        return $result;
     }
+    restore_error_handler();
 
     if ($responseBody === false) {
-        $logger('Forge-Modelliste konnte nicht geladen werden (HTTP-Fehler).');
-        return null;
+        $status = 'http_error';
+        if (is_string($lastError) && stripos($lastError, 'timed out') !== false) {
+            $status = 'timeout';
+        }
+        $logger('Forge-Modelliste konnte nicht geladen werden (' . $status . ').');
+        $result['status'] = $status;
+        $result['error']  = $lastError ? sv_forge_limit_error($lastError) : null;
+        return $result;
+    }
+
+    $httpCode = null;
+    if (isset($http_response_header) && is_array($http_response_header)) {
+        foreach ($http_response_header as $headerLine) {
+            if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
+                $httpCode = (int)$matches[1];
+                break;
+            }
+        }
+    }
+    $result['http_code'] = $httpCode;
+
+    if ($httpCode !== null && ($httpCode < 200 || $httpCode >= 300)) {
+        $status = ($httpCode === 401 || $httpCode === 403) ? 'auth_failed' : 'http_error';
+        $logger('Forge-Modelliste HTTP-Fehler ' . $httpCode . ' (' . $status . ').');
+        $result['status'] = $status;
+        $result['error']  = 'HTTP ' . $httpCode;
+        return $result;
     }
 
     $decoded = json_decode($responseBody, true);
     if (!is_array($decoded)) {
         $logger('Forge-Modelliste ungültig oder leer.');
-        return null;
+        $result['status'] = 'parse_error';
+        $result['error']  = 'JSON decode failed';
+        return $result;
     }
 
-    return $decoded;
+    $result['ok']     = true;
+    $result['status'] = 'ok';
+    $result['models'] = $decoded;
+
+    return $result;
 }
 
 function sv_forge_model_cache_path(): string
@@ -927,25 +994,8 @@ function sv_forge_model_cache_path(): string
     return sv_base_dir() . '/LOGS/forge_models.cache.json';
 }
 
-function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds = SV_FORGE_MODEL_CACHE_TTL): array
+function sv_forge_normalize_models(array $modelsRaw, string $fallback): array
 {
-    $cacheFile = sv_forge_model_cache_path();
-    $now       = time();
-    if (is_file($cacheFile) && is_readable($cacheFile)) {
-        $raw = @file_get_contents($cacheFile);
-        if ($raw !== false) {
-            $decoded = json_decode($raw, true);
-            if (is_array($decoded) && isset($decoded['fetched_at'], $decoded['models'])) {
-                $age = $now - (int)$decoded['fetched_at'];
-                if ($age >= 0 && $age <= max(10, $ttlSeconds)) {
-                    $logger('Forge-Modelliste aus Cache (' . $age . 's alt).');
-                    return is_array($decoded['models']) ? $decoded['models'] : [];
-                }
-            }
-        }
-    }
-
-    $modelsRaw = sv_forge_fetch_model_list($config, $logger) ?? [];
     $models    = [];
     $seen      = [];
 
@@ -978,7 +1028,6 @@ function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds =
         ];
     }
 
-    $fallback = sv_forge_fallback_model($config);
     if ($fallback !== '' && !isset($seen[strtolower($fallback)])) {
         $models[] = [
             'name'  => $fallback,
@@ -987,8 +1036,72 @@ function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds =
         ];
     }
 
-    if ($models !== []) {
-        $payload = json_encode(['fetched_at' => $now, 'models' => $models], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    return $models;
+}
+
+function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds = SV_FORGE_MODEL_CACHE_TTL): array
+{
+    $cacheFile = sv_forge_model_cache_path();
+    $now       = time();
+    $ttl       = max(10, $ttlSeconds);
+    $result    = [
+        'models'     => [],
+        'status'     => 'unavailable',
+        'error'      => null,
+        'source'     => 'live',
+        'http_code'  => null,
+        'fetched_at' => null,
+        'age'        => null,
+        'ttl'        => $ttl,
+    ];
+
+    $cachedPayload = null;
+    if (is_file($cacheFile) && is_readable($cacheFile)) {
+        $raw = @file_get_contents($cacheFile);
+        if ($raw !== false) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded) && isset($decoded['fetched_at'], $decoded['models'])) {
+                $cachedPayload = $decoded;
+                $age = $now - (int)$decoded['fetched_at'];
+                if ($age >= 0 && $age <= $ttl) {
+                    $logger('Forge-Modelliste aus Cache (' . $age . 's alt).');
+                    $result['models']     = is_array($decoded['models']) ? $decoded['models'] : [];
+                    $result['status']     = $decoded['status'] ?? 'ok';
+                    $result['error']      = $decoded['error'] ?? null;
+                    $result['source']     = 'cache';
+                    $result['fetched_at'] = (int)$decoded['fetched_at'];
+                    $result['age']        = $age;
+                    $result['http_code']  = $decoded['http_code'] ?? null;
+                    return $result;
+                }
+            }
+        }
+    }
+
+    $fetch = sv_forge_fetch_model_list($config, $logger);
+    $modelsRaw = is_array($fetch['models'] ?? null) ? $fetch['models'] : [];
+    $fallback = sv_forge_fallback_model($config);
+    $normalized = sv_forge_normalize_models($modelsRaw, $fallback);
+
+    $result['models']     = $normalized;
+    $result['status']     = $fetch['status'] ?? 'unavailable';
+    $result['error']      = $fetch['error'] ?? null;
+    $result['http_code']  = $fetch['http_code'] ?? null;
+    $result['fetched_at'] = $fetch['fetched_at'] ?? $now;
+    $result['age']        = 0;
+    $result['source']     = ($fetch['status'] ?? '') === 'disabled' ? 'disabled' : 'live';
+
+    if ($fetch['ok'] ?? false) {
+        $payload = json_encode(
+            [
+                'fetched_at' => $result['fetched_at'],
+                'models'     => $normalized,
+                'status'     => $result['status'],
+                'error'      => $result['error'],
+                'http_code'  => $result['http_code'],
+            ],
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        );
         if ($payload !== false) {
             $cacheDir = dirname($cacheFile);
             if (!is_dir($cacheDir)) {
@@ -996,30 +1109,63 @@ function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds =
             }
             @file_put_contents($cacheFile, $payload);
         }
+        $result['source'] = 'live';
+        return $result;
     }
 
-    return $models;
+    if ($cachedPayload !== null && isset($cachedPayload['models'], $cachedPayload['fetched_at'])) {
+        $age = $now - (int)$cachedPayload['fetched_at'];
+        $logger('Forge-Modelliste: Live-Request fehlgeschlagen, nutze Cache (' . $age . 's alt).');
+        $result['models']     = is_array($cachedPayload['models']) ? $cachedPayload['models'] : [];
+        $result['source']     = 'stale_cache';
+        $result['fetched_at'] = (int)$cachedPayload['fetched_at'];
+        $result['age']        = $age;
+        $result['status']     = $fetch['status'] ?? ($cachedPayload['status'] ?? 'unavailable');
+        $result['error']      = $fetch['error'] ?? ($cachedPayload['error'] ?? null);
+        $result['http_code']  = $fetch['http_code'] ?? ($cachedPayload['http_code'] ?? null);
+        return $result;
+    }
+
+    if ($normalized === [] && $fallback !== '') {
+        $result['models'] = [['name' => $fallback, 'title' => 'Fallback', 'hash' => null]];
+        $result['source'] = 'fallback';
+    }
+
+    return $result;
 }
 
-function sv_resolve_forge_model(array $config, ?string $requestedModelName, callable $logger): string
+function sv_resolve_forge_model(array $config, ?string $requestedModelName, callable $logger, ?array $modelListResult = null, ?array &$meta = null): string
 {
     $requested = trim((string)$requestedModelName);
     $fallback  = sv_forge_fallback_model($config);
-    $models    = sv_forge_fetch_model_list($config, $logger);
+    $meta = [
+        'requested'     => $requested,
+        'fallback'      => $fallback,
+        'model_source'  => 'live',
+        'model_status'  => null,
+        'model_error'   => null,
+        'fallback_used' => false,
+    ];
+
+    if ($modelListResult === null) {
+        $modelListResult = sv_forge_list_models($config, $logger);
+    }
+
+    $models = is_array($modelListResult['models'] ?? null) ? $modelListResult['models'] : [];
+    $meta['model_source'] = $modelListResult['source'] ?? 'live';
+    $meta['model_status'] = $modelListResult['status'] ?? null;
+    $meta['model_error']  = $modelListResult['error'] ?? null;
 
     if ($models === null || $models === []) {
-        if ($requested === '') {
-            $logger('Forge model fallback used (no request, no model list).');
-        } else {
-            $logger('Forge model fallback used (requested=' . $requested . ', no model list).');
-        }
-
+        $meta['fallback_used'] = true;
+        $logger('Forge model fallback genutzt (keine Modellliste verfügbar).');
         return $fallback;
     }
 
     if ($requested === '') {
-        $logger('Forge model fallback used (no model specified).');
-        return $fallback;
+        $meta['fallback_used'] = true;
+        $logger('Forge model fallback genutzt (kein Modell angegeben).');
+        return $fallback !== '' ? $fallback : (string)($models[0]['name'] ?? '');
     }
 
     $requestedLower = strtolower($requested);
@@ -1029,31 +1175,20 @@ function sv_resolve_forge_model(array $config, ?string $requestedModelName, call
             continue;
         }
 
-        $candidates = [];
-        foreach (['model_name', 'title', 'filename', 'name'] as $field) {
-            if (isset($model[$field]) && is_string($model[$field])) {
-                $candidates[] = trim((string)$model[$field]);
-            }
+        $candidate = isset($model['name']) && is_string($model['name']) ? trim((string)$model['name']) : '';
+        if ($candidate === '') {
+            continue;
         }
 
-        foreach ($candidates as $candidate) {
-            if ($candidate === '') {
-                continue;
-            }
-            $candidateLower = strtolower($candidate);
-            if ($candidateLower === $requestedLower
-                || str_contains($candidateLower, $requestedLower)
-                || str_contains($requestedLower, $candidateLower)
-            ) {
-                if ($candidateLower !== $requestedLower) {
-                    $logger('Forge model resolved via fuzzy match: requested=' . $requested . ', used=' . $candidate . '.');
-                }
-                return $candidate;
-            }
+        if (strtolower($candidate) === $requestedLower) {
+            $meta['fallback_used'] = ($candidate === $fallback);
+            $logger('Forge-Modell bestätigt: ' . $candidate . '.');
+            return $candidate;
         }
     }
 
-    $logger('Forge model fallback used (requested=' . $requested . ', fallback=' . $fallback . ').');
+    $meta['fallback_used'] = true;
+    $logger('Forge model fallback genutzt (requested=' . $requested . ', fallback=' . $fallback . ').');
     return $fallback;
 }
 
@@ -1088,7 +1223,7 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
     if (!$health['ok']) {
         $now          = date('c');
         $status       = 'error';
-        $errorMessage = 'Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : '');
+        $errorMessage = sv_forge_limit_error('Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : ''));
         $responseJson = json_encode($health['log_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
         $update = $pdo->prepare(
@@ -1300,10 +1435,19 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     if ($normalizedOverrides['denoising_strength'] !== null) {
         $payload['denoising_strength'] = (float)$normalizedOverrides['denoising_strength'];
     }
-    $requestedModel = $normalizedOverrides['model'] ?? (string)($payload['model'] ?? '');
-    $resolvedModel  = sv_resolve_forge_model($config, $requestedModel, $logger);
+    $requestedModel   = $normalizedOverrides['model'] ?? (string)($payload['model'] ?? '');
+    $modelListResult  = sv_forge_list_models($config, $logger);
+    $modelResolution  = [];
+    $resolvedModel    = sv_resolve_forge_model($config, $requestedModel, $logger, $modelListResult, $modelResolution);
     $payload['model'] = $resolvedModel;
     $payload['_sv_requested_model'] = $requestedModel;
+    $payload['_sv_model_source']    = $modelResolution['model_source'] ?? ($modelListResult['source'] ?? null);
+    $payload['_sv_model_status']    = $modelResolution['model_status'] ?? ($modelListResult['status'] ?? null);
+    if (!empty($modelResolution['model_error'])) {
+        $payload['_sv_model_error'] = sv_forge_limit_error((string)$modelResolution['model_error']);
+    } elseif (!empty($modelListResult['error'])) {
+        $payload['_sv_model_error'] = sv_forge_limit_error((string)$modelListResult['error']);
+    }
 
     $decision = sv_decide_forge_mode($mediaRow, $regenPlan, $normalizedOverrides, $payload);
     $generationMode = $decision['mode'] ?? 'img2img';
@@ -1379,6 +1523,9 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
         'regen_plan'      => $regenPlan,
         'requested_model' => $requestedModel,
         'resolved_model'  => $resolvedModel,
+        'model_source'    => $payload['_sv_model_source'] ?? null,
+        'model_status'    => $payload['_sv_model_status'] ?? null,
+        'model_error'     => $payload['_sv_model_error'] ?? null,
         'media_row'       => $mediaRow,
         'path'            => $path,
         'negative_mode'   => $negativePlan['negative_mode'],
@@ -1417,6 +1564,9 @@ function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, call
         'status'          => 'queued',
         'resolved_model'  => $jobData['resolved_model'],
         'requested_model' => $jobData['requested_model'],
+        'model_source'    => $jobData['model_source'] ?? null,
+        'model_status'    => $jobData['model_status'] ?? null,
+        'model_error'     => $jobData['model_error'] ?? null,
         'regen_plan'      => $jobData['regen_plan'],
     ];
 }
@@ -4216,6 +4366,10 @@ function sv_refresh_media_after_regen(
 
 function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $responseJson = null, ?string $error = null): void
 {
+    if ($error !== null) {
+        $error = sv_forge_limit_error((string)$error);
+    }
+
     $stmt = $pdo->prepare(
         'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at WHERE id = :id'
     );
@@ -4708,6 +4862,9 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
                 'tag_prompt_used'  => $regenPlan['tag_prompt_used'],
                 'model'            => $payload['model'] ?? null,
                 'requested_model'  => $requestedModel,
+                'model_source'     => $payload['_sv_model_source'] ?? null,
+                'model_status'     => $payload['_sv_model_status'] ?? null,
+                'model_error'      => $payload['_sv_model_error'] ?? null,
                 'orig_w'           => $origWidth,
                 'orig_h'           => $origHeight,
                 'out_w'            => $newFileInfo['width'] ?? null,
@@ -4763,6 +4920,9 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'old_hash'          => $mediaRow['hash'] ?? null,
             'resolved_model'    => $payload['model'] ?? null,
             'requested_model'   => $requestedModel,
+            'model_source'      => $payload['_sv_model_source'] ?? null,
+            'model_status'      => $payload['_sv_model_status'] ?? null,
+            'model_error'       => $payload['_sv_model_error'] ?? null,
             'orig_ext'          => $origExt,
             'out_ext'           => $newFileInfo['out_ext'] ?? null,
             'format_preserved'  => (bool)($newFileInfo['format_preserved'] ?? false),
@@ -5073,6 +5233,9 @@ function sv_get_media_versions(PDO $pdo, int $mediaId): array
             'timestamp'       => (string)($row['updated_at'] ?? $jobCreatedAt),
             'model_requested' => $requestedModel,
             'model_used'      => $resolvedModel,
+            'model_source'    => $resultMeta['model_source'] ?? ($payload['_sv_model_source'] ?? null),
+            'model_status'    => $resultMeta['model_status'] ?? ($payload['_sv_model_status'] ?? null),
+            'model_error'     => $resultMeta['model_error'] ?? ($payload['_sv_model_error'] ?? null),
             'sampler'         => $payload['sampler'] ?? null,
             'scheduler'       => $payload['scheduler'] ?? null,
             'steps'           => $payload['steps'] ?? null,

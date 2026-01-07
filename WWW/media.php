@@ -93,6 +93,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!empty($result['resolved_model'])) {
                 $actionMessage .= ' Modell: ' . htmlspecialchars((string)$result['resolved_model'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
             }
+            if (!empty($result['model_source'])) {
+                $actionMessage .= ' Quelle: ' . htmlspecialchars((string)$result['model_source'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+            }
+            if (!empty($result['model_status']) && (string)$result['model_status'] !== 'ok') {
+                $actionMessage .= ' Modell-Status: ' . htmlspecialchars((string)$result['model_status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+            }
+            if (!empty($result['model_error'])) {
+                $actionMessage .= ' Hinweis: ' . htmlspecialchars((string)$result['model_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+            }
             if (!empty($result['worker_pid'])) {
                 $actionMessage .= ' Worker-PID: ' . (int)$result['worker_pid'] . '.';
             }
