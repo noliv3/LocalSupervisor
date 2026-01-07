@@ -9,9 +9,7 @@ require_once __DIR__ . '/../SCRIPTS/paths.php';
 try {
     $config = sv_load_config();
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo '<pre>CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
-    exit;
+    sv_security_error(500, 'config');
 }
 
 $configWarning     = $config['_config_warning'] ?? null;
@@ -31,9 +29,7 @@ try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo '<pre>DB-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
-    exit;
+    sv_security_error(500, 'db');
 }
 
 function sv_clamp_int(int $value, int $min, int $max, int $default): int
@@ -114,7 +110,7 @@ if ($hasInternalAccess) {
             $forgeModelError = (string)$forgeModelResult['error'];
         }
     } catch (Throwable $e) {
-        $forgeModelError = $e->getMessage();
+        $forgeModelError = sv_sanitize_error_message($e->getMessage());
     }
 } else {
     $forgeModelStatus = 'restricted';
@@ -130,6 +126,7 @@ if ($id <= 0) {
 $ajaxAction = isset($_GET['ajax']) && is_string($_GET['ajax']) ? trim((string)$_GET['ajax']) : null;
 if ($ajaxAction === 'forge_jobs') {
     header('Content-Type: application/json; charset=utf-8');
+    sv_require_internal_access($config, 'media_view_forge_jobs');
     try {
         $jobs = sv_fetch_forge_jobs_for_media($pdo, $id, 10, $config);
         echo json_encode([
@@ -138,13 +135,14 @@ if ($ajaxAction === 'forge_jobs') {
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     } catch (Throwable $e) {
         http_response_code(500);
-        echo json_encode(['error' => $e->getMessage()]);
+        echo json_encode(['error' => 'Fehler']);
     }
     exit;
 }
 $latestScanAjax = sv_fetch_latest_scan_result($pdo, $id);
 if ($ajaxAction === 'rescan_jobs') {
     header('Content-Type: application/json; charset=utf-8');
+    sv_require_internal_access($config, 'media_view_rescan_jobs');
     try {
         $jobs = sv_fetch_rescan_jobs_for_media($pdo, $id, 5);
         echo json_encode([
@@ -154,7 +152,7 @@ if ($ajaxAction === 'rescan_jobs') {
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     } catch (Throwable $e) {
         http_response_code(500);
-        echo json_encode(['error' => $e->getMessage()]);
+        echo json_encode(['error' => 'Fehler']);
     }
     exit;
 }
@@ -365,7 +363,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (Throwable $e) {
         $actionSuccess = false;
-        $actionMessage = 'Aktion fehlgeschlagen: ' . $e->getMessage();
+        $safeError = sv_sanitize_error_message($e->getMessage());
+        $actionMessage = 'Aktion fehlgeschlagen.';
+        if ($safeError !== '') {
+            $actionMessage .= ' ' . $safeError;
+        }
     }
 }
 
@@ -437,6 +439,7 @@ $activePath = (string)($activeAssetSelection['path'] ?? ($activeVersion['output_
 if ($activePath === '') {
     $activePath = (string)($media['path'] ?? '');
 }
+$activePathLabel = sv_safe_path_label($activePath);
 $activeHash = (string)($activeVersion['hash_display'] ?? ($media['hash'] ?? ''));
 $activeWidth = $activeVersion['width'] ?? $media['width'] ?? null;
 $activeHeight = $activeVersion['height'] ?? $media['height'] ?? null;
@@ -791,6 +794,11 @@ if ($compareFromId > 0 && $compareToId > 0 && $promptHistory !== []) {
     }
 }
 
+$actionLogsSafe = array_map(
+    static fn (string $line): string => sv_sanitize_error_message($line, 400),
+    $actionLogs
+);
+
 $type = (string)$media['type'];
 $isMissing = (int)($media['is_missing'] ?? 0) === 1 || (string)($media['status'] ?? '') === 'missing';
 $hasFileIssue = array_reduce($mediaIssues, static function (bool $carry, array $issue): bool {
@@ -1050,7 +1058,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                             <div class="preview-frame">
                                 <?php if ($activeAssetExists): ?>
                                     <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
-                                        'path'   => $activePath,
+                                        'path'   => $activePathLabel,
                                         'hash'   => $activeHash,
                                         'width'  => $activeWidth,
                                         'height' => $activeHeight,
@@ -1060,13 +1068,13 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                     <div class="preview-placeholder">
                                         <div class="placeholder-title">Asset nicht gefunden</div>
                                         <?php if (!empty($activeAssetSelection['path'])): ?>
-                                            <div class="placeholder-meta"><?= htmlspecialchars((string)$activeAssetSelection['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                            <div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$activeAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                         <?php endif; ?>
                                     </div>
                                 <?php endif; ?>
                             </div>
                             <div class="preview-meta">
-                                <span><?= htmlspecialchars($activePath !== '' ? basename($activePath) : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <span><?= htmlspecialchars($activePathLabel !== '' ? $activePathLabel : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                 <span><?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                 <?php if ($activeAssetSelection['job_id']): ?><span>Job #<?= (int)$activeAssetSelection['job_id'] ?></span><?php endif; ?>
                                 <?php if (!$activeAssetExists): ?><span class="pill pill-warn">Asset fehlt</span><?php endif; ?>
@@ -1083,7 +1091,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                         <div class="preview-placeholder">
                                             <div class="placeholder-title">Kein Bild verfügbar</div>
                                             <?php if (!empty($secondaryAssetSelection['path'])): ?>
-                                                <div class="placeholder-meta"><?= htmlspecialchars((string)$secondaryAssetSelection['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                                <div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$secondaryAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                             <?php endif; ?>
                                         </div>
                                     <?php endif; ?>
@@ -1091,7 +1099,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                 <div class="preview-meta">
                                     <span><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                     <?php if (!empty($secondaryAssetSelection['job_id'])): ?><span>Job #<?= (int)$secondaryAssetSelection['job_id'] ?></span><?php endif; ?>
-                                    <?php if (!empty($secondaryAssetSelection['path'])): ?><span class="pill pill-muted" title="<?= htmlspecialchars((string)$secondaryAssetSelection['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad</span><?php endif; ?>
+                                    <?php if (!empty($secondaryAssetSelection['path'])): ?><span class="pill pill-muted" title="<?= htmlspecialchars(sv_safe_path_label((string)$secondaryAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad</span><?php endif; ?>
                                 </div>
                             </div>
                         <?php elseif ($latestPreview !== null): ?>
@@ -1104,10 +1112,10 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                         <div class="preview-placeholder">
                                             <div class="placeholder-title">Keine Inline-Vorschau</div>
                                             <?php if ($latestPreview['path'] !== ''): ?>
-                                                <div class="placeholder-meta">Pfad: <?= htmlspecialchars((string)$latestPreview['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                                <div class="placeholder-meta">Pfad: <?= htmlspecialchars(sv_safe_path_label((string)$latestPreview['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                             <?php endif; ?>
                                             <?php if ($latestPreview['error']): ?>
-                                                <div class="placeholder-meta">Hinweis: <?= htmlspecialchars((string)$latestPreview['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                                <div class="placeholder-meta">Hinweis: <?= htmlspecialchars(sv_sanitize_error_message((string)$latestPreview['error']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                             <?php elseif (!$latestPreview['allowed']): ?>
                                                 <div class="placeholder-meta">Preview nicht streambar, Root nicht erlaubt.</div>
                                             <?php endif; ?>
@@ -1149,7 +1157,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <?php if (!empty($media['fps'])): ?><span class="pill">FPS: <?= htmlspecialchars((string)$media['fps'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                     <?php if (!empty($media['filesize'])): ?><span class="pill">Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
                     <?php if ($activeHash !== ''): ?><span class="pill">Hash: <?= htmlspecialchars($activeHash, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                    <?php if ($activePath !== ''): ?><span class="pill pill-muted" title="<?= htmlspecialchars($activePath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad gesetzt</span><?php endif; ?>
+                    <?php if ($activePathLabel !== ''): ?><span class="pill pill-muted" title="<?= htmlspecialchars($activePathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad gesetzt</span><?php endif; ?>
                     <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -1165,12 +1173,12 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                         <div class="action-feedback-title"><?= $actionSuccess ? 'OK' : 'Fehler' ?></div>
                         <div><?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                         <?php if ($actionLogFile): ?>
-                            <div class="action-logfile">Logdatei: <?= htmlspecialchars((string)$actionLogFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <div class="action-logfile">Logdatei: <?= htmlspecialchars(sv_safe_path_label((string)$actionLogFile), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                         <?php endif; ?>
-                        <?php if ($actionLogs !== []): ?>
+                        <?php if ($actionLogsSafe !== []): ?>
                             <details class="action-logdetails">
                                 <summary>Details</summary>
-                                <pre><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                                <pre><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
                             </details>
                         <?php endif; ?>
                     </div>
@@ -1541,7 +1549,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                 <?php else: ?>
                                     <div class="preview-placeholder">
                                         <div class="placeholder-title">Kein Bild verfügbar</div>
-                                        <?php if (!empty($compareAssetSelectionA['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars((string)$compareAssetSelectionA['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                        <?php if (!empty($compareAssetSelectionA['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$compareAssetSelectionA['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                                     </div>
                                 <?php endif; ?>
                             </div>
@@ -1558,7 +1566,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                 <?php else: ?>
                                     <div class="preview-placeholder">
                                         <div class="placeholder-title">Kein Bild verfügbar</div>
-                                        <?php if (!empty($compareAssetSelectionB['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars((string)$compareAssetSelectionB['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                        <?php if (!empty($compareAssetSelectionB['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$compareAssetSelectionB['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                                     </div>
                                 <?php endif; ?>
                             </div>
@@ -1749,10 +1757,10 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
 
     <details class="panel collapsible" id="logs-panel">
         <summary>Logs</summary>
-        <?php if ($actionLogs === []): ?>
+        <?php if ($actionLogsSafe === []): ?>
             <div class="tab-hint">Keine aktuellen Logeinträge.</div>
         <?php else: ?>
-            <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogs), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+            <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
         <?php endif; ?>
     </details>
 
@@ -1773,7 +1781,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 <div>Maße: <?= htmlspecialchars((string)($activeWidth ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($activeHeight ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 <?php if (!empty($media['filesize'])): ?><div>Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</div><?php endif; ?>
                 <?php if ($activeHash !== ''): ?><div>Hash: <?= htmlspecialchars($activeHash, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                <?php if ($activePath !== ''): ?><div class="path-info">Pfad: <?= htmlspecialchars($activePath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                <?php if ($activePathLabel !== ''): ?><div class="path-info">Pfad: <?= htmlspecialchars($activePathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
             </div>
         </div>
     </div>

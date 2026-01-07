@@ -2,14 +2,13 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
+require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 
 try {
     $config = sv_load_config();
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo '<pre>CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
-    exit;
+    sv_security_error(500, 'config');
 }
 
 $configWarning     = $config['_config_warning'] ?? null;
@@ -24,9 +23,7 @@ try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo '<pre>DB-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
-    exit;
+    sv_security_error(500, 'db');
 }
 
 function sv_media_view_url(int $id, bool $adult): string
@@ -40,6 +37,7 @@ function sv_media_view_url(int $id, bool $adult): string
 }
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'forge_jobs') {
+    sv_require_internal_access($config, 'media_grid_forge_jobs');
     $idsParam = $_GET['ids'] ?? ($_GET['media_id'] ?? '');
     $ids      = [];
     if (is_string($idsParam)) {
@@ -55,6 +53,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'forge_jobs') {
 }
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'scan_jobs') {
+    sv_require_internal_access($config, 'media_grid_scan_jobs');
     $pathFilter = isset($_GET['path']) && is_string($_GET['path']) ? trim($_GET['path']) : null;
     $jobs       = sv_fetch_scan_jobs($pdo, $pathFilter, 25);
     header('Content-Type: application/json; charset=utf-8');
@@ -132,7 +131,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (Throwable $e) {
         $actionSuccess = false;
-        $actionMessage = 'Aktion fehlgeschlagen: ' . $e->getMessage();
+        $safeError = sv_sanitize_error_message($e->getMessage());
+        $actionMessage = 'Aktion fehlgeschlagen.';
+        if ($safeError !== '') {
+            $actionMessage .= ' ' . $safeError;
+        }
     }
 }
 
@@ -426,6 +429,7 @@ function sv_tab_active(array $current, array $expected): bool
         <?php foreach ($displayRows as $row):
             $id        = (int)$row['id'];
             $path      = (string)$row['path'];
+            $pathLabel = sv_safe_path_label($path);
             $type      = (string)$row['type'];
             $status    = (string)($row['status'] ?? '');
             $isMissing = (int)($row['is_missing'] ?? 0) === 1;
@@ -519,8 +523,8 @@ function sv_tab_active(array $current, array $expected): bool
                         <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                         <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>"><?= $promptLabel ?></span>
                     </div>
-                    <div class="info-path" title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        ID <?= $id ?> · <?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                    <div class="info-path" title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        ID <?= $id ?> · <?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                     </div>
                 </div>
             </article>
