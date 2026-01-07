@@ -12,6 +12,7 @@
 - Keine Phantom-Dateien oder temporären Ablagen anlegen; bestehende Dateien weiterverwenden.
 - Keine Duplikate von CLIs, Views oder Parsern; Erweiterungen gehören in die bestehenden zentralen Komponenten.
 - Keine Eingriffe ohne expliziten Auftrag; Dokumentation immer in README und AGENTS aktualisieren, wenn Abläufe/Schnittstellen betroffen sind.
+- Forge-Modellquelle: Liste stammt aus `/sdapi/v1/sd-models`, wird kurz (~90s) in `LOGS/forge_models.cache.json` gecacht (stale Cache + Fallback-Modell erlaubt), Jobs/Versionen speichern requested/resolved Modell inkl. Quelle/Status; UI zeigt Quelle/Fehler transparent an.
 - Config-Zugriff immer über `sv_load_config()`; der Loader fällt bei fehlender `CONFIG/config.php` mit Warnung auf `CONFIG/config.example.php` zurück. Keine direkten `require` auf `CONFIG/config.php` hinzufügen.
 - Config-Priorität: `/mnt/data/config.php` (z. B. Container-Volume) hat Vorrang vor `CONFIG/config.php`; Fallback auf `CONFIG/config.example.php` bleibt mit Warnhinweis bestehen.
 

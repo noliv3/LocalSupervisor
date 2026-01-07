@@ -18,6 +18,9 @@ $configWarning     = $config['_config_warning'] ?? null;
 $hasInternalAccess = sv_validate_internal_access($config, 'media_view', false);
 $forgeModels       = [];
 $forgeModelError   = null;
+$forgeModelStatus  = 'unavailable';
+$forgeModelSource  = 'none';
+$forgeModelAge     = null;
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -100,12 +103,21 @@ $actionLogFile = null;
 
 if ($hasInternalAccess) {
     try {
-        $forgeModels = sv_forge_list_models($config, function (string $msg) use (&$actionLogs): void {
+        $forgeModelResult = sv_forge_list_models($config, function (string $msg) use (&$actionLogs): void {
             $actionLogs[] = '[Forge Model] ' . $msg;
         });
+        $forgeModels      = $forgeModelResult['models'] ?? [];
+        $forgeModelStatus = $forgeModelResult['status'] ?? $forgeModelStatus;
+        $forgeModelSource = $forgeModelResult['source'] ?? $forgeModelSource;
+        $forgeModelAge    = $forgeModelResult['age'] ?? null;
+        if (!empty($forgeModelResult['error'])) {
+            $forgeModelError = (string)$forgeModelResult['error'];
+        }
     } catch (Throwable $e) {
         $forgeModelError = $e->getMessage();
     }
+} else {
+    $forgeModelStatus = 'restricted';
 }
 
 $id = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
@@ -261,6 +273,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $actionMessage = 'Forge-Regenerations-Job #' . $jobId . ' wurde in die Warteschlange gestellt.';
                 if (!empty($result['resolved_model'])) {
                     $actionMessage .= ' Modell: ' . htmlspecialchars((string)$result['resolved_model'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+                }
+                if (!empty($result['model_source'])) {
+                    $actionMessage .= ' Quelle: ' . htmlspecialchars((string)$result['model_source'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+                }
+                if (!empty($result['model_status']) && (string)$result['model_status'] !== 'ok') {
+                    $actionMessage .= ' Modell-Status: ' . htmlspecialchars((string)$result['model_status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
+                }
+                if (!empty($result['model_error'])) {
+                    $actionMessage .= ' Hinweis: ' . htmlspecialchars((string)$result['model_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
                 }
                 if (!empty($result['regen_plan']['fallback_used'])) {
                     $actionMessage .= ' Hinweis: Prompt-Fallback angewendet.';
@@ -421,7 +442,38 @@ $activeWidth = $activeVersion['width'] ?? $media['width'] ?? null;
 $activeHeight = $activeVersion['height'] ?? $media['height'] ?? null;
 $activeModel = $activeVersion['model_used'] ?? $activeVersion['model_requested'] ?? ($prompt['model'] ?? '');
 $forgeFallbackModel = sv_forge_fallback_model($config);
-$resolvedModelLabel = $activeModel !== '' ? $activeModel : ($forgeFallbackModel ?: 'Auto');
+$modelDropdownValue = $latestRequestedModel ?? $activeModel;
+$resolvedModelLabel = $latestResolvedModel
+    ?? $activeVersion['model_used']
+    ?? $activeModel
+    ?? ($forgeFallbackModel ?: 'Auto');
+$selectedModelLabel = $modelDropdownValue !== '' ? $modelDropdownValue : 'Auto';
+$forgeEnabled = sv_is_forge_enabled($config);
+$forgeDispatchEnabled = sv_is_forge_dispatch_enabled($config);
+$forgeModelSourceLabel = match ($forgeModelSource) {
+    'cache'        => 'Cache',
+    'stale_cache'  => 'Cache (alt)',
+    'fallback'     => 'Fallback',
+    'restricted'   => 'Internal-Key nötig',
+    'disabled'     => 'Forge aus',
+    'none'         => 'nicht geladen',
+    default        => 'Live',
+};
+if ($forgeModelAge !== null) {
+    $forgeModelSourceLabel .= ' · ' . (int)$forgeModelAge . 's';
+}
+$forgeModelStatusLabel = match ($forgeModelStatus) {
+    'ok'           => 'OK',
+    'disabled'     => 'Forge deaktiviert',
+    'auth_failed'  => 'Auth fehlgeschlagen',
+    'timeout'      => 'Timeout',
+    'parse_error'  => 'Parse-Fehler',
+    'http_error'   => 'HTTP-Fehler',
+    'transport_error' => 'Transport-Fehler',
+    'restricted'   => 'kein Zugriff',
+    'unavailable'  => 'nicht erreichbar',
+    default        => (string)$forgeModelStatus,
+};
 $activeSampler = $activeVersion['sampler'] ?? ($prompt['sampler'] ?? '');
 $activeScheduler = $activeVersion['scheduler'] ?? ($prompt['scheduler'] ?? '');
 $activeSeed = $activeVersion['seed'] ?? ($prompt['seed'] ?? '');
@@ -773,14 +825,31 @@ if (!$thumbHasVersion && $thumbVersion !== '') {
 $latestPreview = null;
 $latestJobResponse = null;
 $latestJobRequest = null;
+$latestJobStatus = null;
+$latestJobError = null;
+$latestJobUpdated = null;
+$latestRequestedModel = null;
+$latestResolvedModel = null;
+$latestModelSource = null;
+$latestModelStatus = null;
+$latestModelError = null;
 $manualOverrideActive = false;
-$latestJobStmt = $pdo->prepare('SELECT id, status, forge_response_json, forge_request_json FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT 1');
+$latestJobStmt = $pdo->prepare('SELECT id, status, forge_response_json, forge_request_json, error_message, updated_at FROM jobs WHERE type = :type AND media_id = :media_id ORDER BY id DESC LIMIT 1');
 $latestJobStmt->execute([':type' => SV_FORGE_JOB_TYPE, ':media_id' => $id]);
 $latestJobRow = $latestJobStmt->fetch(PDO::FETCH_ASSOC);
 if ($latestJobRow) {
     $latestJobId = (int)$latestJobRow['id'];
     $latestJobResponse = json_decode((string)($latestJobRow['forge_response_json'] ?? ''), true) ?: [];
     $latestJobRequest  = json_decode((string)($latestJobRow['forge_request_json'] ?? ''), true) ?: [];
+    $latestJobStatus   = (string)($latestJobRow['status'] ?? '');
+    $latestJobError    = isset($latestJobRow['error_message']) ? sv_limit_string((string)$latestJobRow['error_message'], 240) : null;
+    $latestJobUpdated  = (string)($latestJobRow['updated_at'] ?? '');
+    $latestRequestedModel = $latestJobRequest['_sv_requested_model'] ?? null;
+    $latestResolvedModel  = $latestJobResponse['result']['model']
+        ?? ($latestJobRequest['model'] ?? null);
+    $latestModelSource = $latestJobResponse['result']['model_source'] ?? ($latestJobRequest['_sv_model_source'] ?? null);
+    $latestModelStatus = $latestJobResponse['result']['model_status'] ?? ($latestJobRequest['_sv_model_status'] ?? null);
+    $latestModelError  = $latestJobResponse['result']['model_error'] ?? ($latestJobRequest['_sv_model_error'] ?? null);
 
     $responseMode = (string)($latestJobResponse['mode'] ?? $latestJobRequest['_sv_mode'] ?? '');
     $responseResult = is_array($latestJobResponse['result'] ?? null) ? $latestJobResponse['result'] : [];
@@ -1177,13 +1246,13 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                     <option value="">Auto (Healthcheck / Fallback)</option>
                                     <?php foreach ($forgeModels as $model): ?>
                                         <?php $name = (string)($model['name'] ?? ''); if ($name === '') { continue; } ?>
-                                        <option value="<?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $name === $activeModel ? 'selected' : '' ?>>
+                                        <option value="<?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $name === $modelDropdownValue ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                             <?php if (!empty($model['title'])): ?> (<?= htmlspecialchars((string)$model['title'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?>
                                         </option>
                                     <?php endforeach; ?>
-                                    <?php if ($activeModel !== '' && !array_filter($forgeModels, fn($m) => isset($m['name']) && $m['name'] === $activeModel)): ?>
-                                        <option value="<?= htmlspecialchars((string)$activeModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" selected>Manuell: <?= htmlspecialchars((string)$activeModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                                    <?php if ($modelDropdownValue !== '' && !array_filter($forgeModels, fn($m) => isset($m['name']) && $m['name'] === $modelDropdownValue)): ?>
+                                        <option value="<?= htmlspecialchars((string)$modelDropdownValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" selected>Manuell: <?= htmlspecialchars((string)$modelDropdownValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
                                     <?php endif; ?>
                                 </select>
                             </label>
@@ -1195,6 +1264,15 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                         <div class="form-block">
                             <label class="checkbox-inline"><input type="checkbox" name="_sv_use_hybrid" value="1"> Hybrid (Prompt + Tags)</label>
                         </div>
+                    </div>
+                    <div class="panel-subsection compact">
+                        <div class="meta-line"><span>Forge</span><strong><?= $forgeEnabled ? 'aktiv' : 'deaktiviert' ?></strong><em class="small"><?= $forgeDispatchEnabled ? 'Dispatch an' : 'Dispatch aus' ?></em></div>
+                        <div class="meta-line"><span>Quelle</span><strong><?= htmlspecialchars($forgeModelSourceLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small">Status: <?= htmlspecialchars($forgeModelStatusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div>
+                        <div class="meta-line"><span>Gewählt</span><strong><?= htmlspecialchars($selectedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="meta-line"><span>Resolved</span><strong><?= htmlspecialchars($resolvedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if (!empty($latestModelStatus)): ?><em class="small">Job: <?= htmlspecialchars((string)$latestModelStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em><?php endif; ?></div>
+                        <?php if (!empty($latestModelSource)): ?><div class="hint small">Letzte Quelle: <?= htmlspecialchars((string)$latestModelSource, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                        <?php if (!empty($latestModelError)): ?><div class="action-note error">Job-Model-Hinweis: <?= htmlspecialchars((string)$latestModelError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                        <?php if ($latestJobError): ?><div class="action-note error">Letzter Forge-Fehler<?= $latestJobUpdated ? ' (' . htmlspecialchars($latestJobUpdated, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>: <?= htmlspecialchars($latestJobError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                     </div>
                     <div class="button-stack inline">
                         <button class="btn primary" type="submit" name="_sv_mode" value="preview" <?= $forgeDisabled ? 'disabled' : '' ?>>Preview starten</button>
