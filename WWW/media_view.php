@@ -334,17 +334,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $actionMessage = 'Tag-Aktion: ' . $result['action'] . ' (' . ($payload['name'] ?? '') . ')';
         } elseif ($action === 'quality_flag') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'quality_flag', $actionLogs, 5);
-            $allowedQuality = [SV_QUALITY_OK, SV_QUALITY_REVIEW, SV_QUALITY_BLOCKED, SV_QUALITY_UNKNOWN];
             $requested = sv_limit_string((string)($_POST['quality_status'] ?? ''), 32);
-            if (!in_array($requested, $allowedQuality, true)) {
-                $requested = SV_QUALITY_REVIEW;
-            }
+            $requested = sv_normalize_quality_status($requested, SV_QUALITY_REVIEW);
             $score = isset($_POST['quality_score']) && is_numeric($_POST['quality_score']) ? (float)$_POST['quality_score'] : null;
             $notes = sv_limit_string((string)($_POST['quality_notes'] ?? ''), 500);
             $rule  = sv_limit_string((string)($_POST['quality_rule'] ?? ''), 120);
             $result = sv_set_media_quality_status($pdo, $id, $requested, $score, $notes, $rule, 'internal', $logger);
             $actionSuccess = true;
-            $actionMessage = 'Quality-Status gesetzt: ' . $result['previous'] . ' → ' . $result['current'];
+            $actionMessage = 'Curation-Status gesetzt: ' . $result['previous'] . ' → ' . $result['current'];
         } elseif ($action === 'request_delete') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'request_delete', $actionLogs, 5);
             $reason = sv_limit_string((string)($_POST['delete_reason'] ?? ''), 240);
@@ -417,6 +414,31 @@ if ($promptHistory !== []) {
             break;
         }
     }
+}
+
+$promptUpdatedAt = null;
+if (is_array($latestPromptHistory) && !empty($latestPromptHistory['created_at'])) {
+    $promptUpdatedAt = (string)$latestPromptHistory['created_at'];
+}
+
+$latestQualityEvent = null;
+try {
+    $qualityStmt = $pdo->prepare(
+        'SELECT quality_status, quality_score, rule, reason, created_at '
+        . 'FROM media_lifecycle_events WHERE media_id = :id AND event_type = :event '
+        . 'ORDER BY created_at DESC, id DESC LIMIT 1'
+    );
+    $qualityStmt->execute([
+        ':id'    => $id,
+        ':event' => 'quality_eval',
+    ]);
+    $latestQualityEvent = $qualityStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+} catch (Throwable $e) {
+    $latestQualityEvent = null;
+}
+$curationUpdatedAt = null;
+if (is_array($latestQualityEvent) && !empty($latestQualityEvent['created_at'])) {
+    $curationUpdatedAt = (string)$latestQualityEvent['created_at'];
 }
 
 $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta WHERE media_id = :id ORDER BY source, meta_key');
@@ -767,18 +789,25 @@ if (($paramScheduler ?? '') !== '') {
 }
 $promptQuality = sv_analyze_prompt_quality($prompt, $tags);
 $promptQualityIssues = array_slice($promptQuality['issues'] ?? [], 0, 3);
+$promptQualityLabels = sv_prompt_quality_labels();
+$qualityStatusLabels = sv_quality_status_labels();
 
 $lifecycleStatus = (string)($media['lifecycle_status'] ?? SV_LIFECYCLE_ACTIVE);
 $lifecycleReason = (string)($media['lifecycle_reason'] ?? '');
-$qualityStatus   = (string)($media['quality_status'] ?? SV_QUALITY_UNKNOWN);
+$qualityStatus   = sv_normalize_quality_status((string)($media['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
 $qualityScore    = $media['quality_score'] ?? null;
 $qualityNotes    = (string)($media['quality_notes'] ?? '');
+$qualityLabel    = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
 $qualityBadgeClass = match ($qualityStatus) {
     SV_QUALITY_OK      => 'pill',
     SV_QUALITY_REVIEW  => 'pill-warn',
     SV_QUALITY_BLOCKED => 'pill-bad',
     default            => 'pill-muted',
 };
+$promptQualityClass = (string)($promptQuality['quality_class'] ?? 'C');
+$promptQualityBadgeClass = $promptQualityClass === 'A'
+    ? 'pill'
+    : ($promptQualityClass === 'B' ? 'pill-muted' : 'pill-warn');
 
 $compareFromId = (int)($_GET['compare_from'] ?? 0);
 $compareToId   = (int)($_GET['compare_to'] ?? 0);
@@ -1003,7 +1032,8 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
             <div class="badge-row">
                 <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Curation: <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="<?= htmlspecialchars($promptQualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Prompt: <?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <?php if ($hasStaleScan): ?><span class="pill pill-warn">Scan stale</span><?php endif; ?>
                 <?php if (!empty($media['rating'])): ?><span class="pill">Rating <?= htmlspecialchars((string)$media['rating'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
             </div>
@@ -1178,7 +1208,8 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <?php if ($activePathLabel !== ''): ?><span class="pill pill-muted" title="<?= htmlspecialchars($activePathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad gesetzt</span><?php endif; ?>
                     <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Quality: <?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Curation: <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="<?= htmlspecialchars($promptQualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Prompt: <?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 </div>
             </div>
         </div>
@@ -1317,24 +1348,28 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <div class="btn-reason">Status wird nur auf missing gesetzt.</div>
                 </div>
                 <div class="panel-subsection">
-                    <div class="subheader">Quality-Status</div>
-                    <div class="hint">Quality-Status (unknown/ok/review/blocked) bewertet das Medium, nicht den Prompt (Prompt-Qualität A/B/C bleibt separat).</div>
+                    <div class="subheader">Curation (Quality-Status)</div>
+                    <div class="hint">Quality-Status (unknown/ok/review/blocked) bewertet die operative Freigabe. Prompt-Qualität (A/B/C) bleibt separat.</div>
                     <form method="post" class="stacked">
                         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
                         <input type="hidden" name="action" value="quality_flag">
                         <label>Status
                             <select name="quality_status">
-                                <option value="<?= SV_QUALITY_OK ?>" <?= $qualityStatus === SV_QUALITY_OK ? 'selected' : '' ?>>OK</option>
-                                <option value="<?= SV_QUALITY_REVIEW ?>" <?= $qualityStatus === SV_QUALITY_REVIEW ? 'selected' : '' ?>>Review</option>
-                                <option value="<?= SV_QUALITY_BLOCKED ?>" <?= $qualityStatus === SV_QUALITY_BLOCKED ? 'selected' : '' ?>>Blocked</option>
-                                <option value="<?= SV_QUALITY_UNKNOWN ?>" <?= $qualityStatus === SV_QUALITY_UNKNOWN ? 'selected' : '' ?>>Unknown</option>
+                                <?php foreach ($qualityStatusLabels as $statusValue => $statusLabel): ?>
+                                    <option value="<?= htmlspecialchars($statusValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $qualityStatus === $statusValue ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    </option>
+                                <?php endforeach; ?>
                             </select>
                         </label>
                         <label>Score (optional)<input type="number" step="0.01" name="quality_score" value="<?= htmlspecialchars((string)($qualityScore ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
                         <label>Regel/Quelle<input type="text" name="quality_rule" maxlength="120" placeholder="Policy/Regel"></label>
                         <label>Notiz<textarea name="quality_notes" maxlength="500" placeholder="Begründung/Review-Hinweis"><?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
-                        <button class="btn secondary" type="submit">Quality speichern</button>
+                        <button class="btn secondary" type="submit">Curation speichern</button>
                     </form>
+                    <?php if ($curationUpdatedAt !== null): ?>
+                        <div class="hint">Letzte Änderung: <?= htmlspecialchars($curationUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <?php endif; ?>
                 </div>
 
                 <div class="panel-subsection">
@@ -1415,17 +1450,19 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <span class="status-pill <?= htmlspecialchars($metaBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($metaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 </div>
                 <div class="quality-row">
-                    <span class="quality-pill">Prompt-Qualität: <strong><?= htmlspecialchars((string)$promptQuality['quality_class'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></span>
+                    <span class="quality-pill">Prompt-Qualität: <strong><?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></span>
                     <span class="quality-score">Score <?= (int)$promptQuality['score'] ?></span>
+                    <?php if ($promptUpdatedAt !== null): ?><span class="quality-score">Letzte Änderung <?= htmlspecialchars($promptUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                 </div>
                 <div class="lifecycle-row">
                     <div>Lifecycle: <strong><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
                     <?php if ($lifecycleReason !== ''): ?><div class="hint">Grund: <?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                 </div>
                 <div class="lifecycle-row">
-                    <div>Quality: <strong><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if ($qualityScore !== null): ?> (Score <?= htmlspecialchars((string)$qualityScore, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?></div>
+                    <div>Curation (Quality-Status): <strong><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if ($qualityScore !== null): ?> (Score <?= htmlspecialchars((string)$qualityScore, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?></div>
                     <?php if ($qualityNotes !== ''): ?><div class="hint">Notiz: <?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                    <div class="hint">Quality-Status ≠ Prompt-Qualität; siehe Badge.</div>
+                    <?php if ($curationUpdatedAt !== null): ?><div class="hint">Letzte Änderung: <?= htmlspecialchars($curationUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                    <div class="hint">Curation ≠ Prompt-Qualität; beide werden separat bewertet.</div>
                 </div>
                 <?php if ($mediaIssues !== []): ?>
                     <div class="issues-list">
