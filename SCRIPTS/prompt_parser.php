@@ -35,6 +35,21 @@ function sv_merge_normalized_prompt(array $base, array $additional): array
 function sv_normalized_prompt_has_data(array $normalized): bool
 {
     foreach ($normalized as $v) {
+        if ($v === null) {
+            continue;
+        }
+        if (is_string($v)) {
+            if (trim($v) !== '') {
+                return true;
+            }
+            continue;
+        }
+        if (is_array($v)) {
+            if ($v !== []) {
+                return true;
+            }
+            continue;
+        }
         if ($v !== null) {
             return true;
         }

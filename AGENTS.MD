@@ -72,6 +72,12 @@
 - Versionen werden rein aus bestehenden Jobs/Metadaten/Backups abgeleitet (keine neuen Tabellen oder Schreibpfade).
 - Die UI zeigt eine lesende Liste der Versionen; Restore-/Rollback-Flows gehören zentral nach `SCRIPTS/operations.php` und sind separat zu designen.
 
+## Rollback-Grundlage
+- Prompt-Historie (`prompt_history`) wird nur geschrieben, wenn verwertbare Prompt-/Parameterdaten vorliegen und sich seit der letzten Version etwas geändert hat (Import, Scan/Rescan, Forge-Regeneration).
+- Jeder History-Datensatz bleibt über `media_id` plus `version` referenzierbar; ein fehlender Prompt-Link wird als versionless behandelt (prompt_id NULL), damit kein Link bricht.
+- Konsistenz-Checks reparieren verwaiste Prompt-Links (prompt_id NULL), löschen History-Einträge ohne Medium und vergeben fehlende Versionsnummern im Simple-Repair.
+- Detailansicht zeigt letzte Prompt-Historie (Zeit/Quelle), Version-Link-Status sowie eine Inkonsistenz-Badge; es gibt keine UI-Restore-Funktion.
+
 ## Forge-Regeneration
 - Forge-bezogene Operationen laufen ausschließlich über `SCRIPTS/operations.php` (Job-Erzeugung/Dispatch) und `WWW/media_view.php` (UI-Auslöser).
 - Neue Forge-Funktionen müssen das `jobs`-Modell verwenden und auditierbar sein; keine direkten Forge-Helper im Webroot anlegen.

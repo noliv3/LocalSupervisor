@@ -5999,7 +5999,7 @@ function sv_run_consistency_checks(PDO $pdo, callable $logFinding, string $repai
     sv_check_scan_metadata_gaps($pdo, $logFinding);
     sv_check_scan_missing_links($pdo, $logFinding);
     sv_check_job_state_gaps($pdo, $logFinding);
-    sv_check_prompt_history_links($pdo, $logFinding);
+    sv_check_prompt_history_links($pdo, $logFinding, $repairMode);
 }
 
 function sv_collect_consistency_findings(PDO $pdo): array
@@ -6299,7 +6299,7 @@ function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
     }
 }
 
-function sv_check_prompt_history_links(PDO $pdo, callable $logFinding): void
+function sv_check_prompt_history_links(PDO $pdo, callable $logFinding, string $repairMode): void
 {
     $stmt = $pdo->query(
         'SELECT ph.id, ph.media_id, ph.prompt_id FROM prompt_history ph '
@@ -6314,28 +6314,73 @@ function sv_check_prompt_history_links(PDO $pdo, callable $logFinding): void
             'History_ID=' . $row['id'] . ', Prompt_ID=' . $row['prompt_id'] . ', Media_ID=' . $row['media_id']
         );
     }
+    if ($repairMode === 'simple' && !empty($rows)) {
+        $fixStmt = $pdo->prepare('UPDATE prompt_history SET prompt_id = NULL WHERE id = ? AND prompt_id = ?');
+        foreach ($rows as $row) {
+            $fixStmt->execute([$row['id'], $row['prompt_id']]);
+            $logFinding(
+                'prompt_history_orphan',
+                'info',
+                'Prompt-Link entfernt: History_ID=' . $row['id'] . ', Prompt_ID=' . $row['prompt_id']
+            );
+        }
+    }
 
     $mediaStmt = $pdo->query(
         'SELECT ph.id, ph.media_id FROM prompt_history ph '
         . 'LEFT JOIN media m ON m.id = ph.media_id WHERE m.id IS NULL LIMIT 200'
     );
-    while ($row = $mediaStmt->fetch(PDO::FETCH_ASSOC)) {
+    $mediaRows = $mediaStmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($mediaRows as $row) {
         $logFinding(
             'prompt_history_media_missing',
             'warn',
             'History_ID=' . $row['id'] . ', Media_ID=' . $row['media_id'] . ' ohne gültiges Medium'
         );
     }
+    if ($repairMode === 'simple' && !empty($mediaRows)) {
+        $deleteStmt = $pdo->prepare('DELETE FROM prompt_history WHERE id = ?');
+        foreach ($mediaRows as $row) {
+            $deleteStmt->execute([$row['id']]);
+            $logFinding(
+                'prompt_history_media_missing',
+                'info',
+                'History gelöscht (Media fehlt): History_ID=' . $row['id'] . ', Media_ID=' . $row['media_id']
+            );
+        }
+    }
 
-    $versionStmt = $pdo->query(
-        'SELECT id, media_id, version FROM prompt_history WHERE version IS NULL OR version <= 0 LIMIT 200'
-    );
-    while ($row = $versionStmt->fetch(PDO::FETCH_ASSOC)) {
+    $versionRows = $pdo->query(
+        'SELECT id, media_id, created_at FROM prompt_history WHERE version IS NULL OR version <= 0 ORDER BY media_id ASC, created_at ASC, id ASC LIMIT 500'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($versionRows as $row) {
         $logFinding(
             'prompt_history_version_gap',
             'warn',
             'History_ID=' . $row['id'] . ', Media_ID=' . $row['media_id'] . ' ohne gültige Versionsnummer'
         );
+    }
+    if ($repairMode === 'simple' && !empty($versionRows)) {
+        $maxStmt = $pdo->prepare('SELECT COALESCE(MAX(version), 0) FROM prompt_history WHERE media_id = ?');
+        $updateStmt = $pdo->prepare('UPDATE prompt_history SET version = ? WHERE id = ?');
+        $grouped = [];
+        foreach ($versionRows as $row) {
+            $grouped[(int)$row['media_id']][] = $row;
+        }
+        foreach ($grouped as $mediaId => $rowsForMedia) {
+            $maxStmt->execute([$mediaId]);
+            $nextVersion = (int)$maxStmt->fetchColumn();
+            $nextVersion = max(0, $nextVersion) + 1;
+            foreach ($rowsForMedia as $row) {
+                $updateStmt->execute([$nextVersion, $row['id']]);
+                $logFinding(
+                    'prompt_history_version_gap',
+                    'info',
+                    'Version gesetzt: History_ID=' . $row['id'] . ', Media_ID=' . $mediaId . ' -> ' . $nextVersion
+                );
+                $nextVersion++;
+            }
+        }
     }
 }
 
