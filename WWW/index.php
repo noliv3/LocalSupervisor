@@ -618,7 +618,9 @@ $cliEntries = [
 
     <nav>
         <a href="index.php">Dashboard</a>
-        <a href="mediadb.php">Media-Datenbank</a>
+        <a href="mediadb.php">Galerie (Hauptpfad)</a>
+        <a href="#health-snapshot">Health Snapshot</a>
+        <a href="#job-center">Jobs Übersicht</a>
     </nav>
 
     <?php if (!empty($configWarning)): ?>
@@ -627,7 +629,7 @@ $cliEntries = [
         </div>
     <?php endif; ?>
 
-    <p style="color: #555; font-size: 0.9rem;">Hinweis: Das neue Card-Grid liegt unter <code>mediadb.php</code>; die alte Grid-Ansicht (<code>media.php</code>) bleibt nur als Legacy-Option bestehen.</p>
+    <p style="color: #555; font-size: 0.9rem;">Hinweis: Die Galerie startet ab jetzt ausschließlich in <code>mediadb.php</code>.</p>
 
     <h2>DB-Status</h2>
     <?php if ($dbError !== null): ?>
@@ -746,7 +748,7 @@ $cliEntries = [
         <button type="submit">Consistency-Check starten</button>
     </form>
 
-    <h2>Health Snapshot</h2>
+    <h2 id="health-snapshot">Health Snapshot</h2>
     <?php if ($healthError !== null): ?>
         <p>Health-Snapshot fehlgeschlagen: <?= htmlspecialchars($healthError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
     <?php else: ?>
@@ -1050,7 +1052,7 @@ $cliEntries = [
         <p>Verarbeitung erfolgt ausschließlich über den Forge-Worker (z. B. <code>php SCRIPTS/forge_worker_cli.php --limit=1</code>) und wird von der Web-Oberfläche nur als Queue verwaltet.</p>
     <?php endif; ?>
 
-    <h2>Job Center</h2>
+    <h2 id="job-center">Job Center</h2>
     <p>Übersicht und Steuerung der Jobs (forge_regen). Lesen ohne Internal-Key, Aktionen nur mit gültigem Internal-Key/IP-Whitelist.</p>
 
     <form method="get">
