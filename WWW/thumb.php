@@ -3,16 +3,17 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 require_once __DIR__ . '/../SCRIPTS/thumb_core.php';
 
 try {
     $config = sv_load_config();
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo 'CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    exit;
+    sv_security_error(500, 'config');
 }
+
+sv_require_internal_access($config, 'thumb');
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -23,9 +24,7 @@ try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo 'DB-Fehler';
-    exit;
+    sv_security_error(500, 'db');
 }
 
 function sv_clamp_int(int $value, int $min, int $max, int $default): int

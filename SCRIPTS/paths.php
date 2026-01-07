@@ -66,13 +66,35 @@ function sv_media_root_for_path(string $path, array $pathsCfg): ?string
     return null;
 }
 
-function sv_assert_media_path_allowed(string $path, array $pathsCfg, string $context): void
+function sv_is_path_within_roots(string $path, array $roots): bool
 {
-    if (sv_media_root_for_path($path, $pathsCfg) !== null) {
-        return;
+    $normalizedPath = sv_normalize_absolute_path($path);
+    foreach ($roots as $root) {
+        $normalizedRoot = sv_normalize_absolute_path($root);
+        if ($normalizedRoot === '') {
+            continue;
+        }
+        if (str_starts_with($normalizedPath . '/', rtrim($normalizedRoot, '/') . '/')) {
+            return true;
+        }
     }
 
-    throw new RuntimeException('Pfad nicht erlaubt (' . $context . ')');
+    return false;
+}
+
+function sv_assert_media_path_allowed(string $path, array $pathsCfg, string $context): void
+{
+    $roots = sv_media_roots($pathsCfg);
+    if (!sv_is_path_within_roots($path, $roots)) {
+        throw new RuntimeException('Pfad nicht erlaubt (' . $context . ')');
+    }
+
+    $realPath = realpath($path);
+    if ($realPath !== false && !sv_is_path_within_roots($realPath, $roots)) {
+        throw new RuntimeException('Pfad nicht erlaubt (' . $context . ')');
+    }
+
+    return;
 }
 
 function sv_normalize_absolute_path(string $path): string
@@ -118,7 +140,7 @@ function sv_normalize_absolute_path(string $path): string
     return $normalizedPath;
 }
 
-function sv_collect_stream_roots(array $config, bool $allowPreviews = false, bool $allowBackups = false): array
+function sv_collect_stream_roots(array $config, bool $allowPreviews = false, bool $allowBackups = false, bool $allowTmp = false): array
 {
     $pathsCfg = $config['paths'] ?? [];
     $rootsMap = sv_media_roots($pathsCfg);
@@ -145,6 +167,13 @@ function sv_collect_stream_roots(array $config, bool $allowPreviews = false, boo
         }
     }
 
+    if ($allowTmp) {
+        $tmpCandidate = $pathsCfg['tmp'] ?? (sv_base_dir() . '/TMP');
+        if (is_string($tmpCandidate) && trim($tmpCandidate) !== '') {
+            $roots[] = sv_normalize_absolute_path((string)$tmpCandidate);
+        }
+    }
+
     $unique = [];
     foreach ($roots as $root) {
         if (!in_array($root, $unique, true)) {
@@ -155,14 +184,21 @@ function sv_collect_stream_roots(array $config, bool $allowPreviews = false, boo
     return $unique;
 }
 
-function sv_assert_stream_path_allowed(string $path, array $config, string $context, bool $allowPreviews = false, bool $allowBackups = false): void
+function sv_assert_stream_path_allowed(string $path, array $config, string $context, bool $allowPreviews = false, bool $allowBackups = false, bool $allowTmp = false): void
 {
     $normalizedPath = sv_normalize_absolute_path($path);
-    $allowedRoots   = sv_collect_stream_roots($config, $allowPreviews, $allowBackups);
+    $allowedRoots   = sv_collect_stream_roots($config, $allowPreviews, $allowBackups, $allowTmp);
 
     foreach ($allowedRoots as $root) {
         $normalizedRoot = rtrim($root, '/');
         if ($normalizedRoot !== '' && str_starts_with($normalizedPath . '/', $normalizedRoot . '/')) {
+            $realPath = realpath($path);
+            if ($realPath !== false) {
+                $realNormalized = sv_normalize_absolute_path($realPath);
+                if (!str_starts_with($realNormalized . '/', $normalizedRoot . '/')) {
+                    break;
+                }
+            }
             return;
         }
     }

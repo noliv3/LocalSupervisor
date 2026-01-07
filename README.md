@@ -54,6 +54,25 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - Internal-Key bleibt in `CONFIG/config.php` definiert und wird nicht in Klartext-Logs geschrieben.
 - Einmalig `?internal_key=<key>` (GET oder POST) aufrufen reicht: Bei gültigem Key und Whitelist-IP wird der Wert für die Dauer der PHP-Session und in einem HttpOnly-Cookie hinterlegt; Folge-Requests brauchen den Parameter nicht mehr.
 - IP-Whitelist bleibt bestehen; bei nicht erlaubter Quell-IP schlägt der Zugriff weiterhin fehl.
+- Web-Endpunkte liefern bei fehlendem/ungültigem Key stets dieselbe kurze Antwort (`Forbidden.`), ohne Stacktraces oder Pfade. Absolute Pfade und Secrets werden in UI/JSON/Audit-Logs redigiert.
+
+### Internal-Key Required Matrix (Web)
+| Endpoint | Zweck | Internal-Key |
+| --- | --- | --- |
+| `WWW/index.php` (Action-POSTs) | Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz starten | erforderlich |
+| `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Quality, Rescan-Job | erforderlich |
+| `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status für Detailansicht | erforderlich |
+| `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status für Detailansicht | erforderlich |
+| `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
+| `WWW/media.php?ajax=forge_jobs` | Forge-Job-Status (Legacy-Grid) | erforderlich |
+| `WWW/media.php?ajax=scan_jobs` | Scan-Job-Status (Legacy-Grid) | erforderlich |
+| `WWW/media_stream.php` | Stream/Download von Medien/Assets | erforderlich |
+| `WWW/thumb.php` | Thumbnail-Ausgabe inkl. Forge-Assets | erforderlich |
+
+**Beispiele für Blockierungen**
+- Fehlender/ungültiger Key: `Forbidden.`
+- Fehlkonfiguration oder DB-Fehler: `Server error.`
+In allen Fällen: keine Pfade/Secrets in der Antwort.
 
 ## Installation / Setup
 - **Voraussetzungen**: PHP 8.1+ mit PDO (SQLite/MySQL), JSON, mbstring, fileinfo, gd/imagick; ffmpeg/ffprobe für Videometadaten, Video-Thumbnails und den Selftest; optional exiftool für Metadaten. Datenbank per SQLite-File oder MySQL/MariaDB.
@@ -101,10 +120,10 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `WWW/index.php` | Dashboard: Start Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz | Internal-Key + IP-Whitelist für Write-Actions |
 | `WWW/mediadb.php` | Listenansicht mit Filtern | type, prompt, meta, status, rating_min, path_substring, adult |
 | `WWW/media_view.php?id=<id>` | Detailansicht eines Mediums | id (Integer), optional adult |
-| `WWW/media_stream.php?path=<path>` | Streamt Originaldateien nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
-| `WWW/media_stream.php?job_id=<id>&asset=preview|backup|output` | Streamt Forge-Preview/Backup/Output (Pfad aus Job-Response, NSFW-Regeln via media_id) | job_id, asset, optional adult |
-| `WWW/thumb.php?path=<path>` | Thumbnails nach Pfad-Validierung | path (unterhalb erlaubter Roots) |
-| `WWW/thumb.php?job_id=<id>&asset=preview|backup|output` | Thumb aus Forge-Preview/Backup/Output (Pfad aus Job-Response, read-only Roots) | job_id, asset, optional adult |
+| `WWW/media_stream.php?path=<path>` | Streamt Originaldateien nach Pfad-Validierung | **Internal-Key erforderlich**; path (unterhalb erlaubter Roots) |
+| `WWW/media_stream.php?job_id=<id>&asset=preview|backup|output` | Streamt Forge-Preview/Backup/Output (Pfad aus Job-Response, NSFW-Regeln via media_id) | **Internal-Key erforderlich**; job_id, asset, optional adult |
+| `WWW/thumb.php?path=<path>` | Thumbnails nach Pfad-Validierung | **Internal-Key erforderlich**; path (unterhalb erlaubter Roots) |
+| `WWW/thumb.php?job_id=<id>&asset=preview|backup|output` | Thumb aus Forge-Preview/Backup/Output (Pfad aus Job-Response, read-only Roots) | **Internal-Key erforderlich**; job_id, asset, optional adult |
 > Hinweis: `SCRIPTS/consistency_check.php` beendet sich mit Exit-Code ≠ 0, sobald Findings erkannt werden (Report und Simple-Repair). Snapshot-Format (DB/Job/Scan) ist identisch in CLI und Dashboard.
 
 ## Backup/Restore

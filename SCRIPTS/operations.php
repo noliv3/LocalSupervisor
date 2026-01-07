@@ -93,6 +93,7 @@ function sv_forge_response_snippet(?string $body, int $limit = 200): ?string
 
     $substr  = function_exists('mb_substr') ? 'mb_substr' : 'substr';
     $snippet = $substr($body, 0, $limit);
+    $snippet = sv_sanitize_error_message($snippet, $limit);
     return $snippet === '' ? null : $snippet;
 }
 
@@ -248,7 +249,7 @@ function sv_assert_backup_outside_media_roots(array $config, string $backupDir):
             continue;
         }
         if (str_starts_with($backupAbs . '/', $rootAbs . '/')) {
-            throw new RuntimeException('Backup-Verzeichnis darf nicht innerhalb der Medien-Bibliothek liegen: ' . $backupDir);
+            throw new RuntimeException('Backup-Verzeichnis darf nicht innerhalb der Medien-Bibliothek liegen.');
         }
     }
 }
@@ -1899,7 +1900,7 @@ function sv_job_summary_from_row(array $row): string
         $path  = is_string($payload['path'] ?? null) ? (string)$payload['path'] : '';
         $limit = isset($payload['limit']) ? (int)$payload['limit'] : null;
         if ($path !== '') {
-            $parts[] = 'Pfad: ' . $path;
+            $parts[] = 'Pfad: ' . sv_safe_path_label($path);
         }
         if ($limit !== null && $limit > 0) {
             $parts[] = 'Limit: ' . $limit;
@@ -1909,10 +1910,10 @@ function sv_job_summary_from_row(array $row): string
         $parts[] = 'Status: ' . $status;
     }
     if (is_array($response) && isset($response['error'])) {
-        $parts[] = 'Response-Error: ' . trim((string)$response['error']);
+        $parts[] = 'Response-Error: ' . sv_sanitize_error_message((string)$response['error']);
     }
     if (isset($row['error_message']) && trim((string)$row['error_message']) !== '') {
-        $parts[] = 'Fehler: ' . trim((string)$row['error_message']);
+        $parts[] = 'Fehler: ' . sv_sanitize_error_message((string)$row['error_message']);
     }
 
     return $parts === [] ? '' : implode(' | ', $parts);
@@ -2009,7 +2010,7 @@ function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $lim
 
     $real = realpath($scanPath);
     if ($real === false || !is_dir($real)) {
-        throw new RuntimeException('Pfad nicht gefunden oder kein Verzeichnis: ' . $scanPath);
+        throw new RuntimeException('Pfad nicht gefunden oder kein Verzeichnis.');
     }
 
     $limit = $limit !== null && $limit > 0 ? $limit : null;
@@ -2036,10 +2037,10 @@ function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $lim
     ]);
 
     $jobId = (int)$pdo->lastInsertId();
-    $logger('Scan-Job angelegt: ID=' . $jobId . ' (' . $payload['path'] . ')');
+    $logger('Scan-Job angelegt: ID=' . $jobId . ' (' . sv_safe_path_label($payload['path']) . ')');
 
     sv_audit_log($pdo, 'scan_job_created', 'jobs', $jobId, [
-        'path'   => $payload['path'],
+        'path'   => sv_safe_path_label($payload['path']),
         'limit'  => $limit,
         'job_id' => $jobId,
     ]);
@@ -2348,12 +2349,12 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     };
 
     sv_update_job_status($pdo, $jobId, 'running');
-    $jobLogger('Beginne Scan für ' . $path . ($limit !== null ? ' (limit=' . $limit . ')' : ''));
+    $jobLogger('Beginne Scan für ' . sv_safe_path_label($path) . ($limit !== null ? ' (limit=' . $limit . ')' : ''));
 
     $result = sv_run_scan_operation($pdo, $config, $path, $limit, $jobLogger);
 
     $response = [
-        'path'         => $path,
+        'path'         => sv_safe_path_label($path),
         'limit'        => $limit,
         'result'       => $result,
         'completed_at' => date('c'),
@@ -2368,7 +2369,7 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     );
 
     sv_audit_log($pdo, 'scan_job_done', 'jobs', $jobId, [
-        'path'     => $path,
+        'path'     => sv_safe_path_label($path),
         'limit'    => $limit,
         'result'   => $result,
         'job_id'   => $jobId,
@@ -2487,12 +2488,13 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
             $done++;
         } catch (Throwable $e) {
             $errors++;
-            sv_update_job_status($pdo, $jobId, 'error', null, $e->getMessage());
+            $safeError = sv_sanitize_error_message($e->getMessage());
+            sv_update_job_status($pdo, $jobId, 'error', null, $safeError);
             sv_audit_log($pdo, 'scan_job_failed', 'jobs', $jobId, [
-                'error'  => $e->getMessage(),
+                'error'  => $safeError,
                 'job_id' => $jobId,
             ]);
-            $logger('Fehler bei Scan-Job #' . $jobId . ': ' . $e->getMessage());
+            $logger('Fehler bei Scan-Job #' . $jobId . ': ' . $safeError);
         }
     }
 
@@ -2535,12 +2537,12 @@ function sv_fetch_scan_jobs(PDO $pdo, ?string $pathFilter = null, int $limit = 2
         $jobs[] = [
             'id'          => (int)($row['id'] ?? 0),
             'status'      => (string)($row['status'] ?? ''),
-            'path'        => $path,
+            'path'        => $path !== '' ? sv_safe_path_label($path) : '',
             'limit'       => isset($payload['limit']) ? (int)$payload['limit'] : null,
             'created_at'  => (string)($row['created_at'] ?? ''),
             'updated_at'  => (string)($row['updated_at'] ?? ''),
             'result'      => $response['result'] ?? null,
-            'error'       => $row['error_message'] ?? null,
+            'error'       => isset($row['error_message']) ? sv_sanitize_error_message((string)$row['error_message']) : null,
             'worker_pid'  => $response['_sv_worker_pid'] ?? null,
             'worker_started_at' => $response['_sv_worker_started_at'] ?? null,
         ];
@@ -2568,15 +2570,16 @@ function sv_fetch_rescan_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 5):
     foreach ($rows as $row) {
         $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
+        $pathLabel = isset($payload['path']) ? sv_safe_path_label((string)$payload['path']) : '';
         $jobs[] = [
             'id'          => (int)($row['id'] ?? 0),
             'status'      => (string)($row['status'] ?? ''),
             'created_at'  => (string)($row['created_at'] ?? ''),
             'updated_at'  => (string)($row['updated_at'] ?? ''),
-            'path'        => (string)($payload['path'] ?? ''),
+            'path'        => $pathLabel,
             'result'      => $response['result'] ?? null,
             'completed_at'=> $response['completed_at'] ?? null,
-            'error'       => $row['error_message'] ?? ($response['error'] ?? null),
+            'error'       => sv_sanitize_error_message((string)($row['error_message'] ?? ($response['error'] ?? ''))),
             'scanner'     => $response['scanner'] ?? null,
             'nsfw_score'  => $response['nsfw_score'] ?? null,
             'run_at'      => $response['run_at'] ?? null,
@@ -3824,19 +3827,21 @@ function sv_backup_media_file(array $config, string $path, callable $logger, ?st
     $backupDir = $backupDir ?? sv_resolve_backup_dir($config);
     $backupDir = rtrim(str_replace('\\', '/', $backupDir), '/');
     sv_assert_backup_outside_media_roots($config, $backupDir);
+    sv_assert_stream_path_allowed($backupDir, $config, 'forge_backup_dir', false, true);
     if (!is_dir($backupDir)) {
         if (!mkdir($backupDir, 0777, true) && !is_dir($backupDir)) {
-            throw new RuntimeException('Backup-Verzeichnis kann nicht angelegt werden: ' . $backupDir);
+            throw new RuntimeException('Backup-Verzeichnis kann nicht angelegt werden.');
         }
     }
 
     $backupPath = $backupPath ?? sv_build_backup_path($backupDir, $path);
+    sv_assert_stream_path_allowed($backupPath, $config, 'forge_backup_path', false, true);
 
     if (!copy($path, $backupPath)) {
-        throw new RuntimeException('Backup fehlgeschlagen: ' . $backupPath);
+        throw new RuntimeException('Backup fehlgeschlagen.');
     }
 
-    $logger('Backup erstellt: ' . $backupPath);
+    $logger('Backup erstellt: ' . sv_safe_path_label($backupPath));
 
     return $backupPath;
 }
@@ -3857,11 +3862,13 @@ function sv_build_temp_output_path(string $tmpDir, string $targetPath): string
 
 function sv_write_forge_image(array $config, string $targetPath, string $binary, callable $logger, array $expectedMeta = [], ?string $tempOutputPath = null): array
 {
+    sv_assert_stream_path_allowed($targetPath, $config, 'forge_output_path', false, false, true);
     $pathsCfg = $config['paths'] ?? [];
     $tmpDirRaw = $pathsCfg['tmp'] ?? null;
     $tmpDir = (is_string($tmpDirRaw) && trim($tmpDirRaw) !== '')
         ? rtrim(str_replace('\\', '/', (string)$tmpDirRaw), '/')
         : (sv_base_dir() . '/TMP');
+    sv_assert_stream_path_allowed($tmpDir, $config, 'forge_tmp_dir', false, false, true);
     if (!is_dir($tmpDir)) {
         mkdir($tmpDir, 0777, true);
     }
@@ -3872,11 +3879,12 @@ function sv_write_forge_image(array $config, string $targetPath, string $binary,
     }
     if (!is_dir($targetDir)) {
         if (!mkdir($targetDir, 0777, true) && !is_dir($targetDir)) {
-            throw new RuntimeException('Zielverzeichnis kann nicht angelegt werden: ' . $targetDir);
+            throw new RuntimeException('Zielverzeichnis kann nicht angelegt werden.');
         }
     }
 
     $tmpFile = $tempOutputPath !== null ? $tempOutputPath : sv_build_temp_output_path($tmpDir, $targetPath);
+    sv_assert_stream_path_allowed($tmpFile, $config, 'forge_tmp_file', false, false, true);
 
     $image = @imagecreatefromstring($binary);
     if ($image === false) {
@@ -4367,7 +4375,8 @@ function sv_refresh_media_after_regen(
 function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $responseJson = null, ?string $error = null): void
 {
     if ($error !== null) {
-        $error = sv_forge_limit_error((string)$error);
+        $error = sv_sanitize_error_message((string)$error, 240);
+        $error = sv_forge_limit_error($error);
     }
 
     $stmt = $pdo->prepare(
@@ -4436,7 +4445,7 @@ function sv_log_forge_paths(array $paths): void
     $shortened  = [];
 
     foreach ($paths as $key => $value) {
-        $shortened[$key] = mb_substr((string)$value, 0, 200);
+        $shortened[$key] = sv_safe_path_label((string)$value);
     }
 
     @file_put_contents(
@@ -4456,22 +4465,22 @@ function sv_log_forge_job_runtime(int $jobId, int $mediaId, string $mode, array 
     ];
 
     if (isset($data['preview_path'])) {
-        $payload['preview_path'] = mb_substr((string)$data['preview_path'], 0, 200);
+        $payload['preview_path'] = sv_safe_path_label((string)$data['preview_path']);
     }
     if (array_key_exists('replaced', $data)) {
         $payload['replaced'] = (bool)$data['replaced'];
     }
     if (isset($data['backup_path'])) {
-        $payload['backup_path'] = mb_substr((string)$data['backup_path'], 0, 200);
+        $payload['backup_path'] = sv_safe_path_label((string)$data['backup_path']);
     }
     if (isset($data['error'])) {
-        $payload['error'] = mb_substr((string)$data['error'], 0, 200);
+        $payload['error'] = sv_sanitize_error_message((string)$data['error']);
     }
     if (!empty($data['forced_preview'])) {
         $payload['forced_preview'] = true;
     }
     if (isset($data['reason'])) {
-        $payload['reason'] = mb_substr((string)$data['reason'], 0, 200);
+        $payload['reason'] = sv_sanitize_error_message((string)$data['reason']);
     }
 
     @file_put_contents(
@@ -4666,6 +4675,11 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     $plannedBackupPath     = sv_build_backup_path($backupDir, $path);
     $plannedTempOutputPath = sv_build_temp_output_path($tmpDir, $path);
     $finalTargetPath       = $path;
+
+    sv_assert_stream_path_allowed($backupDir, $config, 'forge_backup_dir', false, true);
+    sv_assert_stream_path_allowed($plannedBackupPath, $config, 'forge_backup_path', false, true);
+    sv_assert_stream_path_allowed($tmpDir, $config, 'forge_tmp_dir', false, false, true);
+    sv_assert_stream_path_allowed($plannedTempOutputPath, $config, 'forge_tmp_file', false, false, true);
 
     sv_fail_job_on_empty_path($pdo, $jobId, 'backup_path', $plannedBackupPath);
     sv_fail_job_on_empty_path($pdo, $jobId, 'temp_output_path', $plannedTempOutputPath);
@@ -5369,6 +5383,7 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
         $usedNegativeSource = $response['used_negative_source'] ?? ($payload['_sv_negative_source'] ?? ($regenPlan['negative_mode'] ?? null));
 
         $resultMeta = is_array($response['result'] ?? null) ? $response['result'] : [];
+        $outputPath = isset($resultMeta['output_path']) ? sv_safe_path_label((string)$resultMeta['output_path']) : null;
         $jobs[] = [
             'id'                 => (int)$row['id'],
             'status'             => (string)$row['status'],
@@ -5390,7 +5405,7 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
             'attempt_chain'      => $attemptChain,
             'fallback_model'     => $fallbackUsed,
             'replaced'           => $resultMeta['replaced'] ?? ($row['status'] === 'done'),
-            'error'              => $row['error_message'] ?? null,
+            'error'              => isset($row['error_message']) ? sv_sanitize_error_message((string)$row['error_message']) : null,
             'worker_pid'         => $workerPid !== null ? (int)$workerPid : null,
             'worker_started_at'  => $workerStart,
             'worker_running'     => (bool)($pidInfo['running'] ?? false),
@@ -5407,7 +5422,7 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
             'out_ext'            => $resultMeta['out_ext'] ?? null,
             'old_hash'           => $resultMeta['old_hash'] ?? null,
             'new_hash'           => $resultMeta['new_hash'] ?? null,
-            'output_path'        => $resultMeta['output_path'] ?? null,
+            'output_path'        => $outputPath,
             'version_token'      => $resultMeta['version_token'] ?? null,
         ];
     }
@@ -5481,7 +5496,7 @@ function sv_fetch_forge_jobs_grouped(PDO $pdo, array $mediaIds, int $limitPerMed
             'updated_at'        => (string)($row['updated_at'] ?? ''),
             'model'             => $resolvedModel,
             'prompt_category'   => $promptCategory,
-            'error_message'     => $row['error_message'] ?? null,
+            'error_message'     => isset($row['error_message']) ? sv_sanitize_error_message((string)$row['error_message']) : null,
             'worker_pid'        => $pidKey,
             'worker_started_at' => $workerStarted,
             'worker_running'    => (bool)($pidInfo['running'] ?? false),
@@ -5500,7 +5515,7 @@ function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $
     $pathsCfg      = $config['paths'] ?? [];
     $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
-    $logger('Starte Scan: ' . $scanPath . ($limit !== null ? " (limit={$limit})" : ''));
+    $logger('Starte Scan: ' . sv_safe_path_label($scanPath) . ($limit !== null ? " (limit={$limit})" : ''));
 
     $result = sv_run_scan_path(
         $scanPath,

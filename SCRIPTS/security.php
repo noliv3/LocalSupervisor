@@ -158,6 +158,81 @@ function sv_has_valid_internal_key(): bool
     return (bool)($GLOBALS['sv_last_internal_key_valid'] ?? false);
 }
 
+function sv_public_message_for_http(int $httpCode): string
+{
+    if ($httpCode === 403) {
+        return 'Forbidden.';
+    }
+    if ($httpCode >= 500) {
+        return 'Server error.';
+    }
+
+    return 'Request rejected.';
+}
+
+function sv_safe_path_label(?string $path): string
+{
+    if (!is_string($path)) {
+        return '';
+    }
+
+    $path = trim($path);
+    if ($path === '') {
+        return '';
+    }
+
+    $normalized = str_replace('\\', '/', $path);
+    $basename   = basename($normalized);
+    if ($basename === '' || $basename === '/' || $basename === '.') {
+        return '[hidden]';
+    }
+
+    if ($basename === $normalized) {
+        return $basename;
+    }
+
+    return '…/' . $basename;
+}
+
+function sv_sanitize_error_message(string $message, int $maxLen = 200): string
+{
+    $message = trim($message);
+    if ($message === '') {
+        return '';
+    }
+
+    $message = preg_replace('/\s+/', ' ', $message);
+    $message = preg_replace('~(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s\'"]+~', '<dsn>', $message);
+    $message = preg_replace('~(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s\'",;]+~', '$1=<redacted>', $message);
+    $message = preg_replace('~(?:(?:[A-Za-z]:)?[\\\\/](?:[^\s\'"<>]+))+~', '[path]', $message);
+
+    if (function_exists('mb_substr')) {
+        if (mb_strlen($message) > $maxLen) {
+            $message = mb_substr($message, 0, $maxLen);
+        }
+    } elseif (strlen($message) > $maxLen) {
+        $message = substr($message, 0, $maxLen);
+    }
+
+    return $message;
+}
+
+function sv_sanitize_audit_details($value)
+{
+    if (is_string($value)) {
+        return sv_sanitize_error_message($value, 200);
+    }
+    if (is_array($value)) {
+        $sanitized = [];
+        foreach ($value as $key => $entry) {
+            $sanitized[$key] = sv_sanitize_audit_details($entry);
+        }
+        return $sanitized;
+    }
+
+    return $value;
+}
+
 function sv_audit_log(PDO $pdo, string $action, ?string $entityType, ?int $entityId, array $details = []): void
 {
     static $tableChecked = false;
@@ -184,7 +259,7 @@ function sv_audit_log(PDO $pdo, string $action, ?string $entityType, ?int $entit
         $actorKey = '';
     }
 
-    $detailsJson = json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $detailsJson = json_encode(sv_sanitize_audit_details($details), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
     try {
         $stmt = $pdo->prepare(
@@ -212,6 +287,6 @@ function sv_security_error(int $httpCode, string $message): void
         header('Content-Type: text/plain; charset=utf-8');
     }
 
-    echo $message;
+    echo sv_public_message_for_http($httpCode);
     exit;
 }

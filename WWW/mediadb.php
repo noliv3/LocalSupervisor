@@ -3,14 +3,13 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 
 try {
     $config = sv_load_config();
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo '<pre>CONFIG-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
-    exit;
+    sv_security_error(500, 'config');
 }
 
 $configWarning = $config['_config_warning'] ?? null;
@@ -23,9 +22,7 @@ try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo '<pre>DB-Fehler: ' . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
-    exit;
+    sv_security_error(500, 'db');
 }
 
 function sv_media_stream_url(int $id, bool $adult, bool $download = false): string
@@ -616,6 +613,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
         <?php foreach ($rows as $row):
             $id      = (int)$row['id'];
             $path    = (string)$row['path'];
+            $pathLabel = sv_safe_path_label($path);
             $type    = (string)$row['type'];
             $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
             $rating  = (int)($row['rating'] ?? 0);
@@ -757,8 +755,8 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         <?php if ($scanTagsWritten !== null): ?><span class="info-chip">Tags <?= (int)$scanTagsWritten ?></span><?php endif; ?>
                         <?php if ($lastScanError): ?><span class="info-chip chip-warn" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?>
                     </div>
-                    <div class="info-path" title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        ID <?= $id ?> · <?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                    <div class="info-path" title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        ID <?= $id ?> · <?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                     </div>
                     <div class="info-line">
                         <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
@@ -797,6 +795,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                     <?php foreach ($rows as $row):
                         $id      = (int)$row['id'];
                         $path    = (string)$row['path'];
+                        $pathLabel = sv_safe_path_label($path);
                         $type    = (string)$row['type'];
                         $qualityStatus = (string)($row['quality_status'] ?? '');
                         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
@@ -817,7 +816,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         ?>
                         <tr style="border-bottom:1px solid #111827;">
                             <td><?= $id ?></td>
-                            <td title="<?= htmlspecialchars($path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars(basename($path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                            <td title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                             <td><?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                             <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
                             <td><?= $hasMeta ? 'ja' : 'nein' ?></td>

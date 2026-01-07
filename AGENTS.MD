@@ -25,9 +25,24 @@
 
 ## Sicherheitsregeln
 - Internal-Key-Flow bewahren: Web-Schreibaktionen nur mit `sv_require_internal_access` (Header/Query/Cookie `internal_key` plus IP-Whitelist).
+- Internal-Key gilt zusätzlich für Stream/Thumb und Job-Status-AJAX (kein anonymer Zugriff auf interne Medien- oder Jobdaten).
 - Logging-Pflicht für sicherheitsrelevante Aktionen (Backups, Migrationen, Konsistenz-Reparaturen, Web-Starts von Scan/Rescan/Filesync).
 - Pfadvalidierung nicht umgehen: keine Symlinks nutzen, keine Direktzugriffe außerhalb der erlaubten Media-Roots.
 - Forge-Preview/Backup/Output werden in `thumb.php`/`media_stream.php` ausschließlich über `job_id` + `asset` (preview|backup|output) aufgelöst; Pfadfreigabe nur über Preview-/Backup-Roots, NSFW-Check bleibt an `media_id` gekoppelt.
+- Fehler-/Audit-Ausgaben und UI dürfen keine Secrets, Tokens, DSNs oder absoluten Pfade enthalten; Antworten sind kurz und einheitlich (`Forbidden.` bzw. `Server error.`).
+
+### Internal-Key Required Matrix (Web)
+| Endpoint | Zweck | Internal-Key |
+| --- | --- | --- |
+| `WWW/index.php` (Action-POSTs) | Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz | erforderlich |
+| `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Quality, Rescan-Job | erforderlich |
+| `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status | erforderlich |
+| `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status | erforderlich |
+| `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
+| `WWW/media.php?ajax=forge_jobs` | Forge-Job-Status (Legacy-Grid) | erforderlich |
+| `WWW/media.php?ajax=scan_jobs` | Scan-Job-Status (Legacy-Grid) | erforderlich |
+| `WWW/media_stream.php` | Stream/Download | erforderlich |
+| `WWW/thumb.php` | Thumbnails/Assets | erforderlich |
 
 ## Dokumentationspflichten
 - Jede Codeänderung im PR-Output knapp dokumentieren (Kernstellen, keine Diff-Wände).
