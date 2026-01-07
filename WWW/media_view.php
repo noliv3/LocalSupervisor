@@ -394,11 +394,29 @@ $prompt = $promptStmt->fetch(PDO::FETCH_ASSOC) ?: null;
 $promptHistory   = [];
 $promptHistoryErr = null;
 try {
-    $histStmt = $pdo->prepare('SELECT * FROM prompt_history WHERE media_id = :id ORDER BY version DESC, id DESC');
+    $histStmt = $pdo->prepare(
+        'SELECT ph.*, p.id AS prompt_exists FROM prompt_history ph '
+        . 'LEFT JOIN prompts p ON p.id = ph.prompt_id '
+        . 'WHERE ph.media_id = :id ORDER BY ph.version DESC, ph.id DESC'
+    );
     $histStmt->execute([':id' => $id]);
     $promptHistory = $histStmt->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
     $promptHistoryErr = $e->getMessage();
+}
+
+$latestPromptHistory = $promptHistory[0] ?? null;
+$promptHistoryHasIssues = false;
+if ($promptHistory !== []) {
+    foreach ($promptHistory as $entry) {
+        $versionVal = (int)($entry['version'] ?? 0);
+        $hasPromptId = !empty($entry['prompt_id']);
+        $promptExists = !empty($entry['prompt_exists']);
+        if (($hasPromptId && !$promptExists) || $versionVal <= 0) {
+            $promptHistoryHasIssues = true;
+            break;
+        }
+    }
 }
 
 $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta WHERE media_id = :id ORDER BY source, meta_key');
@@ -1599,6 +1617,21 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
 
             <div class="panel history-panel">
                 <div class="panel-header">Prompt-Historie</div>
+                <?php if ($promptHistoryErr === null && $latestPromptHistory !== null): ?>
+                    <?php
+                    $latestHasLink = !empty($latestPromptHistory['prompt_id']) && !empty($latestPromptHistory['prompt_exists']);
+                    $latestTimestamp = (string)($latestPromptHistory['created_at'] ?? '');
+                    $latestSource = (string)($latestPromptHistory['source'] ?? '');
+                    ?>
+                    <div class="job-hint">
+                        Letzte Historie: <strong><?= htmlspecialchars($latestTimestamp !== '' ? $latestTimestamp : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        • Quelle: <strong><?= htmlspecialchars($latestSource !== '' ? $latestSource : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        • Version-Link: <strong><?= $latestHasLink ? 'ja' : 'nein' ?></strong>
+                        <?php if ($promptHistoryHasIssues): ?>
+                            <span class="status-badge status-error">Inkonsistenz</span>
+                        <?php endif; ?>
+                    </div>
+                <?php endif; ?>
                 <?php if ($promptHistoryErr !== null): ?>
                     <div class="action-note">Historie nicht verfügbar: <?= htmlspecialchars($promptHistoryErr, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 <?php elseif ($promptHistory === []): ?>

@@ -30,6 +30,7 @@ function sv_record_prompt_history(
         $sourceLabel = 'unknown';
     }
 
+    $promptId = ($promptId !== null && $promptId > 0) ? $promptId : null;
     [$limitedRaw, $wasTruncated] = sv_limit_prompt_raw($rawText);
     if ($wasTruncated && $rawText !== null) {
         sv_audit_log($pdo, 'prompt_history_raw_truncated', 'media', $mediaId, [
@@ -40,6 +41,39 @@ function sv_record_prompt_history(
     }
 
     $normalized = $normalized ?? [];
+    if (!sv_prompt_history_has_payload($normalized, $limitedRaw)) {
+        return;
+    }
+
+    $insertPayload = [
+        'prompt_id'        => $promptId,
+        'source'           => $sourceLabel,
+        'prompt'           => $normalized['prompt'] ?? null,
+        'negative_prompt'  => $normalized['negative_prompt'] ?? null,
+        'model'            => $normalized['model'] ?? null,
+        'sampler'          => $normalized['sampler'] ?? null,
+        'cfg_scale'        => $normalized['cfg_scale'] ?? null,
+        'steps'            => $normalized['steps'] ?? null,
+        'seed'             => $normalized['seed'] ?? null,
+        'width'            => $normalized['width'] ?? null,
+        'height'           => $normalized['height'] ?? null,
+        'scheduler'        => $normalized['scheduler'] ?? null,
+        'sampler_settings' => $normalized['sampler_settings'] ?? null,
+        'loras'            => $normalized['loras'] ?? null,
+        'controlnet'       => $normalized['controlnet'] ?? null,
+        'source_metadata'  => $normalized['source_metadata'] ?? null,
+        'raw_text'         => $limitedRaw,
+    ];
+
+    $latestStmt = $pdo->prepare(
+        'SELECT prompt_id, source, prompt, negative_prompt, model, sampler, cfg_scale, steps, seed, width, height, scheduler, sampler_settings, loras, controlnet, source_metadata, raw_text '
+        . 'FROM prompt_history WHERE media_id = ? ORDER BY version DESC, id DESC LIMIT 1'
+    );
+    $latestStmt->execute([$mediaId]);
+    $latest = $latestStmt->fetch(PDO::FETCH_ASSOC);
+    if ($latest && sv_prompt_history_payload_equals($latest, $insertPayload)) {
+        return;
+    }
 
     $started = false;
     $externalTx = $pdo->inTransaction();
@@ -73,25 +107,25 @@ function sv_record_prompt_history(
             );
             $stmt->execute([
                 ':media_id'        => $mediaId,
-                ':prompt_id'       => $promptId,
+                ':prompt_id'       => $insertPayload['prompt_id'],
                 ':version'         => $version,
-                ':source'          => $sourceLabel,
+                ':source'          => $insertPayload['source'],
                 ':created_at'      => date('c'),
-                ':prompt'          => $normalized['prompt'] ?? null,
-                ':negative_prompt' => $normalized['negative_prompt'] ?? null,
-                ':model'           => $normalized['model'] ?? null,
-                ':sampler'         => $normalized['sampler'] ?? null,
-                ':cfg_scale'       => $normalized['cfg_scale'] ?? null,
-                ':steps'           => $normalized['steps'] ?? null,
-                ':seed'            => $normalized['seed'] ?? null,
-                ':width'           => $normalized['width'] ?? null,
-                ':height'          => $normalized['height'] ?? null,
-                ':scheduler'       => $normalized['scheduler'] ?? null,
-                ':sampler_settings'=> $normalized['sampler_settings'] ?? null,
-                ':loras'           => $normalized['loras'] ?? null,
-                ':controlnet'      => $normalized['controlnet'] ?? null,
-                ':source_metadata' => $normalized['source_metadata'] ?? null,
-                ':raw_text'        => $limitedRaw,
+                ':prompt'          => $insertPayload['prompt'],
+                ':negative_prompt' => $insertPayload['negative_prompt'],
+                ':model'           => $insertPayload['model'],
+                ':sampler'         => $insertPayload['sampler'],
+                ':cfg_scale'       => $insertPayload['cfg_scale'],
+                ':steps'           => $insertPayload['steps'],
+                ':seed'            => $insertPayload['seed'],
+                ':width'           => $insertPayload['width'],
+                ':height'          => $insertPayload['height'],
+                ':scheduler'       => $insertPayload['scheduler'],
+                ':sampler_settings'=> $insertPayload['sampler_settings'],
+                ':loras'           => $insertPayload['loras'],
+                ':controlnet'      => $insertPayload['controlnet'],
+                ':source_metadata' => $insertPayload['source_metadata'],
+                ':raw_text'        => $insertPayload['raw_text'],
             ]);
 
             if ($started) {
@@ -133,6 +167,82 @@ function sv_limit_prompt_raw(?string $rawText, int $maxBytes = 20000): array
 
     $truncated = substr($rawText, 0, $maxBytes);
     return [$truncated . "\n\n[truncated]", true];
+}
+
+function sv_prompt_history_has_payload(array $normalized, ?string $rawText): bool
+{
+    if ($rawText !== null && trim($rawText) !== '') {
+        return true;
+    }
+
+    foreach ($normalized as $value) {
+        if ($value === null) {
+            continue;
+        }
+        if (is_string($value)) {
+            if (trim($value) !== '') {
+                return true;
+            }
+            continue;
+        }
+        if (is_array($value)) {
+            if ($value !== []) {
+                return true;
+            }
+            continue;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+function sv_prompt_history_normalize_value($value)
+{
+    if ($value === null) {
+        return null;
+    }
+    if (is_string($value)) {
+        $trimmed = trim($value);
+        return $trimmed === '' ? null : $trimmed;
+    }
+    if (is_array($value)) {
+        return $value === [] ? null : json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+    return $value;
+}
+
+function sv_prompt_history_payload_equals(array $latestRow, array $payload): bool
+{
+    $keys = [
+        'prompt_id',
+        'source',
+        'prompt',
+        'negative_prompt',
+        'model',
+        'sampler',
+        'cfg_scale',
+        'steps',
+        'seed',
+        'width',
+        'height',
+        'scheduler',
+        'sampler_settings',
+        'loras',
+        'controlnet',
+        'source_metadata',
+        'raw_text',
+    ];
+
+    foreach ($keys as $key) {
+        $left  = sv_prompt_history_normalize_value($latestRow[$key] ?? null);
+        $right = sv_prompt_history_normalize_value($payload[$key] ?? null);
+        if ($left !== $right) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /**
