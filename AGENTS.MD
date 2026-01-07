@@ -130,10 +130,16 @@
 
 ## UI Map (Operator-Startpunkte)
 - **Startpunkt (Galerie)**: `WWW/mediadb.php` ist die einzige produktive Galerie-UI (Card-Grid + List-Mode).
-- **Operator-Dashboard**: `WWW/index.php` bündelt Scan/Rescan/Filesync/Prompt-Rebuild, Health Snapshot und Job-Übersicht.
+- **Operator-Dashboard**: `WWW/index.php` bündelt Startzugang, Health Snapshot, Job-Center, Operator-Aktionen (Scan/Rescan) und Ereignisverlauf.
 - **Detailansicht**: `WWW/media_view.php` für Einzelmedium (Forge/Rescan/Tags/Quality).
 - **Legacy-Pfad (nicht verlinkt)**: `WWW/media.php` bleibt nur für Übergang/Alt-Workflows erreichbar und ist im UI als Legacy gekennzeichnet.
 - **Nicht mehr nutzen**: Links/Navigation, die `media.php` als Standardzugang anbieten.
+
+## Dashboard Contract (Operator-Control-Center)
+- **Zweck**: `WWW/index.php` ist der klare Operator-Startpunkt (kein Debug-/Statistik-View).
+- **Abschnitte**: Header/Start (Galerie + Anker), Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf.
+- **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) sowie letzte Audit-Events in Kurzform.
+- **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned über das Dashboard. Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, keine neuen Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
 ## Laufzeit-Notizen (aktuell)
 - Scanner-HTTP liegt zentral in `scan_core.php` und akzeptiert `scanner.token` oder Legacy `scanner.api_key`/`scanner.api_key_header`; Dateien gehen als `image` und `file` raus.

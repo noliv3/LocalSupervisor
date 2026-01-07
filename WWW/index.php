@@ -15,131 +15,42 @@ try {
 }
 
 $configWarning = $config['_config_warning'] ?? null;
-$dsn           = $config['db']['dsn']        ?? '';
-$user          = $config['db']['user']       ?? null;
-$password      = $config['db']['password']   ?? null;
-$options       = $config['db']['options']    ?? [];
+$internalKey   = isset($_GET['internal_key']) && is_string($_GET['internal_key']) ? trim($_GET['internal_key']) : '';
 
-$dbStatus = [
-    'driver'             => 'unbekannt',
-    'dsn'                => is_string($dsn) ? sv_db_redact_dsn((string)$dsn) : '',
-    'missing_tables'     => [],
-    'missing_columns'    => [],
-    'ok_tables'          => [],
-    'pending_migrations' => [],
-    'migration_error'    => null,
-];
-$dbError   = null;
-$pdo       = null;
-
+$dbError = null;
+$pdo = null;
 try {
-    $db   = sv_db_connect($config);
-    $pdo  = $db['pdo'];
-    $dbDiff = sv_db_diff_schema($pdo, $db['driver']);
-    $dbStatus['driver']          = $db['driver'];
-    $dbStatus['dsn']             = $db['redacted_dsn'];
-    $dbStatus['missing_tables']  = $dbDiff['missing_tables'];
-    $dbStatus['missing_columns'] = $dbDiff['missing_columns'];
-    $dbStatus['ok_tables']       = $dbDiff['ok_tables'];
-
-    $migrationDir = realpath(__DIR__ . '/../SCRIPTS/migrations');
-    if ($migrationDir !== false && is_dir($migrationDir)) {
-        $migrations = sv_db_load_migrations($migrationDir);
-        try {
-            $applied = sv_db_load_applied_versions($pdo);
-            foreach ($migrations as $migration) {
-                if (!isset($applied[$migration['version']])) {
-                    $dbStatus['pending_migrations'][] = $migration['version'];
-                }
-            }
-        } catch (Throwable $e) {
-            $dbStatus['migration_error'] = 'Migrationsstand nicht lesbar: ' . $e->getMessage();
-        }
-    } else {
-        $dbStatus['migration_error'] = 'Migrationsverzeichnis fehlt.';
-    }
+    $db  = sv_db_connect($config);
+    $pdo = $db['pdo'];
 } catch (Throwable $e) {
     http_response_code(503);
     $dbError = $e->getMessage();
-    $dbStatus['migration_error'] = 'DB-Verbindung fehlgeschlagen.';
 }
 
-if (isset($_GET['ajax']) && $_GET['ajax'] === 'scan_jobs') {
-    if (!$pdo instanceof PDO) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['error' => 'Keine DB-Verbindung: ' . ($dbError ?? 'unbekannt')], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        exit;
-    }
-    $pathFilter = isset($_GET['path']) && is_string($_GET['path']) ? trim($_GET['path']) : null;
-    $jobs       = sv_fetch_scan_jobs($pdo, $pathFilter, 25);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['jobs' => $jobs], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
-}
+$actionMessage = null;
+$actionError   = null;
+$logFile       = null;
+$logLines      = [];
+$jobCenterLog  = [];
 
-$lastPath    = '';
-$jobMessage  = null;
-$logFile     = null;
-$logLines    = [];
-$statErrors  = [];
-$mediaStats  = [];
-$promptStats = [];
-$promptQualitySummary = ['A' => 0, 'B' => 0, 'C' => 0];
-$tagStats    = [];
-$scanStats   = [];
-$metaStats   = [];
-$importStats = [];
-$jobStats    = [];
-$forgeJobOverview = [];
-$jobCenterMessage = null;
-$jobCenterError   = null;
-$jobCenterLog     = [];
-$jobCenterJobs    = [];
-$jobCenterFilters = [
-    'job_type' => '',
-    'status'   => '',
-    'media_id' => null,
-    'since'    => null,
-];
-$lastRuns    = [];
-$integrityStatus = ['media_with_issues' => 0];
-$healthSnapshot  = [
-    'db_health'  => [],
-    'job_health' => [],
-    'scan_health'=> [],
-];
-$healthError = null;
 $knownActions = [
-    'scan_start'           => 'Scan (Dashboard)',
-    'rescan_start'         => 'Rescan (Dashboard)',
-    'filesync_start'       => 'Filesync (Dashboard)',
-    'prompts_rebuild'      => 'Prompt-Rebuild (Dashboard)',
-    'prompts_rebuild_missing' => 'Prompt-Rebuild fehlender Kerndaten',
-    'consistency_report'   => 'Consistency-Report',
-    'consistency_repair'   => 'Consistency-Repair',
-    'integrity_simple_repair' => 'Einfache Reparatur',
-    'db_backup'            => 'DB-Backup',
-    'migrate'              => 'Migration',
-    'cleanup_missing'      => 'Cleanup Missing',
+    'scan_start'   => 'Scan gestartet',
+    'rescan_start' => 'Rescan gestartet',
 ];
-
-$comfortRebuildLimit = 100;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$pdo instanceof PDO) {
-        $jobMessage = 'Keine DB-Verbindung: ' . ($dbError ?? 'unbekannt');
+        $actionError = 'Keine DB-Verbindung: ' . ($dbError ?? 'unbekannt');
     } else {
         sv_require_internal_access($config, 'dashboard_action');
 
-        $action         = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-        $allowedActions = ['scan_path', 'rescan_db', 'filesync', 'prompts_rebuild', 'prompts_rebuild_missing', 'consistency_check', 'integrity_simple_repair', 'job_requeue', 'job_cancel'];
+        $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
+        $allowedActions = ['scan_path', 'rescan_db', 'job_requeue', 'job_cancel'];
 
         if (!in_array($action, $allowedActions, true)) {
-            $jobMessage = 'Ungültige Aktion.';
-            $action     = '';
+            $actionError = 'Ungültige Aktion.';
+            $action = '';
         }
-
-        $logLines = [];
 
         if ($action === 'scan_path') {
             $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
@@ -149,1102 +60,669 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $limit = null;
             }
 
-        if ($lastPath === '') {
-            $jobMessage = 'Kein Pfad angegeben.';
-        } elseif (mb_strlen($lastPath) > 500) {
-            $jobMessage = 'Pfad zu lang (max. 500 Zeichen).';
-        } else {
-            [$logFile, $logger] = sv_create_operation_log($config, 'scan', $logLines, 50);
+            if ($lastPath === '') {
+                $actionError = 'Kein Pfad angegeben.';
+            } elseif (mb_strlen($lastPath) > 500) {
+                $actionError = 'Pfad zu lang (max. 500 Zeichen).';
+            } else {
+                [$logFile, $logger] = sv_create_operation_log($config, 'scan', $logLines, 50);
+
+                try {
+                    $job     = sv_create_scan_job($pdo, $config, $lastPath, $limit, $logger);
+                    $worker  = sv_spawn_scan_worker($config, $job['payload']['path'] ?? $lastPath, null, $logger, null);
+                    $jobId   = (int)($job['job_id'] ?? 0);
+
+                    if ($jobId > 0) {
+                        sv_merge_job_response_metadata($pdo, $jobId, [
+                            '_sv_worker_pid'        => $worker['pid'],
+                            '_sv_worker_started_at' => $worker['started'],
+                        ]);
+                    }
+
+                    $actionMessage = 'Scan-Job eingereiht (#' . $jobId . ').';
+                    if (!empty($worker['pid'])) {
+                        $actionMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
+                    }
+                    if (!empty($worker['unknown'])) {
+                        $actionMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
+                    }
+
+                    sv_audit_log($pdo, 'scan_start', 'fs', null, [
+                        'limit'       => $limit,
+                        'job_id'      => $jobId,
+                        'worker_pid'  => $worker['pid'] ?? null,
+                        'worker_note' => $worker['unknown'] ? 'pid_unknown' : 'pid_recorded',
+                        'user_agent'  => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                    ]);
+                } catch (Throwable $e) {
+                    $actionError = 'Scan-Fehler: ' . $e->getMessage();
+                }
+            }
+        } elseif ($action === 'rescan_db') {
+            $limit   = isset($_POST['rescan_limit']) ? (int)$_POST['rescan_limit'] : null;
+            $offset  = isset($_POST['rescan_offset']) ? (int)$_POST['rescan_offset'] : null;
+
+            if ($limit !== null && $limit <= 0) {
+                $limit = null;
+            }
+            if ($offset !== null && $offset < 0) {
+                $offset = null;
+            }
+
+            [$logFile, $logger] = sv_create_operation_log($config, 'rescan', $logLines, 50);
 
             try {
-                $job     = sv_create_scan_job($pdo, $config, $lastPath, $limit, $logger);
-                $worker  = sv_spawn_scan_worker($config, $job['payload']['path'] ?? $lastPath, null, $logger, null);
-                $jobId   = (int)($job['job_id'] ?? 0);
-
-                if ($jobId > 0) {
-                    sv_merge_job_response_metadata($pdo, $jobId, [
-                        '_sv_worker_pid'        => $worker['pid'],
-                        '_sv_worker_started_at' => $worker['started'],
-                    ]);
-                }
-
-                $jobMessage = 'Scan-Job eingereiht (#' . $jobId . ').';
-                if (!empty($worker['pid'])) {
-                    $jobMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
-                }
-                if (!empty($worker['unknown'])) {
-                    $jobMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
-                }
-
-                sv_audit_log($pdo, 'scan_start', 'fs', null, [
-                    'path'        => $lastPath,
-                    'limit'       => $limit,
-                    'log_file'    => $logFile,
-                    'user_agent'  => $_SERVER['HTTP_USER_AGENT'] ?? null,
-                    'job_id'      => $jobId,
-                    'worker_pid'  => $worker['pid'] ?? null,
-                    'worker_note' => $worker['unknown'] ? 'pid_unknown' : 'pid_recorded',
+                sv_run_rescan_operation($pdo, $config, $limit, $offset, $logger);
+                $actionMessage = 'Rescan abgeschlossen.';
+                sv_audit_log($pdo, 'rescan_start', 'fs', null, [
+                    'limit'      => $limit,
+                    'offset'     => $offset,
+                    'log_file'   => $logFile,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
                 ]);
             } catch (Throwable $e) {
-                $jobMessage = 'Scan-Fehler: ' . $e->getMessage();
+                $actionError = 'Rescan-Fehler: ' . $e->getMessage();
             }
-        }
-    } elseif ($action === 'rescan_db') {
-        $limit   = isset($_POST['rescan_limit']) ? (int)$_POST['rescan_limit'] : null;
-        $offset  = isset($_POST['rescan_offset']) ? (int)$_POST['rescan_offset'] : null;
+        } elseif ($action === 'job_requeue') {
+            $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
+            $logger = sv_operation_logger(null, $jobCenterLog);
 
-        if ($limit !== null && $limit <= 0) {
-            $limit = null;
-        }
-        if ($offset !== null && $offset < 0) {
-            $offset = null;
-        }
-
-        [$logFile, $logger] = sv_create_operation_log($config, 'rescan', $logLines, 50);
-
-        try {
-            sv_run_rescan_operation($pdo, $config, $limit, $offset, $logger);
-            $jobMessage = 'Rescan abgeschlossen.';
-            sv_audit_log($pdo, 'rescan_start', 'fs', null, [
-                'limit'      => $limit,
-                'offset'     => $offset,
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
-        } catch (Throwable $e) {
-            $jobMessage = 'Rescan-Fehler: ' . $e->getMessage();
-        }
-    } elseif ($action === 'filesync') {
-        $limit   = isset($_POST['filesync_limit']) ? (int)$_POST['filesync_limit'] : null;
-        $offset  = isset($_POST['filesync_offset']) ? (int)$_POST['filesync_offset'] : null;
-
-        if ($limit !== null && $limit <= 0) {
-            $limit = null;
-        }
-        if ($offset !== null && $offset < 0) {
-            $offset = null;
-        }
-
-        [$logFile, $logger] = sv_create_operation_log($config, 'filesync', $logLines, 50);
-
-        try {
-            sv_run_filesync_operation($pdo, $config, $limit, $offset, $logger);
-            $jobMessage = 'Filesync abgeschlossen.';
-            sv_audit_log($pdo, 'filesync_start', 'fs', null, [
-                'limit'      => $limit,
-                'offset'     => $offset,
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
-        } catch (Throwable $e) {
-            $jobMessage = 'Filesync-Fehler: ' . $e->getMessage();
-        }
-    } elseif ($action === 'prompts_rebuild') {
-        $limit   = isset($_POST['rebuild_limit']) ? (int)$_POST['rebuild_limit'] : null;
-        $offset  = isset($_POST['rebuild_offset']) ? (int)$_POST['rebuild_offset'] : null;
-
-        if ($limit !== null && $limit <= 0) {
-            $limit = null;
-        }
-        if ($offset !== null && $offset < 0) {
-            $offset = null;
-        }
-
-        [$logFile, $logger] = sv_create_operation_log($config, 'prompts', $logLines, 50);
-
-        try {
-            sv_run_prompts_rebuild_operation($pdo, $config, $limit, $offset, $logger);
-            $jobMessage = 'Prompt-Rebuild abgeschlossen.';
-            sv_audit_log($pdo, 'prompts_rebuild', 'fs', null, [
-                'limit'      => $limit,
-                'offset'     => $offset,
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
-        } catch (Throwable $e) {
-            $jobMessage = 'Prompt-Rebuild-Fehler: ' . $e->getMessage();
-        }
-    } elseif ($action === 'prompts_rebuild_missing') {
-        [$logFile, $logger] = sv_create_operation_log($config, 'prompts_missing', $logLines, 10);
-
-        try {
-            $result = sv_run_prompt_rebuild_missing($pdo, $config, $logger, $comfortRebuildLimit);
-            $jobMessage = 'Komfort-Rebuild abgeschlossen: gefunden=' . (int)($result['found'] ?? 0)
-                . ', verarbeitet=' . (int)($result['processed'] ?? 0)
-                . ', übersprungen=' . (int)($result['skipped'] ?? 0)
-                . ', Fehler=' . (int)($result['errors'] ?? 0);
-            sv_audit_log($pdo, 'prompts_rebuild_missing', 'fs', null, [
-                'limit'     => $comfortRebuildLimit,
-                'found'     => $result['found'] ?? 0,
-                'processed' => $result['processed'] ?? 0,
-                'skipped'   => $result['skipped'] ?? 0,
-                'errors'    => $result['errors'] ?? 0,
-                'log_file'  => $logFile,
-                'user_agent'=> $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
-        } catch (Throwable $e) {
-            $jobMessage = 'Komfort-Rebuild-Fehler: ' . $e->getMessage();
-        }
-    } elseif ($action === 'consistency_check') {
-        $mode   = is_string($_POST['consistency_mode'] ?? null) ? $_POST['consistency_mode'] : 'report';
-        $logger = sv_operation_logger(null, $logLines);
-
-        try {
-            $result   = sv_run_consistency_operation($pdo, $config, $mode, $logger);
-            $logFile  = $result['log_file'] ?? null;
-            $jobMessage = 'Consistency-Check abgeschlossen.';
-            $auditAction = $mode === 'simple' ? 'consistency_repair' : 'consistency_report';
-            sv_audit_log($pdo, $auditAction, 'db', null, [
-                'mode'       => $mode,
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
-        } catch (Throwable $e) {
-            $jobMessage = 'Consistency-Check-Fehler: ' . $e->getMessage();
-        }
-    } elseif ($action === 'integrity_simple_repair') {
-        [$logFile, $logger] = sv_create_operation_log($config, 'integrity_simple', $logLines, 20);
-        try {
-            $changes = sv_run_simple_integrity_repair($pdo, $logger);
-            $jobMessage = 'Einfache Reparatur abgeschlossen: missing gesetzt=' . (int)$changes['status_missing_set']
-                . ', Tags entfernt=' . (int)$changes['tag_rows_removed']
-                . ', leere Prompts entfernt=' . (int)$changes['prompts_removed'];
-            sv_audit_log($pdo, 'integrity_simple_repair', 'db', null, [
-                'changes'    => $changes,
-                'log_file'   => $logFile,
-                'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            ]);
-        } catch (Throwable $e) {
-            $jobMessage = 'Einfache Reparatur fehlgeschlagen: ' . $e->getMessage();
-        }
-    } elseif ($action === 'job_requeue') {
-        $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
-        $logger = sv_operation_logger(null, $jobCenterLog);
-
-        if ($jobId <= 0) {
-            $jobCenterError = 'Job-ID fehlt oder ist ungültig.';
-        } else {
-            try {
-                $result = sv_requeue_job($pdo, $jobId, $logger);
-                $jobCenterMessage = $result['message'] ?? 'Job erneut eingereiht.';
-            } catch (Throwable $e) {
-                $jobCenterError = 'Requeue fehlgeschlagen: ' . $e->getMessage();
-            }
-        }
-    } elseif ($action === 'job_cancel') {
-        $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
-        $logger = sv_operation_logger(null, $jobCenterLog);
-
-        if ($jobId <= 0) {
-            $jobCenterError = 'Job-ID fehlt oder ist ungültig.';
-        } else {
-            try {
-                $result = sv_cancel_job($pdo, $jobId, $logger);
-                $jobCenterMessage = $result['message'] ?? 'Job abgebrochen.';
-            } catch (Throwable $e) {
-                $jobCenterError = 'Abbruch fehlgeschlagen: ' . $e->getMessage();
-            }
-        }
-    }
-}
-
-$jobFilterType   = isset($_GET['job_type']) && is_string($_GET['job_type']) ? trim($_GET['job_type']) : '';
-$jobFilterStatus = isset($_GET['job_status']) && is_string($_GET['job_status']) ? trim($_GET['job_status']) : '';
-$jobFilterMedia  = isset($_GET['job_media_id']) ? (int)$_GET['job_media_id'] : null;
-$jobFilterRange  = isset($_GET['job_range']) && is_string($_GET['job_range']) ? trim($_GET['job_range']) : '';
-$jobCenterInternalKey = isset($_GET['internal_key']) && is_string($_GET['internal_key']) ? trim($_GET['internal_key']) : '';
-
-if ($jobFilterType !== '') {
-    $jobCenterFilters['job_type'] = $jobFilterType;
-}
-if ($jobFilterStatus !== '') {
-    $jobCenterFilters['status'] = $jobFilterStatus;
-}
-if ($jobFilterMedia !== null && $jobFilterMedia > 0) {
-    $jobCenterFilters['media_id'] = $jobFilterMedia;
-}
-if ($jobFilterRange !== '') {
-    $ranges = [
-        '24h' => 86400,
-        '7d'  => 7 * 86400,
-        '30d' => 30 * 86400,
-    ];
-    if (isset($ranges[$jobFilterRange])) {
-        $jobCenterFilters['since'] = time() - $ranges[$jobFilterRange];
-    }
-}
-
-if ($pdo instanceof PDO) {
-    try {
-        $mediaStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM media')->fetchColumn();
-        $mediaStats['byType'] = $pdo->query('SELECT type, COUNT(*) AS cnt FROM media GROUP BY type ORDER BY type')
-            ->fetchAll(PDO::FETCH_ASSOC);
-        $mediaStats['nsfw'] = $pdo->query(
-            'SELECT SUM(CASE WHEN has_nsfw = 1 THEN 1 ELSE 0 END) AS nsfw, ' .
-            'SUM(CASE WHEN has_nsfw = 1 THEN 0 ELSE 1 END) AS safe FROM media'
-        )->fetch(PDO::FETCH_ASSOC);
-        $mediaStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM media GROUP BY status ORDER BY status')
-            ->fetchAll(PDO::FETCH_ASSOC);
-        $mediaStats['byRating'] = $pdo->query('SELECT rating, COUNT(*) AS cnt FROM media GROUP BY rating ORDER BY rating')
-            ->fetchAll(PDO::FETCH_ASSOC);
-    } catch (Throwable $e) {
-        $statErrors['media'] = $e->getMessage();
-    }
-
-    try {
-        $promptStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM prompts')->fetchColumn();
-        $promptStats['mediaWithPrompts'] = (int)$pdo->query(
-            'SELECT COUNT(*) FROM media WHERE EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = media.id)'
-        )->fetchColumn();
-        $promptStats['mediaWithoutPrompts'] = (int)$pdo->query(
-            'SELECT COUNT(*) FROM media WHERE NOT EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = media.id)'
-        )->fetchColumn();
-    } catch (Throwable $e) {
-        $statErrors['prompts'] = $e->getMessage();
-    }
-
-    try {
-        $qualityStmt = $pdo->query(
-            'SELECT p.prompt, p.width, p.height FROM prompts p '
-            . 'JOIN (SELECT MAX(id) AS id FROM prompts GROUP BY media_id) latest ON latest.id = p.id '
-            . 'ORDER BY p.id DESC LIMIT 2000'
-        );
-        $qualityRows = $qualityStmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($qualityRows as $row) {
-            $quality = sv_prompt_quality_from_text(
-                $row['prompt'] ?? null,
-                isset($row['width']) ? (int)$row['width'] : null,
-                isset($row['height']) ? (int)$row['height'] : null
-            );
-            $class = $quality['quality_class'] ?? null;
-            if ($class !== null && isset($promptQualitySummary[$class])) {
-                $promptQualitySummary[$class]++;
-            }
-        }
-    } catch (Throwable $e) {
-        $statErrors['prompt_quality'] = $e->getMessage();
-    }
-
-    try {
-        $tagStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM tags')->fetchColumn();
-        $tagStats['locked'] = (int)$pdo->query('SELECT SUM(CASE WHEN locked = 1 THEN 1 ELSE 0 END) FROM tags')->fetchColumn();
-        $tagStats['relations'] = (int)$pdo->query('SELECT COUNT(*) FROM media_tags')->fetchColumn();
-    } catch (Throwable $e) {
-        $statErrors['tags'] = $e->getMessage();
-    }
-
-    try {
-        $scanStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM scan_results')->fetchColumn();
-        $scanStats['mediaWithScan'] = (int)$pdo->query(
-            'SELECT COUNT(*) FROM media WHERE EXISTS (SELECT 1 FROM scan_results s WHERE s.media_id = media.id)'
-        )->fetchColumn();
-        $scanStats['mediaWithoutScan'] = (int)$pdo->query(
-            'SELECT COUNT(*) FROM media WHERE NOT EXISTS (SELECT 1 FROM scan_results s WHERE s.media_id = media.id)'
-        )->fetchColumn();
-    } catch (Throwable $e) {
-        $statErrors['scan_results'] = $e->getMessage();
-    }
-
-    try {
-        $metaStats['total'] = (int)$pdo->query('SELECT COUNT(*) FROM media_meta')->fetchColumn();
-        $metaStats['sources'] = (int)$pdo->query('SELECT COUNT(DISTINCT source) FROM media_meta')->fetchColumn();
-    } catch (Throwable $e) {
-        $statErrors['media_meta'] = $e->getMessage();
-    }
-
-    try {
-        $importStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM import_log GROUP BY status ORDER BY status')
-            ->fetchAll(PDO::FETCH_ASSOC);
-    } catch (Throwable $e) {
-        $statErrors['import_log'] = $e->getMessage();
-    }
-
-    try {
-        $jobStats['byStatus'] = $pdo->query('SELECT status, COUNT(*) AS cnt FROM jobs GROUP BY status ORDER BY status')
-            ->fetchAll(PDO::FETCH_ASSOC);
-        $jobStats['total'] = array_sum(array_map(static function ($row) {
-            return (int)($row['cnt'] ?? 0);
-        }, $jobStats['byStatus']));
-    } catch (Throwable $e) {
-        $statErrors['jobs'] = $e->getMessage();
-    }
-
-    try {
-        $forgeJobOverview = sv_forge_job_overview($pdo);
-    } catch (Throwable $e) {
-        $statErrors['forge_jobs'] = $e->getMessage();
-    }
-
-    try {
-        $jobCenterJobs = sv_list_jobs($pdo, $jobCenterFilters, 100);
-    } catch (Throwable $e) {
-        $jobCenterError = 'Job-Liste konnte nicht geladen werden: ' . $e->getMessage();
-    }
-
-    try {
-        $integrityReport = sv_collect_integrity_issues($pdo);
-        $integrityStatus['media_with_issues'] = count($integrityReport['by_media'] ?? []);
-    } catch (Throwable $e) {
-        $statErrors['integrity'] = $e->getMessage();
-    }
-
-    try {
-        $healthSnapshot = sv_collect_health_snapshot($pdo, $config, 6);
-    } catch (Throwable $e) {
-        $healthError = $e->getMessage();
-    }
-
-    if (!empty($knownActions)) {
-        try {
-            $placeholders = implode(', ', array_fill(0, count($knownActions), '?'));
-            $stmt = $pdo->prepare(
-                "SELECT action, MAX(created_at) AS last_at FROM audit_log WHERE action IN ($placeholders) GROUP BY action"
-            );
-            $stmt->execute(array_keys($knownActions));
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach ($rows as $row) {
-                $actionKey = $row['action'] ?? '';
-                if ($actionKey !== '' && isset($knownActions[$actionKey])) {
-                    $lastRuns[$actionKey] = $row['last_at'];
+            if ($jobId <= 0) {
+                $actionError = 'Job-ID fehlt oder ist ungültig.';
+            } else {
+                try {
+                    $result = sv_requeue_job($pdo, $jobId, $logger);
+                    $actionMessage = $result['message'] ?? 'Job erneut eingereiht.';
+                } catch (Throwable $e) {
+                    $actionError = 'Requeue fehlgeschlagen: ' . $e->getMessage();
                 }
             }
-        } catch (Throwable $e) {
-            $statErrors['audit_log'] = $e->getMessage();
+        } elseif ($action === 'job_cancel') {
+            $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
+            $logger = sv_operation_logger(null, $jobCenterLog);
+
+            if ($jobId <= 0) {
+                $actionError = 'Job-ID fehlt oder ist ungültig.';
+            } else {
+                try {
+                    $result = sv_cancel_job($pdo, $jobId, $logger);
+                    $actionMessage = $result['message'] ?? 'Job abgebrochen.';
+                } catch (Throwable $e) {
+                    $actionError = 'Abbruch fehlgeschlagen: ' . $e->getMessage();
+                }
+            }
         }
     }
-} else {
-    $healthError = $dbError ?? 'Keine DB-Verbindung';
 }
 
-$cliEntries = [
-    [
-        'name'        => 'scan_path_cli.php',
-        'category'    => 'Import/Scan',
-        'description' => 'Durchsucht ein Verzeichnis und legt neue Media-Einträge inklusive Scans an.',
-        'example'     => 'php SCRIPTS\\scan_path_cli.php "D:\\Import" --limit=250',
-    ],
-    [
-        'name'        => 'scan_worker_cli.php',
-        'category'    => 'Import/Scan',
-        'description' => 'Abarbeitung der scan_path-Queue im Hintergrund (keine Web-Timeouts).',
-        'example'     => 'php SCRIPTS\\scan_worker_cli.php --limit=5',
-    ],
-    [
-        'name'        => 'rescan_cli.php',
-        'category'    => 'Import/Scan',
-        'description' => 'Erneuert fehlende Scan-Ergebnisse für bestehende Medien.',
-        'example'     => 'php SCRIPTS\\rescan_cli.php --limit=200',
-    ],
-    [
-        'name'        => 'filesync_cli.php',
-        'category'    => 'Import/Scan',
-        'description' => 'Gleicht DB-Status und Dateisystem ab und markiert fehlende Pfade als missing.',
-        'example'     => 'php SCRIPTS\\filesync_cli.php --limit=500 --offset=0',
-    ],
-    [
-        'name'        => 'db_backup.php',
-        'category'    => 'Wartung',
-        'description' => 'Erzeugt ein Backup der Datenbank unter BACKUPS/ und protokolliert den Lauf.',
-        'example'     => 'php SCRIPTS\\db_backup.php',
-    ],
-    [
-        'name'        => 'migrate.php',
-        'category'    => 'Wartung',
-        'description' => 'Spielt verfügbare Migrationen aus SCRIPTS/migrations/ ein.',
-        'example'     => 'php SCRIPTS\\migrate.php',
-    ],
-    [
-        'name'        => 'forge_worker_cli.php',
-        'category'    => 'Forge',
-        'description' => 'Abarbeitung der queued Forge-Regenerations-Jobs (Replace-in-place) ohne Web-Wartezeiten.',
-        'example'     => 'php SCRIPTS\\forge_worker_cli.php --limit=1',
-    ],
-    [
-        'name'        => 'consistency_check.php',
-        'category'    => 'Wartung',
-        'description' => 'Prüft die DB-Konsistenz; optional mit --repair=simple für einfache Fixes.',
-        'example'     => 'php SCRIPTS\\consistency_check.php --repair=simple',
-    ],
-    [
-        'name'        => 'cleanup_missing_cli.php',
-        'category'    => 'Wartung',
-        'description' => 'Bereinigt Media-Einträge mit Status missing gemäß Konfiguration.',
-        'example'     => 'php SCRIPTS\\cleanup_missing_cli.php --limit=200',
-    ],
-    [
-        'name'        => 'meta_inspect.php',
-        'category'    => 'Inspektor',
-        'description' => 'Textausgabe von Prompts und media_meta-Einträgen pro Medium.',
-        'example'     => 'php SCRIPTS\\meta_inspect.php --limit=20',
-    ],
-    [
-        'name'        => 'db_inspect.php',
-        'category'    => 'Inspektor',
-        'description' => 'Zeigt Metadaten zur Datenbank wie Tabellen- und Indexgrößen an.',
-        'example'     => 'php SCRIPTS\\db_inspect.php',
-    ],
-    [
-        'name'        => 'exif_prompts_cli.php',
-        'category'    => 'Inspektor',
-        'description' => 'Liest EXIF/Metadata aus Bildern und speichert sie als Prompts.',
-        'example'     => 'php SCRIPTS\\exif_prompts_cli.php "D:\\Fotos"',
-    ],
-    [
-        'name'        => 'show_prompts_columns.php',
-        'category'    => 'Inspektor',
-        'description' => 'Listet Prompt-Spalten und erkannte Felder für Debug-Zwecke.',
-        'example'     => 'php SCRIPTS\\show_prompts_columns.php',
-    ],
-    [
-        'name'        => 'init_db.php',
-        'category'    => 'Setup',
-        'description' => 'Initiales Anlegen der Datenbank basierend auf DB/schema.sql.',
-        'example'     => 'php SCRIPTS\\init_db.php',
-    ],
-];
+$dashboard = null;
+$dashboardError = null;
+if ($pdo instanceof PDO) {
+    try {
+        $dashboard = sv_collect_dashboard_view_model($pdo, $config, [
+            'known_actions' => array_keys($knownActions),
+            'job_limit'     => 8,
+            'event_limit'   => 8,
+            'health_limit'  => 6,
+        ]);
+    } catch (Throwable $e) {
+        $dashboardError = $e->getMessage();
+    }
+}
+
+$hasInternalAccess = sv_has_valid_internal_key();
+$jobCounts = $dashboard['job_counts'] ?? ['queued' => 0, 'running' => 0, 'done' => 0, 'error' => 0];
+$health = $dashboard['health'] ?? ['db_health' => [], 'job_health' => [], 'scan_health' => []];
+$jobHealth = $health['job_health'] ?? [];
+$scanHealth = $health['scan_health'] ?? [];
+$dbHealth = $health['db_health'] ?? [];
+$events = $dashboard['events'] ?? [];
+$jobSections = $dashboard['jobs'] ?? ['running' => [], 'queued' => [], 'stuck' => [], 'recent' => []];
+$forgeOverview = $dashboard['forge'] ?? [];
+$lastRuns = $dashboard['last_runs'] ?? [];
+
+function sv_badge_class(string $status): string
+{
+    $status = strtolower($status);
+    if (in_array($status, ['ok', 'done'], true)) {
+        return 'badge badge-ok';
+    }
+    if (in_array($status, ['error', 'failed'], true)) {
+        return 'badge badge-error';
+    }
+    if (in_array($status, ['running', 'queued', 'pending'], true)) {
+        return 'badge badge-info';
+    }
+    if (in_array($status, ['warn', 'warning'], true)) {
+        return 'badge badge-warn';
+    }
+
+    return 'badge';
+}
 ?>
 <!doctype html>
 <html lang="de">
 <head>
     <meta charset="utf-8">
-    <title>SuperVisOr</title>
+    <title>Operator Dashboard – SuperVisOr</title>
     <style>
-        body { font-family: sans-serif; }
-        nav a { margin-right: 1rem; }
+        :root {
+            color-scheme: light;
+            --bg: #f4f6f8;
+            --card: #ffffff;
+            --text: #1b1f24;
+            --muted: #59636e;
+            --border: #e0e5ea;
+            --accent: #1f6feb;
+            --warn: #f2b400;
+            --danger: #d1242f;
+            --ok: #1a7f37;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            flex-wrap: wrap;
+            margin-bottom: 18px;
+        }
+
+        .header h1 {
+            margin: 0 0 4px 0;
+            font-size: 2rem;
+        }
+
+        .header p {
+            margin: 0;
+            color: var(--muted);
+        }
+
+        .header-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: flex-end;
+        }
+
+        .button {
+            display: inline-block;
+            padding: 10px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--card);
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .button.primary {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 0.9rem;
+        }
+
+        .banner {
+            padding: 12px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: #fff;
+            margin-bottom: 12px;
+        }
+
+        .banner.warn { border-color: #f0df9f; background: #fff7df; color: #7b5a00; }
+        .banner.error { border-color: #f2b3b3; background: #ffe9ea; color: #8a1b1b; }
+        .banner.success { border-color: #c7e7c0; background: #eff9f0; color: #1a5c2e; }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            margin: 0 0 12px 0;
+            font-size: 1.2rem;
+        }
+
+        .health-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 12px;
+        }
+
+        .health-row {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .health-row .line {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            font-size: 0.95rem;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            background: #eef2f6;
+            color: #3c4a5a;
+        }
+
+        .badge-ok { background: #e5f6eb; color: var(--ok); }
+        .badge-warn { background: #fff4cf; color: #7b5a00; }
+        .badge-error { background: #ffe0e2; color: var(--danger); }
+        .badge-info { background: #e0edff; color: #2456b3; }
+
+        .job-columns {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+        }
+
+        .job-card {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px;
+            background: #fafbfc;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .job-line {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .job-meta {
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        .job-error {
+            color: var(--danger);
+            font-size: 0.85rem;
+        }
+
+        .job-actions form { display: inline; }
+        .job-actions button {
+            border: 1px solid var(--border);
+            background: #fff;
+            border-radius: 6px;
+            padding: 4px 8px;
+            margin-right: 6px;
+        }
+
+        .operator-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+        }
+
+        .operator-card {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px;
+            background: #fff;
+        }
+
+        .operator-card h3 {
+            margin: 0 0 8px 0;
+            font-size: 1rem;
+        }
+
+        .inline-fields {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .inline-fields input[type="text"],
+        .inline-fields input[type="number"] {
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+        }
+
+        .event-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .event-item {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 12px;
+            background: #fff;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        details summary { cursor: pointer; color: var(--accent); }
+        .muted { color: var(--muted); }
     </style>
 </head>
 <body>
-    <h1>SuperVisOr</h1>
-
-    <nav>
-        <a href="index.php">Dashboard</a>
-        <a href="mediadb.php">Galerie (Hauptpfad)</a>
-        <a href="#health-snapshot">Health Snapshot</a>
-        <a href="#job-center">Jobs Übersicht</a>
-    </nav>
-
-    <?php if (!empty($configWarning)): ?>
-        <div style="padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba; margin-top: 0.6rem;">
-            <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-        </div>
-    <?php endif; ?>
-
-    <p style="color: #555; font-size: 0.9rem;">Hinweis: Die Galerie startet ab jetzt ausschließlich in <code>mediadb.php</code>.</p>
-
-    <h2>DB-Status</h2>
-    <?php if ($dbError !== null): ?>
-        <div style="padding: 0.6rem 0.8rem; background: #f8d7da; color: #842029; border: 1px solid #f5c2c7; margin-top: 0.6rem;">
-            <strong>DB-Verbindung fehlgeschlagen:</strong> <?= htmlspecialchars($dbError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><br>
-            Quelle: <?= htmlspecialchars((string)($config['_config_path'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-        </div>
-    <?php endif; ?>
-    <p>Treiber: <?= htmlspecialchars($dbStatus['driver'] ?? 'unbekannt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> / DSN: <?= htmlspecialchars($dbStatus['dsn'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php if (($dbStatus['missing_tables'] ?? []) === [] && ($dbStatus['missing_columns'] ?? []) === []): ?>
-        <p>Schema: OK (Kerntabellen vorhanden)</p>
-    <?php else: ?>
-        <div style="padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba; margin-top: 0.6rem;">
-            <strong>Schema-Abweichungen:</strong>
-            <?php foreach (($dbStatus['missing_tables'] ?? []) as $t): ?>
-                <div>Fehlende Tabelle: <?= htmlspecialchars($t, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-            <?php endforeach; ?>
-            <?php foreach (($dbStatus['missing_columns'] ?? []) as $table => $cols): ?>
-                <div>Fehlende Spalten in <?= htmlspecialchars($table, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>: <?= htmlspecialchars(implode(', ', $cols), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-            <?php endforeach; ?>
-        </div>
-    <?php endif; ?>
-
-    <?php if (!empty($dbStatus['migration_error'])): ?>
-        <div style="padding: 0.6rem 0.8rem; background: #f8d7da; color: #842029; border: 1px solid #f5c2c7; margin-top: 0.6rem;">
-            <strong>Migrationen:</strong> <?= htmlspecialchars($dbStatus['migration_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-        </div>
-    <?php elseif (!empty($dbStatus['pending_migrations'])): ?>
-        <div style="padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba; margin-top: 0.6rem;">
-            <strong>Ausstehende Migrationen:</strong> <?= htmlspecialchars(implode(', ', $dbStatus['pending_migrations']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (bitte <code>php SCRIPTS/migrate.php</code> ausführen)
-        </div>
-    <?php else: ?>
-        <p>Migrationen: Alle Versionen eingetragen.</p>
-    <?php endif; ?>
-
-    <h2>Pfad scannen (Import)</h2>
-    <form method="post">
-        <input type="hidden" name="action" value="scan_path">
-        <label>
-            Pfad:
-            <input type="text" name="scan_path" size="80"
-                   value="<?= htmlspecialchars($lastPath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-        </label>
-        <label>
-            Limit (optional):
-            <input type="number" name="scan_limit" min="1" step="1">
-        </label>
-        <button type="submit">Scan starten</button>
-    </form>
-
-    <div id="scan-job-status">
-        <h3>Scan-Queue (asynchron)</h3>
-        <p>Scans laufen jetzt ausschließlich als Jobs über den Scan-Worker.</p>
-        <div id="scan-jobs-list">Lade Scan-Status ...</div>
-    </div>
-
-    <h2>Bestehende Medien neu scannen (nur ohne Scan-Ergebnis)</h2>
-    <form method="post">
-        <input type="hidden" name="action" value="rescan_db">
-        <label>
-            Limit (optional):
-            <input type="number" name="rescan_limit" min="1" step="1">
-        </label>
-        <label>
-            Offset (optional):
-            <input type="number" name="rescan_offset" min="0" step="1">
-        </label>
-        <button type="submit">Rescan starten</button>
-    </form>
-
-    <h2>DB / Dateisystem abgleichen (Status active/missing)</h2>
-    <form method="post">
-        <input type="hidden" name="action" value="filesync">
-        <label>
-            Limit (optional):
-            <input type="number" name="filesync_limit" min="1" step="1">
-        </label>
-        <label>
-            Offset (optional):
-            <input type="number" name="filesync_offset" min="0" step="1">
-        </label>
-        <button type="submit">Filesync starten</button>
-    </form>
-
-    <h2>Prompts aus bestehenden Dateien neu aufbauen</h2>
-    <form method="post">
-        <input type="hidden" name="action" value="prompts_rebuild">
-        <label>
-            Limit (optional):
-            <input type="number" name="rebuild_limit" min="1" step="1">
-        </label>
-        <label>
-            Offset (optional):
-            <input type="number" name="rebuild_offset" min="0" step="1">
-        </label>
-        <button type="submit">Prompt-Rebuild starten</button>
-    </form>
-
-    <h2>Komfort-Rebuild fehlender Prompt-Kerndaten</h2>
-    <form method="post">
-        <input type="hidden" name="action" value="prompts_rebuild_missing">
-        <p>Startet Rebuild nur für Medien mit fehlenden Prompt-Kerndaten (internes Limit: <?= (int)$comfortRebuildLimit ?> Items).</p>
-        <button type="submit">Rebuild fehlender Prompts</button>
-    </form>
-
-    <h2>Konsistenzprüfung</h2>
-    <form method="post">
-        <input type="hidden" name="action" value="consistency_check">
-        <label>
-            Modus:
-            <select name="consistency_mode">
-                <option value="report">Report</option>
-                <option value="simple">Report + einfache Reparaturen</option>
-            </select>
-        </label>
-        <button type="submit">Consistency-Check starten</button>
-    </form>
-
-    <h2 id="health-snapshot">Health Snapshot</h2>
-    <?php if ($healthError !== null): ?>
-        <p>Health-Snapshot fehlgeschlagen: <?= htmlspecialchars($healthError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px;">
-            <div class="panel">
-                <div class="panel-header">DB Health</div>
-                <ul>
-                    <li>Treiber: <?= htmlspecialchars((string)($healthSnapshot['db_health']['driver'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                    <li>DSN (redacted): <?= htmlspecialchars((string)($healthSnapshot['db_health']['redacted_dsn'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                    <li>Offene Migrationen: <?= htmlspecialchars((string)($healthSnapshot['db_health']['pending_migrations_count'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                    <li>Medien gesamt: <?= htmlspecialchars((string)($healthSnapshot['db_health']['media_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                    <li>Funde gesamt: <?= htmlspecialchars((string)($healthSnapshot['db_health']['issues_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                    <li>Warnungen: <?= htmlspecialchars((string)($healthSnapshot['db_health']['issues_by_severity']['warn'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                </ul>
-                <?php if (!empty($healthSnapshot['db_health']['migration_error'])): ?>
-                    <div class="job-error inline">Migration: <?= htmlspecialchars((string)$healthSnapshot['db_health']['migration_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php elseif (!empty($healthSnapshot['db_health']['pending_migrations'])): ?>
-                    <div class="small">Pending: <?= htmlspecialchars(implode(', ', (array)$healthSnapshot['db_health']['pending_migrations']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php endif; ?>
-                <?php if (!empty($healthSnapshot['db_health']['issues_by_check'])): ?>
-                    <table border="1" cellpadding="4" cellspacing="0">
-                        <tr><th>Check</th><th>Anzahl</th></tr>
-                        <?php foreach ($healthSnapshot['db_health']['issues_by_check'] as $check => $cnt): ?>
-                            <tr>
-                                <td><?= htmlspecialchars((string)$check, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)$cnt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </table>
-                <?php endif; ?>
+    <div class="container">
+        <header class="header">
+            <div>
+                <h1>Start</h1>
+                <p>Operator-Control-Center für Galerie, Health und Jobs.</p>
             </div>
-
-            <div class="panel">
-                <div class="panel-header">Job Health</div>
-                <p>Stuck Jobs (running ohne frisches Update): <?= htmlspecialchars((string)($healthSnapshot['job_health']['stuck_jobs'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-                <?php if (!empty($healthSnapshot['job_health']['last_error'])): ?>
-                    <?php $last = $healthSnapshot['job_health']['last_error']; ?>
-                    <div class="job-error inline">Letzter Fehler: #<?= htmlspecialchars((string)($last['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (<?= htmlspecialchars((string)($last['type'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>): <?= htmlspecialchars((string)($last['message'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php endif; ?>
-                <?php if (!empty($healthSnapshot['job_health']['recent_jobs'])): ?>
-                    <table border="1" cellpadding="4" cellspacing="0">
-                        <tr><th>ID</th><th>Typ</th><th>Status</th><th>Start</th><th>Ende</th><th>Info</th></tr>
-                        <?php foreach ($healthSnapshot['job_health']['recent_jobs'] as $job): ?>
-                            <?php
-                            $metaParts = [];
-                            if (!empty($job['meta']['path'])) {
-                                $metaParts[] = 'Pfad: ' . (string)$job['meta']['path'];
-                            }
-                            if (!empty($job['meta']['scanner'])) {
-                                $metaParts[] = 'Scanner: ' . (string)$job['meta']['scanner'];
-                            }
-                            if (!empty($job['meta']['run_at'])) {
-                                $metaParts[] = 'run_at: ' . (string)$job['meta']['run_at'];
-                            }
-                            if (!empty($job['meta']['model'])) {
-                                $metaParts[] = 'Modell: ' . (string)$job['meta']['model'];
-                            }
-                            if (!empty($job['meta']['result']) && is_array($job['meta']['result'])) {
-                                $metaParts[] = 'Result: ' . json_encode($job['meta']['result']);
-                            }
-                            if (!empty($job['meta']['worker_pid'])) {
-                                $metaParts[] = 'Worker PID: ' . (string)$job['meta']['worker_pid'];
-                            }
-                            if (!empty($job['meta']['worker_started'])) {
-                                $metaParts[] = 'Worker start: ' . (string)$job['meta']['worker_started'];
-                            }
-                            $metaText = $metaParts === [] ? '' : implode(' | ', $metaParts);
-                            ?>
-                            <tr>
-                                <td><?= htmlspecialchars((string)($job['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($job['type'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($job['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($job['started_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($job['finished_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td>
-                                    <?php if (!empty($job['error'])): ?>
-                                        <div class="job-error inline"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                    <?php endif; ?>
-                                    <?php if ($metaText !== ''): ?>
-                                        <div class="small"><?= htmlspecialchars($metaText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                    <?php endif; ?>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </table>
-                <?php else: ?>
-                    <p>Keine Jobs gefunden.</p>
-                <?php endif; ?>
-                <?php if (!empty($healthSnapshot['job_health']['operations'])): ?>
-                    <details>
-                        <summary>Letzte Trigger (Scan/Rescan/Filesync)</summary>
-                        <ul>
-                            <?php foreach ($healthSnapshot['job_health']['operations'] as $op): ?>
-                                <?php $label = $knownActions[$op['action']] ?? $op['action']; ?>
-                                <li>
-                                    <?= htmlspecialchars((string)$label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> —
-                                    <?= htmlspecialchars((string)($op['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                    <?php if (!empty($op['details']['log_file'])): ?>
-                                        (Log: <?= htmlspecialchars((string)$op['details']['log_file'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)
-                                    <?php endif; ?>
-                                </li>
-                            <?php endforeach; ?>
-                        </ul>
-                    </details>
-                <?php endif; ?>
+            <div class="header-actions">
+                <a class="button primary" href="mediadb.php">Galerie öffnen</a>
+                <div class="nav-links">
+                    <a href="mediadb.php">Letzte Medien</a>
+                    <a href="#job-center-recent">Letzte Fehler</a>
+                    <a href="#job-center">Job-Center</a>
+                    <a href="#health-snapshot">Health</a>
+                    <a href="#event-log">Ereignisse</a>
+                </div>
             </div>
+        </header>
 
-            <div class="panel">
-                <div class="panel-header">Scan Health</div>
-                <p>Einträge ohne run_at/scanner: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['missing_run_at'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-                <p>Letzter Scan: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['last_scan_time'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Scan-Job-Errors: <?= htmlspecialchars((string)($healthSnapshot['scan_health']['scan_job_errors'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-                <?php if (!empty($healthSnapshot['scan_health']['latest'])): ?>
-                    <table border="1" cellpadding="4" cellspacing="0">
-                        <tr><th>ID</th><th>Media</th><th>Scanner</th><th>run_at</th><th>NSFW</th></tr>
-                        <?php foreach ($healthSnapshot['scan_health']['latest'] as $scan): ?>
-                            <tr>
-                                <td><?= htmlspecialchars((string)($scan['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($scan['media_id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($scan['scanner'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($scan['run_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars((string)($scan['nsfw_score'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </table>
-                <?php else: ?>
-                    <p>Keine Scan-Einträge gefunden.</p>
-                <?php endif; ?>
-            </div>
-        </div>
-    <?php endif; ?>
-
-    <h2>Integritätsstatus</h2>
-    <?php if (isset($statErrors['integrity'])): ?>
-        <p>Fehler bei der Integritätsanalyse: <?= htmlspecialchars((string)$statErrors['integrity'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <p>Medien mit erkannten Problemen: <?= htmlspecialchars((string)$integrityStatus['media_with_issues'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php endif; ?>
-    <p>Hinweis: Anzeige ist nur lesend und nutzt die Prüfungen aus operations.php.</p>
-
-    <form method="post">
-        <input type="hidden" name="action" value="integrity_simple_repair">
-        <p><strong>Einfache Reparatur durchführen</strong> (setzt fehlende Dateien auf Status missing, entfernt leere Prompts und Tag-Einträge ohne Confidence).</p>
-        <button type="submit">Einfache Reparatur durchführen</button>
-    </form>
-
-    <?php if ($jobMessage !== null): ?>
-        <h3>Status</h3>
-        <p><?= htmlspecialchars($jobMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-        <?php if ($logFile !== null): ?>
-            <p>Log-Datei: <?= htmlspecialchars($logFile, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-        <?php endif; ?>
-        <?php if (!empty($logLines)): ?>
-            <details>
-                <summary>Letzte Log-Zeilen</summary>
-                <pre><?php foreach ($logLines as $line) { echo htmlspecialchars($line, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n"; } ?></pre>
-            </details>
-        <?php endif; ?>
-    <?php endif; ?>
-
-    <h2>Statistik</h2>
-
-    <h3>Media</h3>
-    <?php if (isset($statErrors['media'])): ?>
-        <p>Fehler bei Media-Statistiken: <?= htmlspecialchars((string)$statErrors['media'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <ul>
-            <li>Gesamt: <?= htmlspecialchars((string)($mediaStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>NSFW: <?= htmlspecialchars((string)($mediaStats['nsfw']['nsfw'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Ohne NSFW: <?= htmlspecialchars((string)($mediaStats['nsfw']['safe'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-        </ul>
-        <table border="1" cellpadding="4" cellspacing="0">
-            <tr><th>Typ</th><th>Anzahl</th></tr>
-            <?php foreach ($mediaStats['byType'] as $row): ?>
-                <tr>
-                    <td><?= htmlspecialchars((string)$row['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$row['cnt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-        <table border="1" cellpadding="4" cellspacing="0">
-            <tr><th>Status</th><th>Anzahl</th></tr>
-            <?php foreach ($mediaStats['byStatus'] as $row): ?>
-                <tr>
-                    <td><?= htmlspecialchars((string)$row['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$row['cnt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-        <table border="1" cellpadding="4" cellspacing="0">
-            <tr><th>Rating</th><th>Anzahl</th></tr>
-            <?php foreach ($mediaStats['byRating'] as $row): ?>
-                <tr>
-                    <td><?= htmlspecialchars((string)$row['rating'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$row['cnt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    <?php endif; ?>
-
-    <h3>Prompts</h3>
-    <?php if (isset($statErrors['prompts'])): ?>
-        <p>Fehler bei Prompt-Statistiken: <?= htmlspecialchars((string)$statErrors['prompts'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <ul>
-            <li>Prompts gesamt: <?= htmlspecialchars((string)($promptStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Medien mit Prompt: <?= htmlspecialchars((string)($promptStats['mediaWithPrompts'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Medien ohne Prompt: <?= htmlspecialchars((string)($promptStats['mediaWithoutPrompts'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-        </ul>
-        <?php if (isset($statErrors['prompt_quality'])): ?>
-            <p>Fehler bei Prompt-Qualität: <?= htmlspecialchars((string)$statErrors['prompt_quality'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-        <?php else: ?>
-            <div style="margin: 8px 0; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;">
-                <strong>Prompt-Qualität (Sample bis 2000 Medien):</strong>
-                <ul>
-                    <li>A (gut): <?= (int)$promptQualitySummary['A'] ?></li>
-                    <li>B (mittel): <?= (int)$promptQualitySummary['B'] ?></li>
-                    <li>C (kritisch): <?= (int)$promptQualitySummary['C'] ?> – <a href="mediadb.php?prompt_quality=C">anzeigen</a></li>
-                </ul>
+        <?php if (!empty($configWarning)): ?>
+            <div class="banner warn">
+                <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
             </div>
         <?php endif; ?>
-    <?php endif; ?>
 
-    <h3>Tags</h3>
-    <?php if (isset($statErrors['tags'])): ?>
-        <p>Fehler bei Tag-Statistiken: <?= htmlspecialchars((string)$statErrors['tags'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <ul>
-            <li>Tags gesamt: <?= htmlspecialchars((string)($tagStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Gesperrte Tags: <?= htmlspecialchars((string)($tagStats['locked'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Tag-Zuordnungen (media_tags): <?= htmlspecialchars((string)($tagStats['relations'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-        </ul>
-    <?php endif; ?>
-
-    <h3>Scan-Resultate</h3>
-    <?php if (isset($statErrors['scan_results'])): ?>
-        <p>Fehler bei Scan-Statistiken: <?= htmlspecialchars((string)$statErrors['scan_results'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <ul>
-            <li>Scan-Resultate gesamt: <?= htmlspecialchars((string)($scanStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Medien mit Scan: <?= htmlspecialchars((string)($scanStats['mediaWithScan'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Medien ohne Scan: <?= htmlspecialchars((string)($scanStats['mediaWithoutScan'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-        </ul>
-    <?php endif; ?>
-
-    <h3>Media-Metadaten</h3>
-    <?php if (isset($statErrors['media_meta'])): ?>
-        <p>Fehler bei Media-Meta-Statistiken: <?= htmlspecialchars((string)$statErrors['media_meta'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <ul>
-            <li>media_meta-Einträge: <?= htmlspecialchars((string)($metaStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-            <li>Quellen (distinct source): <?= htmlspecialchars((string)($metaStats['sources'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-        </ul>
-    <?php endif; ?>
-
-    <h3>Import- und Job-Logs</h3>
-    <?php if (isset($statErrors['import_log'])): ?>
-        <p>Fehler bei Import-Log-Statistiken: <?= htmlspecialchars((string)$statErrors['import_log'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <table border="1" cellpadding="4" cellspacing="0">
-            <tr><th>Import-Status</th><th>Anzahl</th></tr>
-            <?php foreach ($importStats['byStatus'] as $row): ?>
-                <tr>
-                    <td><?= htmlspecialchars((string)$row['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$row['cnt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    <?php endif; ?>
-
-    <?php if (isset($statErrors['jobs'])): ?>
-        <p>Fehler bei Job-Statistiken: <?= htmlspecialchars((string)$statErrors['jobs'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <table border="1" cellpadding="4" cellspacing="0">
-            <tr><th>Job-Status</th><th>Anzahl</th></tr>
-            <?php foreach ($jobStats['byStatus'] as $row): ?>
-                <tr>
-                    <td><?= htmlspecialchars((string)$row['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$row['cnt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                </tr>
-            <?php endforeach; ?>
-            <tr>
-                <th>Summe</th>
-                <th><?= htmlspecialchars((string)($jobStats['total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></th>
-            </tr>
-        </table>
-    <?php endif; ?>
-
-    <h3>Forge-Jobs (Regeneration)</h3>
-    <?php if (isset($statErrors['forge_jobs'])): ?>
-        <p>Fehler bei Forge-Jobs: <?= htmlspecialchars((string)$statErrors['forge_jobs'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php else: ?>
-        <p>Offene Forge-Jobs: <?= htmlspecialchars((string)($forgeJobOverview['open'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Erfolgreich: <?= htmlspecialchars((string)($forgeJobOverview['done'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Fehler: <?= htmlspecialchars((string)($forgeJobOverview['error'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-        <?php if (!empty($forgeJobOverview['by_status'])): ?>
-            <ul>
-                <?php foreach ($forgeJobOverview['by_status'] as $status => $cnt): ?>
-                    <li><?= htmlspecialchars((string)$status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>: <?= htmlspecialchars((string)$cnt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                <?php endforeach; ?>
-            </ul>
-        <?php else: ?>
-            <p>Keine Forge-Jobs vorhanden.</p>
+        <?php if ($dbError !== null): ?>
+            <div class="banner error">
+                <strong>DB-Verbindung fehlgeschlagen:</strong>
+                <?= htmlspecialchars(sv_sanitize_error_message($dbError), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                <div class="muted">Quelle: <?= htmlspecialchars((string)($config['_config_path'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            </div>
         <?php endif; ?>
-        <p>Verarbeitung erfolgt ausschließlich über den Forge-Worker (z. B. <code>php SCRIPTS/forge_worker_cli.php --limit=1</code>) und wird von der Web-Oberfläche nur als Queue verwaltet.</p>
-    <?php endif; ?>
 
-    <h2 id="job-center">Job Center</h2>
-    <p>Übersicht und Steuerung der Jobs (forge_regen). Lesen ohne Internal-Key, Aktionen nur mit gültigem Internal-Key/IP-Whitelist.</p>
+        <?php if ($actionMessage !== null): ?>
+            <div class="banner success">
+                <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            </div>
+        <?php endif; ?>
 
-    <form method="get">
-        <fieldset>
-            <legend>Filter</legend>
-            <label>
-                Job-Typ:
-                <select name="job_type">
-                    <option value="" <?= $jobCenterFilters['job_type'] === '' ? 'selected' : '' ?>>Alle</option>
-                    <option value="forge_regen" <?= $jobCenterFilters['job_type'] === 'forge_regen' ? 'selected' : '' ?>>forge_regen</option>
-                </select>
-            </label>
-            <label>
-                Status:
-                <select name="job_status">
-                    <?php $statusOptions = ['', 'queued', 'running', 'done', 'error', SV_JOB_STATUS_CANCELED]; ?>
-                    <?php foreach ($statusOptions as $statusOpt): ?>
-                        <?php $label = $statusOpt === '' ? 'Alle' : $statusOpt; ?>
-                        <option value="<?= htmlspecialchars($statusOpt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $jobCenterFilters['status'] === $statusOpt ? 'selected' : '' ?>><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-            <label>
-                Media-ID:
-                <input type="number" name="job_media_id" min="1" step="1" value="<?= htmlspecialchars((string)($jobCenterFilters['media_id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-            </label>
-            <label>
-                Zeitraum:
-                <select name="job_range">
-                    <?php $rangeOptions = ['' => 'Alle', '24h' => 'Letzte 24h', '7d' => 'Letzte 7 Tage', '30d' => 'Letzte 30 Tage']; ?>
-                    <?php foreach ($rangeOptions as $rangeKey => $rangeLabel): ?>
-                        <option value="<?= htmlspecialchars($rangeKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $jobFilterRange === $rangeKey ? 'selected' : '' ?>><?= htmlspecialchars($rangeLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </label>
-            <?php if ($jobCenterInternalKey !== ''): ?>
-                <input type="hidden" name="internal_key" value="<?= htmlspecialchars($jobCenterInternalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+        <?php if ($actionError !== null): ?>
+            <div class="banner error">
+                <?= htmlspecialchars(sv_sanitize_error_message($actionError), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            </div>
+        <?php endif; ?>
+
+
+        <section id="health-snapshot" class="card">
+            <h2 class="section-title">Health Snapshot</h2>
+            <?php if ($dashboardError !== null): ?>
+                <div class="muted">Health-Snapshot fehlgeschlagen: <?= htmlspecialchars(sv_sanitize_error_message($dashboardError), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <?php elseif ($dashboard === null): ?>
+                <div class="muted">Kein Health-Snapshot verfügbar.</div>
+            <?php else: ?>
+                <div class="health-grid">
+                    <div class="health-row">
+                        <strong>DB Health</strong>
+                        <div class="line">
+                            <span class="badge <?= $dbError === null ? 'badge-ok' : 'badge-error' ?>">
+                                <?= $dbError === null ? 'connected' : 'offline' ?>
+                            </span>
+                            <span>Treiber: <?= htmlspecialchars((string)($dbHealth['driver'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <span>Migrationen: <?= htmlspecialchars((string)($dbHealth['pending_migrations_count'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <span>Issues: <?= htmlspecialchars((string)($dbHealth['issues_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        </div>
+                        <details>
+                            <summary>Show more</summary>
+                            <div class="muted">DSN (redacted): <?= htmlspecialchars((string)($dbHealth['redacted_dsn'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php if (!empty($dbHealth['pending_migrations'])): ?>
+                                <div class="muted">Pending: <?= htmlspecialchars(implode(', ', (array)$dbHealth['pending_migrations']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php endif; ?>
+                            <?php if (!empty($dbHealth['migration_error'])): ?>
+                                <div class="job-error">Migration: <?= htmlspecialchars((string)$dbHealth['migration_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php endif; ?>
+                        </details>
+                    </div>
+
+                    <div class="health-row">
+                        <strong>Job Health</strong>
+                        <div class="line">
+                            <span class="badge badge-info">queued <?= (int)($jobCounts['queued'] ?? 0) ?></span>
+                            <span class="badge badge-info">running <?= (int)($jobCounts['running'] ?? 0) ?></span>
+                            <span class="badge <?= ($jobHealth['stuck_jobs'] ?? 0) > 0 ? 'badge-warn' : 'badge-ok' ?>">
+                                stuck <?= (int)($jobHealth['stuck_jobs'] ?? 0) ?>
+                            </span>
+                            <span>Letzter Fehler: <?= htmlspecialchars((string)($jobHealth['last_error']['message'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        </div>
+                        <details>
+                            <summary>Show more</summary>
+                            <div class="muted">Done: <?= (int)($jobCounts['done'] ?? 0) ?> · Error: <?= (int)($jobCounts['error'] ?? 0) ?></div>
+                            <?php if (!empty($jobHealth['last_error'])): ?>
+                                <div class="job-error">#<?= htmlspecialchars((string)($jobHealth['last_error']['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (<?= htmlspecialchars((string)($jobHealth['last_error']['type'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</div>
+                            <?php endif; ?>
+                        </details>
+                    </div>
+
+                    <div class="health-row">
+                        <strong>Scan Health</strong>
+                        <div class="line">
+                            <span>Letzter Scan: <?= htmlspecialchars((string)($scanHealth['last_scan_time'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <span>Scan-Fehler: <?= htmlspecialchars((string)($scanHealth['scan_job_errors'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <span>Fehlende Marker: <?= htmlspecialchars((string)($scanHealth['missing_run_at'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        </div>
+                        <details>
+                            <summary>Show more</summary>
+                            <?php if (!empty($scanHealth['latest'])): ?>
+                                <ul class="muted">
+                                    <?php foreach ($scanHealth['latest'] as $scan): ?>
+                                        <li>#<?= htmlspecialchars((string)($scan['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> – Media <?= htmlspecialchars((string)($scan['media_id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> · <?= htmlspecialchars((string)($scan['scanner'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> · <?= htmlspecialchars((string)($scan['run_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            <?php else: ?>
+                                <div class="muted">Keine aktuellen Scan-Einträge.</div>
+                            <?php endif; ?>
+                        </details>
+                    </div>
+                </div>
             <?php endif; ?>
-            <button type="submit">Filtern</button>
-        </fieldset>
-    </form>
+        </section>
 
-    <?php if ($jobCenterMessage !== null): ?>
-        <p style="color: green;"><?= htmlspecialchars($jobCenterMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php endif; ?>
-    <?php if ($jobCenterError !== null): ?>
-        <p style="color: red;"><?= htmlspecialchars($jobCenterError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-    <?php endif; ?>
-    <?php if (!empty($jobCenterLog)): ?>
-        <details>
-            <summary>Job-Center-Logs</summary>
-            <pre><?php foreach ($jobCenterLog as $line) { echo htmlspecialchars($line, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n"; } ?></pre>
-        </details>
-    <?php endif; ?>
+        <section class="card">
+            <h2 class="section-title">Operator-Aktionen</h2>
+            <div class="operator-grid">
+                <div class="operator-card">
+                    <h3>Scan-Path Batch</h3>
+                    <form method="post">
+                        <input type="hidden" name="action" value="scan_path">
+                        <div class="inline-fields">
+                            <input type="text" name="scan_path" placeholder="Pfad" size="32">
+                            <input type="number" name="scan_limit" min="1" step="1" placeholder="Limit">
+                            <?php if ($internalKey !== ''): ?>
+                                <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                            <?php endif; ?>
+                            <button type="submit">Scan starten</button>
+                        </div>
+                    </form>
+                    <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['scan_start'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                </div>
 
-    <?php if ($jobCenterError === null && empty($jobCenterJobs)): ?>
-        <p>Keine Jobs im gewählten Filter.</p>
-    <?php elseif ($jobCenterError === null): ?>
-        <table border="1" cellpadding="4" cellspacing="0">
-            <tr>
-                <th>ID</th>
-                <th>Typ</th>
-                <th>Media</th>
-                <th>Status</th>
-                <th>Erstellt</th>
-                <th>Aktualisiert</th>
-                <th>Kurzinfo</th>
-                <th>Aktionen</th>
-            </tr>
-            <?php foreach ($jobCenterJobs as $job): ?>
-                <tr>
-                    <td><?= htmlspecialchars((string)$job['id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$job['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td>
-                        <?php if (!empty($job['media_id'])): ?>
-                            <a href="media_view.php?id=<?= htmlspecialchars((string)$job['media_id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Media <?= htmlspecialchars((string)$job['media_id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></a>
+                <div class="operator-card">
+                    <h3>Rescan (unscanned)</h3>
+                    <form method="post">
+                        <input type="hidden" name="action" value="rescan_db">
+                        <div class="inline-fields">
+                            <input type="number" name="rescan_limit" min="1" step="1" placeholder="Limit">
+                            <input type="number" name="rescan_offset" min="0" step="1" placeholder="Offset">
+                            <?php if ($internalKey !== ''): ?>
+                                <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                            <?php endif; ?>
+                            <button type="submit">Rescan starten</button>
+                        </div>
+                    </form>
+                    <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['rescan_start'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                </div>
+
+                <div class="operator-card">
+                    <h3>Forge Worker Status</h3>
+                    <div class="line">
+                        <span class="badge badge-info">open <?= (int)($forgeOverview['open'] ?? 0) ?></span>
+                        <span class="badge badge-ok">done <?= (int)($forgeOverview['done'] ?? 0) ?></span>
+                        <span class="badge badge-error">error <?= (int)($forgeOverview['error'] ?? 0) ?></span>
+                    </div>
+                    <div class="muted">Dispatch via <code>php SCRIPTS/forge_worker_cli.php --limit=1</code>.</div>
+                </div>
+
+                <div class="operator-card">
+                    <h3>Consistency Check</h3>
+                    <div class="muted">Quick Link (CLI): <code>php SCRIPTS/consistency_check.php --repair=simple</code></div>
+                    <div class="muted">Internal-Key/IP-Whitelist bleibt Pflicht für Schreibaktionen.</div>
+                </div>
+            </div>
+            <?php if (!$hasInternalAccess): ?>
+                <div class="muted" style="margin-top: 10px;">Aktionen erfordern Internal-Key + IP-Whitelist.</div>
+            <?php endif; ?>
+        </section>
+
+        <section id="job-center" class="card">
+            <h2 class="section-title">Job-Center</h2>
+            <div class="job-columns">
+                <?php
+                $jobPanels = [
+                    'Running' => $jobSections['running'] ?? [],
+                    'Queued'  => $jobSections['queued'] ?? [],
+                    'Stuck'   => $jobSections['stuck'] ?? [],
+                    'Recent Done/Error' => $jobSections['recent'] ?? [],
+                ];
+                ?>
+                <?php foreach ($jobPanels as $panelTitle => $jobs): ?>
+                    <div>
+                        <h3<?= $panelTitle === 'Recent Done/Error' ? ' id="job-center-recent"' : '' ?>><?= htmlspecialchars($panelTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></h3>
+                        <?php if ($jobs === []): ?>
+                            <div class="muted">Keine Jobs.</div>
                         <?php else: ?>
-                            -
+                            <?php foreach ($jobs as $job): ?>
+                                <?php $statusClass = sv_badge_class((string)($job['status'] ?? '')); ?>
+                                <div class="job-card">
+                                    <div class="job-line">
+                                        <span class="badge badge-info">#<?= (int)$job['id'] ?></span>
+                                        <span class="badge badge-info"><?= htmlspecialchars((string)$job['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <span class="<?= $statusClass ?>"><?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <?php if (!empty($job['stuck'])): ?>
+                                            <span class="badge badge-warn">stuck</span>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="job-meta">
+                                        <?php if (!empty($job['media_id'])): ?>
+                                            Medium: <a href="media_view.php?id=<?= htmlspecialchars((string)$job['media_id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">#<?= htmlspecialchars((string)$job['media_id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></a>
+                                        <?php else: ?>
+                                            Medium: —
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="job-meta">
+                                        Start: <?= htmlspecialchars((string)($job['started_at'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                        <?php if (!empty($job['age_label'])): ?>
+                                            · Age <?= htmlspecialchars((string)$job['age_label'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                        <?php endif; ?>
+                                        <?php if (!empty($job['finished_at'])): ?>
+                                            · Finish: <?= htmlspecialchars((string)$job['finished_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                        <?php endif; ?>
+                                    </div>
+                                    <?php if (!empty($job['model'])): ?>
+                                        <div class="job-meta">Modell: <?= htmlspecialchars((string)$job['model'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($job['stuck_reason'])): ?>
+                                        <div class="job-error">Stuck-Grund: <?= htmlspecialchars((string)$job['stuck_reason'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($job['error'])): ?>
+                                        <div class="job-error">Fehler: <?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    <?php endif; ?>
+                                    <div class="job-actions">
+                                        <?php if (in_array($job['status'], ['error', 'done', SV_JOB_STATUS_CANCELED], true)): ?>
+                                            <form method="post">
+                                                <input type="hidden" name="action" value="job_requeue">
+                                                <input type="hidden" name="job_id" value="<?= (int)$job['id'] ?>">
+                                                <?php if ($internalKey !== ''): ?>
+                                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                                <?php endif; ?>
+                                                <button type="submit">Requeue</button>
+                                            </form>
+                                        <?php endif; ?>
+                                        <?php if (in_array($job['status'], ['queued', 'running'], true)): ?>
+                                            <form method="post" onsubmit="return confirm('Job wirklich abbrechen?');">
+                                                <input type="hidden" name="action" value="job_cancel">
+                                                <input type="hidden" name="job_id" value="<?= (int)$job['id'] ?>">
+                                                <?php if ($internalKey !== ''): ?>
+                                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                                <?php endif; ?>
+                                                <button type="submit">Cancel</button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </div>
+                                    <details>
+                                        <summary>Show more</summary>
+                                        <div class="job-meta">ID: <?= (int)$job['id'] ?></div>
+                                        <div class="job-meta">Status: <?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    </details>
+                                </div>
+                            <?php endforeach; ?>
                         <?php endif; ?>
-                    </td>
-                    <td><?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$job['created_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$job['updated_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td><?= htmlspecialchars((string)$job['summary'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                    <td>
-                        <?php if (in_array($job['status'], ['error', 'done', SV_JOB_STATUS_CANCELED], true)): ?>
-                            <form method="post" style="display:inline">
-                                <input type="hidden" name="action" value="job_requeue">
-                                <input type="hidden" name="job_id" value="<?= htmlspecialchars((string)$job['id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                <?php if ($jobCenterInternalKey !== ''): ?>
-                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($jobCenterInternalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                <?php endif; ?>
-                                <button type="submit">Requeue</button>
-                            </form>
-                        <?php endif; ?>
-                        <?php if (in_array($job['status'], ['queued', 'running'], true)): ?>
-                            <form method="post" style="display:inline" onsubmit="return confirm('Job wirklich abbrechen?');">
-                                <input type="hidden" name="action" value="job_cancel">
-                                <input type="hidden" name="job_id" value="<?= htmlspecialchars((string)$job['id'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                <?php if ($jobCenterInternalKey !== ''): ?>
-                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($jobCenterInternalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                <?php endif; ?>
-                                <button type="submit">Cancel</button>
-                            </form>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    <?php endif; ?>
-
-    <h2>CLI-Übersicht</h2>
-    <table border="1" cellpadding="4" cellspacing="0">
-        <tr><th>Skript</th><th>Kategorie</th><th>Beschreibung</th><th>Beispielaufruf</th></tr>
-        <?php foreach ($cliEntries as $entry): ?>
-            <tr>
-                <td><?= htmlspecialchars($entry['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                <td><?= htmlspecialchars($entry['category'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                <td><?= htmlspecialchars($entry['description'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                <td><?= htmlspecialchars($entry['example'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-            </tr>
-        <?php endforeach; ?>
-    </table>
-
-    <?php if (!empty($knownActions)): ?>
-        <h3>Zuletzt ausgeführt</h3>
-        <?php if (isset($statErrors['audit_log'])): ?>
-            <p>Fehler beim Auslesen des Audit-Logs: <?= htmlspecialchars((string)$statErrors['audit_log'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></p>
-        <?php else: ?>
-            <ul>
-                <?php foreach ($knownActions as $actionKey => $label): ?>
-                    <li>
-                        <?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>:
-                        <?php if (isset($lastRuns[$actionKey])): ?>
-                            <?= htmlspecialchars((string)$lastRuns[$actionKey], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                        <?php else: ?>
-                            <em>Keine Einträge</em>
-                        <?php endif; ?>
-                    </li>
+                    </div>
                 <?php endforeach; ?>
-            </ul>
-        <?php endif; ?>
-    <?php endif; ?>
+            </div>
+        </section>
 
-    <script>
-    (function () {
-        const target = document.getElementById('scan-jobs-list');
-        if (!target) {
-            return;
-        }
-
-        const escapeHtml = (str) => (str || '').toString()
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-
-        async function loadScanJobs() {
-            try {
-                const pathInput = document.querySelector('input[name="scan_path"]');
-                const path = pathInput && pathInput.value ? pathInput.value.trim() : '';
-                const url = 'index.php?ajax=scan_jobs' + (path !== '' ? '&path=' + encodeURIComponent(path) : '');
-                const response = await fetch(url);
-                const data = await response.json();
-                const jobs = Array.isArray(data.jobs) ? data.jobs : [];
-                if (jobs.length === 0) {
-                    target.innerHTML = '<p>Keine Scan-Jobs vorhanden.</p>';
-                    return;
-                }
-
-                const items = jobs.map((job) => {
-                    const status = escapeHtml(job.status || 'unbekannt');
-                    const pathText = escapeHtml(job.path || '(Pfad fehlt)');
-                    const limitText = job.limit ? ' | Limit ' + escapeHtml(job.limit) : '';
-                    const worker = job.worker_pid ? ' | Worker PID ' + escapeHtml(job.worker_pid) : '';
-                    const result = job.result || {};
-                    const stats = typeof result === 'object'
-                        ? ` | processed=${escapeHtml(result.processed ?? 0)}, skipped=${escapeHtml(result.skipped ?? 0)}, errors=${escapeHtml(result.errors ?? 0)}`
-                        : '';
-                    return `<li><strong>#${escapeHtml(job.id)}</strong> ${status} – ${pathText}${limitText}${worker}${stats}</li>`;
-                });
-
-                target.innerHTML = '<ul>' + items.join('') + '</ul>';
-            } catch (err) {
-                target.innerHTML = '<p>Scan-Status konnte nicht geladen werden.</p>';
-            }
-        }
-
-        loadScanJobs();
-        setInterval(loadScanJobs, 5000);
-    })();
-    </script>
+        <section id="event-log" class="card">
+            <h2 class="section-title">Ereignisverlauf</h2>
+            <?php if ($events === []): ?>
+                <div class="muted">Keine Ereignisse verfügbar.</div>
+            <?php else: ?>
+                <ul class="event-list">
+                    <?php foreach ($events as $event): ?>
+                        <?php $label = $knownActions[$event['action']] ?? $event['action']; ?>
+                        <li class="event-item">
+                            <strong><?= htmlspecialchars((string)$label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                            <span class="muted"><?= htmlspecialchars((string)($event['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <?php if (!empty($event['summary'])): ?>
+                                <span class="muted"><?= htmlspecialchars((string)$event['summary'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <?php endif; ?>
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            <?php endif; ?>
+        </section>
+    </div>
 </body>
 </html>

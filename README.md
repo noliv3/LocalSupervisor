@@ -10,12 +10,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## Systemarchitektur
 - **Kernel-Logik (SCRIPTS/)**: Zentrale Funktionen in `scan_core` (Dateierkennung, Hashing, Pfadvalidierung, Logging, DB-Writes), `prompt_parser` (EXIF/PNG/JSON-Kandidaten sammeln, priorisieren, normalisieren), `operations` (einheitliche Einstiegspunkte für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz), `logging` (kanalisiertes Logging mit Rotation), `security` (Internal-Key + IP-Whitelist), `paths` (Pfadkonfiguration und Validierung).
-- **Webschicht (WWW/)**: Dashboard `index.php` (Formulare für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz), Hauptgalerie `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
+- **Webschicht (WWW/)**: Dashboard `index.php` als Operator-Control-Center (Startpunkt, Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf), Hauptgalerie `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
 - **Persistenz (DB/)**: SQLite/MySQL-Schema aus `DB/schema.sql`, Migrationen in `SCRIPTS/migrations/`, Konfiguration in `CONFIG/config.php`.
 
 ## UI Map (Operator-Startpunkte)
 - **Startpunkt (Galerie)**: `WWW/mediadb.php` ist die einzige produktive Galerie-UI (Card-Grid + List-Mode).
-- **Operator-Dashboard**: `WWW/index.php` bündelt Scan/Rescan/Filesync/Prompt-Rebuild, Health Snapshot und Job-Übersicht.
+- **Operator-Dashboard**: `WWW/index.php` bündelt Startzugang, Health Snapshot, Job-Center, Operator-Aktionen (Scan/Rescan) und einen kurzen Ereignisverlauf.
 - **Detailansicht**: `WWW/media_view.php` für Einzelmedium (Forge/Rescan/Tags/Quality).
 - **Legacy-Pfad (nicht mehr verlinkt)**: `WWW/media.php` bleibt nur für Übergang/Alt-Workflows erreichbar und ist im UI als Legacy gekennzeichnet.
 - **Nicht mehr nutzen**: Links/Navigation, die `media.php` als Standardzugang anbieten.
@@ -26,6 +26,12 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - Locked-Tag-Schutz: Cleanup/Repair entfernen keine gesperrten Tags; fehlende Dateien werden gemeldet, ohne manuelle Tagging-Daten zu löschen.
 - VA/VIDAX-State: `va install` legt das State-Layout an und kopiert Beispielconfigs in `state/config`, falls dort noch nichts liegt.
 - Optionale Tools: ffmpeg/ffprobe/exiftool sind optional; fehlende Tools führen zu klaren Hinweisen statt fatalen Fehlern (Video-Tests werden übersprungen, wenn ffmpeg fehlt).
+
+## Dashboard Contract (Operator-Control-Center)
+- **Zweck**: `WWW/index.php` ist der klare Operator-Startpunkt (kein Debug-View, keine Statistik-Wüsten).
+- **Abschnitte**: Header/Start (Galerie + Anker), Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf.
+- **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) und letzte Audit-Events in Kurzform.
+- **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned via Dashboard. Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, nicht als neue Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
 ### Datenbankschema (Strukturüberblick)
 | Tabelle | Zweck | Kernfelder/Indizes |
@@ -66,7 +72,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ### Internal-Key Required Matrix (Web)
 | Endpoint | Zweck | Internal-Key |
 | --- | --- | --- |
-| `WWW/index.php` (Action-POSTs) | Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz starten | erforderlich |
+| `WWW/index.php` (Action-POSTs) | Scan/Rescan/Job-Recovery (Requeue/Cancel) | erforderlich |
 | `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Quality, Rescan-Job | erforderlich |
 | `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status für Detailansicht | erforderlich |
 | `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status für Detailansicht | erforderlich |
@@ -130,7 +136,7 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 | `php SCRIPTS/meta_inspect.php [--limit=N] [--offset=N]` | Text-Inspektor für Prompts/Metadaten | Batches |
 | `php SCRIPTS/selftest_cli.php` | Lokaler Smoke-Test (PNG/MP4/Scanner-Parser, Video-Thumb) | ffmpeg/ffprobe empfohlen; Exit 2 wenn ffmpeg fehlt |
 | `php SCRIPTS/cleanup_missing_cli.php [--confirm] [--no-dry-run]` | Löscht nur nach explizitem `--confirm`; Default ist Dry-Run mit ID-Listing | Locked-Tags bleiben geschützt, jede Löschung wird auditiert |
-| `WWW/index.php` | Dashboard: Start Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz | Internal-Key + IP-Whitelist für Write-Actions |
+| `WWW/index.php` | Dashboard: Operator-Control-Center (Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf) | Internal-Key + IP-Whitelist für Write-Actions |
 | `WWW/mediadb.php` | Listenansicht mit Filtern | type, prompt, meta, status, rating_min, path_substring, adult |
 | `WWW/media_view.php?id=<id>` | Detailansicht eines Mediums | id (Integer), optional adult |
 | `WWW/media_stream.php?path=<path>` | Streamt Originaldateien nach Pfad-Validierung | **Internal-Key erforderlich**; path (unterhalb erlaubter Roots) |
@@ -146,7 +152,7 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 ## Konsistenz-Tools
 - **UI-Indikatoren**: `mediadb.php` und `media_view.php` zeigen Badges für Prompt-Vollständigkeit, Tags und Metadaten an. Filter `incomplete=` (prompt/tags/meta/any) erleichtern die Suche nach Lücken.
 - **Mini-Konsistenzcheck**: Direkt in der Detailansicht werden pro Medium die Stati (Prompt vollständig, Tags, Metadaten) angezeigt.
-- **Komfort-Rebuild**: Im Dashboard steht ein Button „Rebuild fehlender Prompts“, der nur Medien mit fehlenden Prompt-Kernfeldern (internes Limit 100) per Einzel-Rebuild anstößt und Audit-Log-Einträge schreibt.
+- **Komfort-Rebuild**: Läuft ausschließlich über die bestehenden CLI/Operations-Flows; der Dashboard-Startpunkt zeigt nur die Health- und Job-Lage.
 - **Stale-Scan-Indikator**: Wenn beim Forge-Refresh kein Scanner erreichbar war, wird ein `scan_stale`-Flag in `media_meta` hinterlegt und als Badge in `mediadb.php` sowie der Detailansicht angezeigt.
 - **Health Snapshot**: Dashboard und `SCRIPTS/consistency_check.php` zeigen ein kompaktes DB/Job/Scan-Health-Panel (Issues nach Check/Severity, stuck Jobs, letzte Jobs/Scans, Trigger aus Audit-Log). Der Snapshot enthält Treiber/DSN (redacted), offene Migrationen, Schema-Diff, stuck_jobs_count, letzten Job-Fehler, letzte Scan-Zeit und Scan-Job-Fehler. Die Checks erkennen u. a. Tag-Lock-Konflikte, doppelte Tag-Zuordnungen (locked/unlocked), fehlende `scan_results.run_at/scanner` bzw. fehlende Scan-Verknüpfungen, Job-State-Lücken (fehlende Zeiten/Progress/Errortext) sowie verwaiste `prompt_history`-Einträge (inkl. fehlendem Media/Version).
 
@@ -158,14 +164,14 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 
 ## Integritätsanalyse und einfache Reparatur
 - **Analyse (read-only)**: `SCRIPTS/operations.php` stellt Prüfungen bereit, die fehlende Hashes, fehlende Dateien (Status `active`), Prompts ohne Roh-Metadaten, doppelte Tag-Zuordnungen (locked/unlocked), Tag-Zuordnungen ohne Confidence, fehlende `scan_results.run_at/scanner` oder komplett fehlende Scan-Verknüpfungen, Job-State-Lücken (fehlende Timestamps/Progress/Errortext) sowie verwaiste oder versionslose `prompt_history`-Verweise erkennen. Ergebnisse werden strukturiert pro Medium/Typ zurückgegeben.
-- **UI-Anzeigen**: `media_view.php` listet konkrete Probleme des Mediums (erste drei Zeilen, Rest aufklappbar). `mediadb.php` bietet einen Filter `?issues=1` und markiert betroffene Medien in der Grid-Ansicht. Das Dashboard (`index.php`) zeigt die Anzahl der problematischen Medien im Abschnitt „Integritätsstatus“.
-- **Einfache Reparatur**: Über das Dashboard (Internal-Key/IP-Whitelist erforderlich) kann eine minimale Reparatur ausgelöst werden. Sie setzt nur den Status auf `missing`, wenn Dateien fehlen, entfernt `media_tags`-Einträge ohne Confidence (locked-Einträge bleiben erhalten) und löscht komplett leere Prompt-Objekte. Alle Schritte laufen über `SCRIPTS/operations.php` und werden auditgeloggt.
+- **UI-Anzeigen**: `media_view.php` listet konkrete Probleme des Mediums (erste drei Zeilen, Rest aufklappbar). `mediadb.php` bietet einen Filter `?issues=1` und markiert betroffene Medien in der Grid-Ansicht. Das Dashboard zeigt stattdessen nur den kompakten Health Snapshot.
+- **Einfache Reparatur**: Läuft ausschließlich über die bestehenden Operations-Flows (CLI/Automation); das Dashboard bietet keinen separaten Repair-Button.
 
 ## Prompt-Qualität (A/B/C)
 - **Zentrale Bewertung**: `SCRIPTS/operations.php` stellt eine Heuristik bereit (`sv_analyze_prompt_quality`), die Prompts in A/B/C klassifiziert, Score/Issues liefert und Tag-basierte bzw. hybride Vorschläge generiert.
 - **UI-Anzeigen**: `media_view.php` zeigt die Klasse, Score, Issues (Top 3) und optionale Vorschläge (Tag-basiert/Hybrid) direkt neben dem Prompt an.
 - **Filter/Badges**: `mediadb.php` bietet einen Filter `prompt_quality=A|B|C` (Alias `critical` für C) und zeigt pro Medium ein PQ-Badge mit Score/Issues an.
-- **Dashboard-Summary**: `index.php` summiert die Prompt-Klassen (Sample bis 2000 Medien) und verlinkt für kritische Prompts auf `mediadb.php?prompt_quality=C`.
+- **Dashboard-Summary**: Nicht Teil des Dashboard-Standards; Prompt-Qualität wird nur in Detail- und Gallery-Ansicht angezeigt.
 
 ## Forge-Regeneration
 - **Async-Flow**:
@@ -196,8 +202,8 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 - **Button-Sichtbarkeit**: Forge-Regen-Buttons werden in `media.php` und `media_view.php` bei allen Bildmedien dargestellt, unabhängig von Prompt-/Konsistenzstatus oder Missing-Flag. Die Aktion erfordert weiterhin einen gültigen Internal-Key und wird serverseitig validiert; Hinweise zum Zustand erscheinen neben dem Button.
 
 ### Job-Center (Dashboard)
-- `WWW/index.php` bietet einen Job-Center-Block mit Filtern für `job_type`, `status`, `media_id` und Zeitfenster (24h/7d/30d).
-- Die Tabelle listet ID, Typ, Media-Link, Status, Zeitstempel und eine Kurzinfo pro Job.
+- `WWW/index.php` zeigt vier klare Sektionen: Running, Queued, Stuck sowie Recent Done/Error.
+- Pro Job werden Typ, Medium, Start/Age, Finish, Status, Kurzfehler und vorhandene Requeue/Cancel-Aktionen angezeigt (Internal-Key/IP-Whitelist erforderlich).
 - Steuerung: „Requeue“ für `error`/`done`/`canceled`, „Cancel“ für `queued`/`running`; Schreibaktionen erfordern Internal-Key/IP-Whitelist und rufen ausschließlich `SCRIPTS/operations.php`.
 - Verarbeitung der Jobs bleibt beim CLI-Worker (`forge_worker_cli.php`), die Weboberfläche erzeugt oder manipuliert keine Forge-Aufrufe direkt.
 
