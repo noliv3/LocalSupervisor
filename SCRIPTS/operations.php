@@ -1222,21 +1222,11 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
 
     $health = sv_forge_healthcheck($endpoint, $logger);
     if (!$health['ok']) {
-        $now          = date('c');
         $status       = 'error';
         $errorMessage = sv_forge_limit_error('Forge-Healthcheck fehlgeschlagen' . ($health['http_code'] !== null ? ' (HTTP ' . $health['http_code'] . ')' : ''));
         $responseJson = json_encode($health['log_payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-        $update = $pdo->prepare(
-            'UPDATE jobs SET status = :status, forge_response_json = :response, error_message = :error, updated_at = :updated_at WHERE id = :id'
-        );
-        $update->execute([
-            ':status'     => $status,
-            ':response'   => $responseJson,
-            ':error'      => $errorMessage,
-            ':updated_at' => $now,
-            ':id'         => $jobId,
-        ]);
+        sv_update_job_status($pdo, $jobId, $status, $responseJson, $errorMessage);
 
         sv_audit_log($pdo, 'forge_job_dispatch_failed', 'jobs', $jobId, [
             'status'      => $status,
@@ -1286,22 +1276,13 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
         }
     }
 
-    $now = date('c');
     $logPayload   = sv_forge_log_payload($url, $httpCode, $responseBody);
     $responseJson = json_encode($logPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
     if ($httpCode !== null && $httpCode >= 200 && $httpCode < 300 && $responseBody !== false) {
         $status = 'running';
         $logger('Forge-Dispatch erfolgreich, Status auf running gesetzt.');
-        $update = $pdo->prepare(
-            'UPDATE jobs SET status = :status, forge_response_json = :response, updated_at = :updated_at WHERE id = :id'
-        );
-        $update->execute([
-            ':status'     => $status,
-            ':response'   => $responseJson,
-            ':updated_at' => $now,
-            ':id'         => $jobId,
-        ]);
+        sv_update_job_status($pdo, $jobId, $status, $responseJson, null);
 
         sv_audit_log($pdo, 'forge_job_dispatched', 'jobs', $jobId, [
             'status'      => $status,
@@ -1322,17 +1303,7 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
     }
     $logger($error);
 
-    $update = $pdo->prepare(
-        'UPDATE jobs SET status = :status, forge_response_json = :response, error_message = :error, updated_at = :updated_at '
-        . 'WHERE id = :id'
-    );
-    $update->execute([
-        ':status'     => $status,
-        ':response'   => $responseJson,
-        ':error'      => $error,
-        ':updated_at' => $now,
-        ':id'         => $jobId,
-    ]);
+    sv_update_job_status($pdo, $jobId, $status, $responseJson, $error);
 
     sv_audit_log($pdo, 'forge_job_dispatch_failed', 'jobs', $jobId, [
         'status'    => $status,
@@ -2571,6 +2542,8 @@ function sv_fetch_rescan_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 5):
         $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
         $pathLabel = isset($payload['path']) ? sv_safe_path_label((string)$payload['path']) : '';
+        $timing = sv_extract_job_timestamps($row, $response);
+        $stuckInfo = sv_job_stuck_info($row, $response, SV_JOB_STUCK_MINUTES);
         $jobs[] = [
             'id'          => (int)($row['id'] ?? 0),
             'status'      => (string)($row['status'] ?? ''),
@@ -2585,9 +2558,13 @@ function sv_fetch_rescan_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 5):
             'run_at'      => $response['run_at'] ?? null,
             'has_nsfw'    => $response['has_nsfw'] ?? null,
             'rating'      => $response['rating'] ?? null,
-            'started_at'  => $response['started_at'] ?? null,
-            'finished_at' => $response['finished_at'] ?? null,
+            'started_at'  => $timing['started_at'],
+            'finished_at' => $timing['finished_at'],
             'tags_written'=> $response['tags_written'] ?? null,
+            'age_seconds' => $timing['age_seconds'],
+            'age_label'   => $timing['age_label'],
+            'stuck'       => $stuckInfo['stuck'],
+            'stuck_reason'=> $stuckInfo['reason'],
         ];
     }
 
@@ -2775,17 +2752,18 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
         $hash    = isset($payload['hash']) ? (string)$payload['hash'] : '';
         $ext     = isset($payload['ext']) ? (string)$payload['ext'] : '';
 
-        $updateStatus = function (string $status, ?string $errorMsg = null) use ($pdo, $jobId): void {
-            $stmtUpd = $pdo->prepare('UPDATE jobs SET status = :status, updated_at = :updated_at, error_message = :err WHERE id = :id');
-            $stmtUpd->execute([
-                ':status'     => $status,
-                ':updated_at' => date('c'),
-                ':err'        => $errorMsg,
-                ':id'         => $jobId,
-            ]);
+        $updateStatus = function (string $status, ?string $errorMsg = null, ?array $response = null) use ($pdo, $jobId): void {
+            $responseJson = $response !== null
+                ? json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+                : null;
+            sv_update_job_status($pdo, $jobId, $status, $responseJson, $errorMsg);
         };
 
-        $updateStatus('running');
+        $updateStatus('running', null, [
+            'from_path' => $from,
+            'to_path'   => $to,
+            'hash'      => $hash,
+        ]);
 
         try {
             if ($from === '' || $to === '' || $hash === '') {
@@ -2832,7 +2810,11 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
 
             $pdo->commit();
 
-            $updateStatus('done');
+            $updateStatus('done', null, [
+                'from_path' => $from,
+                'to_path'   => $to,
+                'hash'      => $hash,
+            ]);
             $done++;
             $logger('Library-Rename Job #' . $jobId . ' abgeschlossen.');
             sv_audit_log($pdo, 'library_rename', 'media', $mediaId, [
@@ -2844,7 +2826,11 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
         } catch (Throwable $e) {
             $pdo->rollBack();
             $error++;
-            $updateStatus('error', $e->getMessage());
+            $updateStatus('error', $e->getMessage(), [
+                'from_path' => $from,
+                'to_path'   => $to,
+                'hash'      => $hash,
+            ]);
             $logger('Library-Rename Job #' . $jobId . ' Fehler: ' . $e->getMessage());
         }
     }
@@ -2904,15 +2890,7 @@ function sv_cancel_job(PDO $pdo, int $jobId, callable $logger): array
         throw new InvalidArgumentException('Nur queued/running-Jobs können abgebrochen werden.');
     }
 
-    $stmt = $pdo->prepare(
-        'UPDATE jobs SET status = :status, updated_at = :updated_at, error_message = :error WHERE id = :id'
-    );
-    $stmt->execute([
-        ':status'     => SV_JOB_STATUS_CANCELED,
-        ':updated_at' => date('c'),
-        ':error'      => 'Canceled by operator',
-        ':id'         => $jobId,
-    ]);
+    sv_update_job_status($pdo, $jobId, SV_JOB_STATUS_CANCELED, null, 'Canceled by operator');
 
     $logger('Job #' . $jobId . ' abgebrochen.');
     sv_audit_log($pdo, 'job_cancel', 'jobs', $jobId, [
@@ -4379,6 +4357,39 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
         $error = sv_forge_limit_error($error);
     }
 
+    $now = date('c');
+    $existingStmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
+    $existingStmt->execute([':id' => $jobId]);
+    $existingJson = $existingStmt->fetchColumn();
+    $existingData = is_string($existingJson) ? json_decode($existingJson, true) : null;
+    $existingData = is_array($existingData) ? $existingData : [];
+
+    $incomingData = null;
+    if ($responseJson !== null) {
+        $decoded = json_decode($responseJson, true);
+        if (is_array($decoded)) {
+            $incomingData = $decoded;
+        }
+    }
+
+    $responseData = $existingData;
+    if (is_array($incomingData)) {
+        $responseData = array_merge($responseData, $incomingData);
+    }
+
+    $needsTiming = $status === 'running' || in_array($status, ['done', 'error', SV_JOB_STATUS_CANCELED], true);
+    $shouldWriteResponse = $responseData !== [] || $needsTiming;
+
+    if ($shouldWriteResponse) {
+        if ($status === 'running' && empty($responseData['started_at'])) {
+            $responseData['started_at'] = $now;
+        }
+        if (in_array($status, ['done', 'error', SV_JOB_STATUS_CANCELED], true) && empty($responseData['finished_at'])) {
+            $responseData['finished_at'] = $now;
+        }
+        $responseJson = json_encode($responseData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
     $stmt = $pdo->prepare(
         'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at WHERE id = :id'
     );
@@ -4386,9 +4397,108 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
         ':status'     => $status,
         ':response'   => $responseJson,
         ':error'      => $error,
-        ':updated_at' => date('c'),
+        ':updated_at' => $now,
         ':id'         => $jobId,
     ]);
+}
+
+function sv_format_job_age(?int $seconds): ?string
+{
+    if ($seconds === null) {
+        return null;
+    }
+
+    $seconds = max(0, $seconds);
+    $hours   = intdiv($seconds, 3600);
+    $minutes = intdiv($seconds % 3600, 60);
+    $secs    = $seconds % 60;
+
+    if ($hours > 0) {
+        return sprintf('%dh %dm', $hours, $minutes);
+    }
+    if ($minutes > 0) {
+        return sprintf('%dm %ds', $minutes, $secs);
+    }
+
+    return sprintf('%ds', $secs);
+}
+
+function sv_extract_job_response(?string $json): array
+{
+    $decoded = is_string($json) ? json_decode($json, true) : null;
+    return is_array($decoded) ? $decoded : [];
+}
+
+function sv_extract_job_timestamps(array $row, array $response): array
+{
+    $startedAt = $response['started_at']
+        ?? $response['_sv_worker_started_at']
+        ?? null;
+    $finishedAt = $response['finished_at']
+        ?? $response['completed_at']
+        ?? null;
+
+    $fallback = $startedAt ?: ((string)($row['created_at'] ?? '') ?: (string)($row['updated_at'] ?? ''));
+    $startedAt = $startedAt ?: ($fallback !== '' ? $fallback : null);
+
+    $ageSeconds = null;
+    if ($startedAt !== null && $startedAt !== '') {
+        $startTs = strtotime($startedAt);
+        if ($startTs !== false) {
+            $ageSeconds = time() - $startTs;
+        }
+    }
+
+    return [
+        'started_at'  => $startedAt,
+        'finished_at' => $finishedAt,
+        'age_seconds' => $ageSeconds,
+        'age_label'   => sv_format_job_age($ageSeconds),
+    ];
+}
+
+function sv_job_stuck_info(array $row, array $response, int $timeoutMinutes): array
+{
+    $status = strtolower((string)($row['status'] ?? ''));
+    if ($status !== 'running') {
+        return [
+            'stuck'  => false,
+            'reason' => null,
+        ];
+    }
+
+    $timing = sv_extract_job_timestamps($row, $response);
+    $ageSeconds = $timing['age_seconds'];
+    $ageMinutes = $ageSeconds !== null ? ($ageSeconds / 60) : null;
+    $pid        = $response['_sv_worker_pid'] ?? null;
+
+    $pidInfo = null;
+    if (is_numeric($pid)) {
+        $pidInfo = sv_is_pid_running((int)$pid);
+    }
+
+    $maxAge = max(1, $timeoutMinutes);
+    if ($ageMinutes !== null && $ageMinutes >= $maxAge) {
+        return [
+            'stuck'  => true,
+            'reason' => 'timeout > ' . $maxAge . 'm',
+        ];
+    }
+
+    if ($pidInfo !== null && !($pidInfo['running'] ?? false)) {
+        $minGrace = 2;
+        if ($ageMinutes !== null && $ageMinutes >= $minGrace) {
+            return [
+                'stuck'  => true,
+                'reason' => 'worker pid not running',
+            ];
+        }
+    }
+
+    return [
+        'stuck'  => false,
+        'reason' => null,
+    ];
 }
 
 function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callable $logger = null): int
@@ -4399,44 +4509,49 @@ function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callabl
     }
 
     $maxAgeMinutes = max(1, $maxAgeMinutes);
-    $threshold     = date('c', time() - ($maxAgeMinutes * 60));
     $placeholders  = implode(',', array_fill(0, count($types), '?'));
 
     $stmt = $pdo->prepare(
-        'SELECT id FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ') AND updated_at < ?'
+        'SELECT id, type, status, created_at, updated_at, forge_response_json, error_message FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')'
     );
-    $params = array_merge($types, [$threshold]);
-    $stmt->execute($params);
-    $ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+    $stmt->execute($types);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    if ($ids === []) {
-        return 0;
-    }
-
-    $update = $pdo->prepare(
-        'UPDATE jobs SET status = "error", error_message = COALESCE(NULLIF(error_message, ""), :err), updated_at = :now WHERE id = :id'
-    );
     $now   = date('c');
-    $error = 'job stuck timeout (>' . $maxAgeMinutes . 'm)';
+    $count = 0;
 
-    foreach ($ids as $id) {
-        $update->execute([
-            ':err' => $error,
-            ':now' => $now,
-            ':id'  => $id,
-        ]);
-        sv_audit_log($pdo, 'job_stuck_timeout', 'jobs', $id, [
-            'error'        => $error,
-            'threshold'    => $threshold,
+    foreach ($rows as $row) {
+        $response = sv_extract_job_response($row['forge_response_json'] ?? null);
+        $stuckInfo = sv_job_stuck_info($row, $response, $maxAgeMinutes);
+        if (!$stuckInfo['stuck']) {
+            continue;
+        }
+
+        $reason = $stuckInfo['reason'] ?? ('timeout > ' . $maxAgeMinutes . 'm');
+        $response['_sv_stuck'] = true;
+        $response['_sv_stuck_reason'] = $reason;
+        $response['_sv_stuck_checked_at'] = $now;
+
+        sv_update_job_status(
+            $pdo,
+            (int)$row['id'],
+            'error',
+            json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            'job stuck timeout (' . $reason . ')'
+        );
+        $count++;
+
+        sv_audit_log($pdo, 'job_stuck_timeout', 'jobs', (int)$row['id'], [
+            'error'        => 'job stuck timeout (' . $reason . ')',
             'marked_at'    => $now,
             'types_scoped' => $types,
         ]);
         if ($logger) {
-            $logger('Job #' . $id . ' als timeout markiert (running > ' . $maxAgeMinutes . 'm).');
+            $logger('Job #' . (int)$row['id'] . ' als stuck markiert (' . $reason . ').');
         }
     }
 
-    return count($ids);
+    return $count;
 }
 
 function sv_log_forge_paths(array $paths): void
@@ -4516,6 +4631,8 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
 
     if (($worker['state'] ?? null) === 'error' && !empty($queued['job_id'])) {
         $snippet = trim((string)($worker['err_snippet'] ?? $worker['reason'] ?? 'spawn failed'));
+        $snippet = sv_sanitize_error_message($snippet, 200);
+        $snippet = sv_forge_limit_error($snippet, 200);
         $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
         $stmt    = $pdo->prepare(
             'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
@@ -4673,7 +4790,8 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     }
 
     $plannedBackupPath     = sv_build_backup_path($backupDir, $path);
-    $plannedTempOutputPath = sv_build_temp_output_path($tmpDir, $path);
+    $tempOutputRoot        = $regenMode === 'replace' ? dirname($path) : $tmpDir;
+    $plannedTempOutputPath = sv_build_temp_output_path($tempOutputRoot, $path);
     $finalTargetPath       = $path;
 
     sv_assert_stream_path_allowed($backupDir, $config, 'forge_backup_dir', false, true);
@@ -4701,6 +4819,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     $previewPath       = null;
     $modeForcedPreview = false;
     $forcedReason      = null;
+    $replaceApplied    = false;
 
     try {
         $logger(sprintf(
@@ -4819,6 +4938,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             throw new RuntimeException('Ersetzen der Zieldatei fehlgeschlagen.');
         }
         $logger('Replace erfolgreich geschrieben.');
+        $replaceApplied = true;
 
         $newFileInfo = $imageMeta;
         $newFileInfo['hash'] = @hash_file('md5', $path) ?: ($imageMeta['hash'] ?? null);
@@ -4964,12 +5084,21 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
         sv_update_job_status($pdo, $jobId, 'error', $responseJson, $e->getMessage());
 
-        if ($backupPath !== null && $newFileInfo !== null && is_file($backupPath)) {
+        if (is_string($plannedTempOutputPath) && is_file($plannedTempOutputPath)) {
+            @unlink($plannedTempOutputPath);
+        }
+
+        $restoreOk = false;
+        if ($backupPath !== null && is_file($backupPath) && $replaceApplied) {
             try {
-                copy($backupPath, $path);
+                $restoreOk = copy($backupPath, $path);
             } catch (Throwable $restoreError) {
                 $logger('Restore nach Fehler fehlgeschlagen: ' . $restoreError->getMessage());
             }
+        }
+
+        if ($backupPath !== null && is_file($backupPath) && (!$replaceApplied || $restoreOk)) {
+            @unlink($backupPath);
         }
 
         sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
@@ -5358,6 +5487,7 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
     foreach ($rows as $row) {
         $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true);
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
+        $response = is_array($response) ? $response : [];
         $regenPlan = is_array($payload['_sv_regen_plan'] ?? null) ? $payload['_sv_regen_plan'] : [];
 
         $workerPid    = $response['_sv_worker_pid'] ?? ($workerMeta['worker_pid'] ?? null);
@@ -5383,12 +5513,20 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
         $usedNegativeSource = $response['used_negative_source'] ?? ($payload['_sv_negative_source'] ?? ($regenPlan['negative_mode'] ?? null));
 
         $resultMeta = is_array($response['result'] ?? null) ? $response['result'] : [];
+        $timing = sv_extract_job_timestamps($row, $response);
+        $stuckInfo = sv_job_stuck_info($row, $response, SV_JOB_STUCK_MINUTES);
         $outputPath = isset($resultMeta['output_path']) ? sv_safe_path_label((string)$resultMeta['output_path']) : null;
         $jobs[] = [
             'id'                 => (int)$row['id'],
             'status'             => (string)$row['status'],
             'created_at'         => (string)($row['created_at'] ?? ''),
             'updated_at'         => (string)($row['updated_at'] ?? ''),
+            'started_at'         => $timing['started_at'],
+            'finished_at'        => $timing['finished_at'],
+            'age_seconds'        => $timing['age_seconds'],
+            'age_label'          => $timing['age_label'],
+            'stuck'              => $stuckInfo['stuck'],
+            'stuck_reason'       => $stuckInfo['reason'],
             'model'              => $resolvedModel,
             'mode'               => $mode,
             'generation_mode'    => $generationMode,

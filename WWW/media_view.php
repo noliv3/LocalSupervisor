@@ -1367,8 +1367,11 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                 $status = strtolower((string)$activeRescanJob['status']);
                                 $jobStart = (string)($activeRescanJob['started_at'] ?? $activeRescanJob['created_at'] ?? '');
                                 $jobFinish = (string)($activeRescanJob['finished_at'] ?? $activeRescanJob['completed_at'] ?? '');
+                                $jobAge = (string)($activeRescanJob['age_label'] ?? '');
+                                $jobStuck = !empty($activeRescanJob['stuck']);
                                 ?>
-                                <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars($jobStart, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $jobFinish !== '' ? ' → ' . htmlspecialchars($jobFinish, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></em>
+                                <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars($jobStart, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $jobFinish !== '' ? ' → ' . htmlspecialchars($jobFinish, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?><?= $jobAge !== '' ? ' · Age ' . htmlspecialchars($jobAge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></em>
+                                <?php if ($jobStuck): ?><span class="status-badge status-error">stuck</span><?php endif; ?>
                                 <?php if (!empty($activeRescanJob['error'])): ?><div class="job-error inline"><?= htmlspecialchars((string)$activeRescanJob['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
                             <?php else: ?>
                                 <span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>
@@ -1467,6 +1470,11 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                                     <?php if (!empty($job['started_at'])): ?><div class="meta-line"><span>Gestartet</span><strong><?= htmlspecialchars((string)$job['started_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
                                     <?php if (!empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['completed_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
                                     <?php if (!empty($job['finished_at']) && empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['finished_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
+                                    <?php if (!empty($job['age_label'])): ?>
+                                        <div class="meta-line"><span>Age</span><strong><?= htmlspecialchars((string)$job['age_label'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if (!empty($job['stuck'])): ?><span class="status-badge status-error">stuck</span><?php endif; ?></div>
+                                    <?php elseif (!empty($job['stuck'])): ?>
+                                        <div class="meta-line"><span>Age</span><strong>—</strong><span class="status-badge status-error">stuck</span></div>
+                                    <?php endif; ?>
                                     <?php if (!empty($job['run_at'])): ?><div class="meta-line"><span>Scan</span><strong><?= htmlspecialchars((string)$job['run_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars((string)($job['scanner'] ?? 'pixai_sensible'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> · NSFW <?= htmlspecialchars((string)($job['nsfw_score'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
                                     <?php if ($job['tags_written'] !== null): ?><div class="meta-line"><span>Tags</span><strong><?= (int)$job['tags_written'] ?></strong><em class="small">unlocked ersetzt</em></div><?php endif; ?>
                                     <?php if ($job['has_nsfw'] !== null): ?><div class="meta-line"><span>Flag</span><strong><?= (int)$job['has_nsfw'] === 1 ? 'NSFW' : 'SFW' ?></strong><em class="small">Rating <?= htmlspecialchars((string)($job['rating'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
@@ -1854,6 +1862,10 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
             const promptSource = job.used_prompt_source || job.prompt_source || '–';
             const negativeSource = job.used_negative_source || job.negative_mode || '–';
             const usedSeed = job.used_seed || job.seed || '–';
+            const startTs = job.started_at || job.created_at || '–';
+            const finishTs = job.finished_at || '';
+            const ageLabel = job.age_label ? (' · Age ' + job.age_label) : '';
+            const stuckBadge = job.stuck ? '<span class="status-badge status-error">stuck</span>' : '';
             const denoise = (job.decided_denoise !== null && job.decided_denoise !== undefined)
                 ? job.decided_denoise
                 : (job.denoise !== undefined ? job.denoise : '–');
@@ -1867,8 +1879,9 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 <div class="timeline-header">
                     <div class="timeline-title">Job #' + job.id + '</div>
                     <span class="status-badge ' + statusClass(job.status) + '">' + (job.status || 'queued') + '</span>
+                    ' + stuckBadge + '
                 </div>
-                <div class="timeline-meta">' + (job.created_at || '–') + ' • ' + (job.updated_at || '–') + '</div>
+                <div class="timeline-meta">' + (job.created_at || '–') + ' • ' + (job.updated_at || '–') + ' • ' + startTs + (finishTs ? ' → ' + finishTs : '') + ageLabel + '</div>
                 <div class="timeline-body">
                     <div class="meta-line"><span>Mode</span><strong>' + decidedMode + ' (' + (job.mode || 'preview') + ')</strong><em class="small">' + decidedReason + '</em></div>
                     <div class="meta-line"><span>Seed/Denoise</span><strong>' + usedSeed + ' / ' + ((denoise === undefined || denoise === null) ? '–' : denoise) + '</strong></div>
@@ -2031,7 +2044,9 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
             const status = (first.status || 'queued').toLowerCase();
             const startTs = first.started_at || first.created_at || '';
             const finishTs = first.finished_at || first.completed_at || '';
-            jobLine.innerHTML = '<span>Rescan Job</span><strong>' + status + '</strong><em class="small">' + (startTs || '') + (finishTs ? ' → ' + finishTs : '') + '</em>' + (first.error ? '<div class="job-error inline">' + first.error + '</div>' : '');
+            const ageLabel = first.age_label ? (' · Age ' + first.age_label) : '';
+            const stuckBadge = first.stuck ? '<span class="status-badge status-error">stuck</span>' : '';
+            jobLine.innerHTML = '<span>Rescan Job</span><strong>' + status + '</strong><em class="small">' + (startTs || '') + (finishTs ? ' → ' + finishTs : '') + ageLabel + '</em>' + stuckBadge + (first.error ? '<div class="job-error inline">' + first.error + '</div>' : '');
         } else if (jobLine) {
             jobLine.innerHTML = '<span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>';
         }

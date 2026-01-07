@@ -109,6 +109,12 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 - Jobs mit Status `running`, die länger als ~30 Minuten kein Update erhalten, werden mit `job_stuck_timeout` auf `error` gesetzt.
 - Beispiel: `php SCRIPTS/scan_worker_cli.php --path="/data/import" --limit=5` verarbeitet maximal fünf anstehende Scans für den angegebenen Wurzelpfad.
 
+## Job Robustness Contract
+- **Zustandsmaschine**: `queued` → `running` → `done` oder `error` (bzw. `canceled`), mit zusätzlicher Markierung `stuck-marked` (running + Timeout/Worker-Fehler). `started_at` wird genau einmal beim Übergang auf `running` gesetzt; `finished_at` wird bei `done/error/canceled` stets gesetzt und nicht überschrieben. Zeiten liegen in `jobs.forge_response_json`, UI liest sie dort aus.
+- **Stuck-Regel**: Ein `running`-Job gilt als stuck, wenn `started_at` älter als `SV_JOB_STUCK_MINUTES` (~30 min) ist oder ein Worker-PID nicht mehr lebt (nach kurzer Grace-Phase). Stuck-Jobs werden als `error` markiert, erhalten `_sv_stuck` + Reason und erscheinen mit Badge/Age in Listen und Detailansicht.
+- **Atomare Writes (Forge Replace)**: Output wird zuerst in eine Temp-Datei geschrieben, anschließend atomar ersetzt (gleiches Filesystem). Vor dem Replace wird ein Backup erstellt. Bei Fehlern bleibt das Original erhalten oder wird zurückkopiert; Temp/Backup werden bereinigt, Job-Error wird gesetzt.
+- **Parallel-Rescan**: Tag-Replacement läuft transaktional (delete unlocked + insert), `media_tags` bleibt durch PK-Dedupe konsistent. `scan_results` nutzt run_at + id für ein eindeutiges „latest“, auch bei nahezu gleichen Timestamps.
+
 ## CLI- und Web-Operations
 > Hinweis: Alle CLI-Kommandos laufen ausschließlich über `SCRIPTS/`; im `WWW/`-Verzeichnis existieren keine parallelen CLI-Dateien mehr (Legacy-Wrapper wurden entfernt). Deployments sollten sicherstellen, dass nur das bereinigte `WWW/`-Set auf dem Webserver liegt.
 | Befehl/Endpoint | Zweck | Wichtige Parameter |

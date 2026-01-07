@@ -104,6 +104,12 @@
 - Neue Job-Typen müssen ihre Steuerlogik an die Job-API in `operations.php` anbinden.
 - Laufende Jobs, die länger als ~30 Minuten kein Update erhalten, werden automatisch mit `job_stuck_timeout` auf `error` gesetzt (aktuell für Forge/Scan/Rescan).
 
+## Job Robustness Contract
+- **Zustandsmaschine**: `queued` → `running` → `done/error` (oder `canceled`) plus `stuck-marked` als Flag auf Fehlerfällen. `started_at` wird genau einmal beim Übergang auf `running` gesetzt, `finished_at` immer bei `done/error/canceled`; beide Zeitstempel liegen in `jobs.forge_response_json` und werden in UI/Jobs ausgewertet.
+- **Stuck-Regel**: Ein `running`-Job ist stuck, wenn `started_at` älter als `SV_JOB_STUCK_MINUTES` ist oder ein vorhandener Worker-PID nicht mehr lebt (nach kurzer Grace-Phase). Stuck-Jobs werden als `error` markiert und mit `_sv_stuck`/Reason versehen.
+- **Atomare Writes (Replace)**: Forge-Replace läuft als Temp→Backup→Replace-Sequenz. Entweder kompletter Erfolg (Datei ersetzt, DB/Job konsistent) oder sauberer Fail (Original bleibt/restore, Temp/Backup bereinigt, Job-Error gesetzt).
+- **Parallel-Rescan**: Tag-Replacement ist transaktional (delete unlocked + insert). `media_tags` bleibt durch PK-Dedupe konsistent, `scan_results` bestimmt „latest“ eindeutig über run_at + id.
+
 ## Asynchrone Scans
 - Scans laufen ausschließlich als Jobs (`scan_path`) über die Job-Queue und werden von dedizierten CLI-Workern abgearbeitet.
 - Web-Einstiege (Dashboard/Media-Ansichten) dürfen Scans nur einreihen und ggf. einen Worker starten, niemals direkt scannen.
