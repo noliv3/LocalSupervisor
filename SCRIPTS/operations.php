@@ -6739,3 +6739,248 @@ function sv_collect_health_snapshot(PDO $pdo, array $config = [], int $jobLimit 
         'scan_health' => $scanHealth,
     ];
 }
+
+function sv_dashboard_format_value($value, int $maxLen = 160): string
+{
+    if ($value === null) {
+        return '';
+    }
+    if (is_numeric($value)) {
+        return (string)$value;
+    }
+    if (is_bool($value)) {
+        return $value ? 'true' : 'false';
+    }
+
+    return sv_sanitize_error_message((string)$value, $maxLen);
+}
+
+function sv_dashboard_job_row(array $row): array
+{
+    $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
+    $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
+    $timing   = sv_extract_job_timestamps($row, $response);
+    $stuck    = sv_job_stuck_info($row, $response, SV_JOB_STUCK_MINUTES);
+
+    $error = $row['error_message'] ?? ($response['error'] ?? '');
+
+    return [
+        'id'          => (int)$row['id'],
+        'media_id'    => isset($row['media_id']) ? (int)$row['media_id'] : null,
+        'type'        => sv_dashboard_format_value($row['type'] ?? ''),
+        'status'      => sv_dashboard_format_value($row['status'] ?? ''),
+        'started_at'  => $timing['started_at'],
+        'finished_at' => $timing['finished_at'],
+        'age_label'   => $timing['age_label'],
+        'stuck'       => (bool)($stuck['stuck'] ?? false),
+        'stuck_reason'=> sv_dashboard_format_value($stuck['reason'] ?? ''),
+        'error'       => sv_dashboard_format_value($error, 180),
+        'model'       => sv_dashboard_format_value($payload['model'] ?? ($response['model'] ?? ''), 80),
+    ];
+}
+
+function sv_fetch_dashboard_jobs(PDO $pdo, array $filters = [], int $limit = 8): array
+{
+    $limit = max(1, min(50, $limit));
+    $where  = [];
+    $params = [];
+
+    if (!empty($filters['statuses']) && is_array($filters['statuses'])) {
+        $statuses = array_values(array_filter(array_map('strval', $filters['statuses']), static fn ($s) => $s !== ''));
+        if ($statuses !== []) {
+            $placeholders = implode(',', array_fill(0, count($statuses), '?'));
+            $where[] = 'status IN (' . $placeholders . ')';
+            foreach ($statuses as $status) {
+                $params[] = $status;
+            }
+        }
+    } elseif (!empty($filters['status']) && is_string($filters['status'])) {
+        $where[] = 'status = ?';
+        $params[] = trim($filters['status']);
+    }
+
+    if (!empty($filters['types']) && is_array($filters['types'])) {
+        $types = array_values(array_filter(array_map('strval', $filters['types']), static fn ($t) => $t !== ''));
+        if ($types !== []) {
+            $placeholders = implode(',', array_fill(0, count($types), '?'));
+            $where[] = 'type IN (' . $placeholders . ')';
+            foreach ($types as $type) {
+                $params[] = $type;
+            }
+        }
+    }
+
+    $sql = 'SELECT id, media_id, type, status, created_at, updated_at, forge_request_json, forge_response_json, error_message FROM jobs';
+    if ($where !== []) {
+        $sql .= ' WHERE ' . implode(' AND ', $where);
+    }
+    $sql .= ' ORDER BY id DESC LIMIT ' . (int)$limit;
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $jobs = [];
+    foreach ($rows as $row) {
+        $jobs[] = sv_dashboard_job_row($row);
+    }
+
+    if (!empty($filters['stuck_only'])) {
+        $jobs = array_values(array_filter($jobs, static fn ($job) => !empty($job['stuck'])));
+    }
+
+    return $jobs;
+}
+
+function sv_dashboard_event_summary(array $details, int $maxLen = 160): string
+{
+    $details = sv_sanitize_audit_details($details);
+    $allowList = [
+        'job_id',
+        'media_id',
+        'prompt_id',
+        'limit',
+        'offset',
+        'mode',
+        'status',
+        'count',
+        'found',
+        'processed',
+        'skipped',
+        'errors',
+        'worker_pid',
+        'worker_note',
+    ];
+
+    $parts = [];
+    foreach ($allowList as $key) {
+        if (!array_key_exists($key, $details)) {
+            continue;
+        }
+        $value = $details[$key];
+        if (is_array($value)) {
+            $nestedParts = [];
+            foreach ($value as $subKey => $subValue) {
+                if (is_numeric($subValue)) {
+                    $nestedParts[] = $subKey . '=' . (string)$subValue;
+                }
+            }
+            if ($nestedParts !== []) {
+                $parts[] = $key . ': ' . implode(', ', $nestedParts);
+            }
+        } else {
+            $parts[] = $key . ': ' . sv_dashboard_format_value($value, 80);
+        }
+    }
+
+    $summary = implode(' · ', $parts);
+    if ($summary === '') {
+        return '';
+    }
+
+    return sv_dashboard_format_value($summary, $maxLen);
+}
+
+function sv_collect_dashboard_view_model(PDO $pdo, array $config, array $options = []): array
+{
+    $jobLimit    = isset($options['job_limit']) ? (int)$options['job_limit'] : 8;
+    $eventLimit  = isset($options['event_limit']) ? (int)$options['event_limit'] : 8;
+    $healthLimit = isset($options['health_limit']) ? (int)$options['health_limit'] : 6;
+    $knownActions = isset($options['known_actions']) && is_array($options['known_actions'])
+        ? array_values(array_filter(array_map('strval', $options['known_actions']), static fn ($a) => $a !== ''))
+        : [];
+
+    $jobLimit = max(1, min(20, $jobLimit));
+    $eventLimit = max(1, min(30, $eventLimit));
+    $healthLimit = max(1, min(20, $healthLimit));
+
+    $health = sv_collect_health_snapshot($pdo, $config, $healthLimit);
+
+    $jobCounts = [
+        'queued'  => 0,
+        'running' => 0,
+        'done'    => 0,
+        'error'   => 0,
+    ];
+    try {
+        $stmt = $pdo->query("SELECT status, COUNT(*) AS cnt FROM jobs WHERE status IN ('queued','running','done','error') GROUP BY status");
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        foreach ($rows as $row) {
+            $status = (string)($row['status'] ?? '');
+            if ($status !== '' && isset($jobCounts[$status])) {
+                $jobCounts[$status] = (int)$row['cnt'];
+            }
+        }
+    } catch (Throwable $e) {
+        $jobCounts = [
+            'queued'  => 0,
+            'running' => 0,
+            'done'    => 0,
+            'error'   => 0,
+        ];
+    }
+
+    $jobsRunning = sv_fetch_dashboard_jobs($pdo, ['statuses' => ['running']], $jobLimit);
+    $jobsQueued  = sv_fetch_dashboard_jobs($pdo, ['statuses' => ['queued']], $jobLimit);
+    $jobsStuck   = sv_fetch_dashboard_jobs($pdo, ['statuses' => ['running'], 'stuck_only' => true], $jobLimit);
+    $jobsRecent  = sv_fetch_dashboard_jobs($pdo, ['statuses' => ['done', 'error']], $jobLimit);
+
+    $events = [];
+    try {
+        $stmt = $pdo->prepare('SELECT action, details_json, created_at FROM audit_log ORDER BY id DESC LIMIT ?');
+        $stmt->bindValue(1, $eventLimit, PDO::PARAM_INT);
+        $stmt->execute();
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $row) {
+            $details = json_decode((string)($row['details_json'] ?? ''), true) ?: [];
+            $events[] = [
+                'action'     => sv_dashboard_format_value($row['action'] ?? '', 80),
+                'created_at' => sv_dashboard_format_value($row['created_at'] ?? '', 80),
+                'summary'    => sv_dashboard_event_summary($details, 160),
+            ];
+        }
+    } catch (Throwable $e) {
+        $events = [];
+    }
+
+    $lastRuns = [];
+    if ($knownActions !== []) {
+        try {
+            $placeholders = implode(', ', array_fill(0, count($knownActions), '?'));
+            $stmt = $pdo->prepare(
+                "SELECT action, MAX(created_at) AS last_at FROM audit_log WHERE action IN ($placeholders) GROUP BY action"
+            );
+            $stmt->execute($knownActions);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $row) {
+                $actionKey = (string)($row['action'] ?? '');
+                if ($actionKey !== '') {
+                    $lastRuns[$actionKey] = (string)($row['last_at'] ?? '');
+                }
+            }
+        } catch (Throwable $e) {
+            $lastRuns = [];
+        }
+    }
+
+    $forgeOverview = [];
+    try {
+        $forgeOverview = sv_forge_job_overview($pdo);
+    } catch (Throwable $e) {
+        $forgeOverview = [];
+    }
+
+    return [
+        'health' => $health,
+        'job_counts' => $jobCounts,
+        'jobs' => [
+            'running' => $jobsRunning,
+            'queued'  => $jobsQueued,
+            'stuck'   => $jobsStuck,
+            'recent'  => $jobsRecent,
+        ],
+        'events' => $events,
+        'last_runs' => $lastRuns,
+        'forge' => $forgeOverview,
+    ];
+}
