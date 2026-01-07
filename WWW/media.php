@@ -312,15 +312,19 @@ function sv_tab_active(array $current, array $expected): bool
 <html lang="de">
 <head>
     <meta charset="utf-8">
-    <title>SuperVisOr Medien</title>
+    <title>SuperVisOr Medien (Legacy)</title>
     <link rel="stylesheet" href="mediadb.css">
 </head>
 <body class="media-grid-page">
 <header class="page-header">
     <div>
-        <h1>SuperVisOr Medien</h1>
+        <h1>SuperVisOr Medien <span style="font-size: 0.8rem; color:#f59e0b;">(Legacy)</span></h1>
         <div class="header-stats">
             Gesamt: <?= (int)$total ?> Einträge | <?= $showAdult ? 'FSK18 sichtbar' : 'FSK18 ausgeblendet' ?>
+        </div>
+        <div style="margin-top:0.4rem; font-size:0.85rem; color:#cbd5f5;">
+            Hinweis: Dies ist die Legacy-Grid-Ansicht. Die Hauptgalerie liegt in
+            <a href="mediadb.php" style="color:#93c5fd;">mediadb.php</a>.
         </div>
     </div>
     <div class="header-actions">

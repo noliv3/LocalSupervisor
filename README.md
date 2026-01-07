@@ -10,8 +10,15 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## Systemarchitektur
 - **Kernel-Logik (SCRIPTS/)**: Zentrale Funktionen in `scan_core` (Dateierkennung, Hashing, Pfadvalidierung, Logging, DB-Writes), `prompt_parser` (EXIF/PNG/JSON-Kandidaten sammeln, priorisieren, normalisieren), `operations` (einheitliche Einstiegspunkte für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz), `logging` (kanalisiertes Logging mit Rotation), `security` (Internal-Key + IP-Whitelist), `paths` (Pfadkonfiguration und Validierung).
-- **Webschicht (WWW/)**: Dashboard `index.php` (Formulare für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz), Listenansicht `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
+- **Webschicht (WWW/)**: Dashboard `index.php` (Formulare für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistency, Statistiken, CLI-Referenz), Hauptgalerie `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
 - **Persistenz (DB/)**: SQLite/MySQL-Schema aus `DB/schema.sql`, Migrationen in `SCRIPTS/migrations/`, Konfiguration in `CONFIG/config.php`.
+
+## UI Map (Operator-Startpunkte)
+- **Startpunkt (Galerie)**: `WWW/mediadb.php` ist die einzige produktive Galerie-UI (Card-Grid + List-Mode).
+- **Operator-Dashboard**: `WWW/index.php` bündelt Scan/Rescan/Filesync/Prompt-Rebuild, Health Snapshot und Job-Übersicht.
+- **Detailansicht**: `WWW/media_view.php` für Einzelmedium (Forge/Rescan/Tags/Quality).
+- **Legacy-Pfad (nicht mehr verlinkt)**: `WWW/media.php` bleibt nur für Übergang/Alt-Workflows erreichbar und ist im UI als Legacy gekennzeichnet.
+- **Nicht mehr nutzen**: Links/Navigation, die `media.php` als Standardzugang anbieten.
 
 ## Baseline (V1)
 - Fallback-Konfiguration: Der Loader sucht zuerst nach `/mnt/data/config.php` (z. B. Docker-Volume), nutzt danach `CONFIG/config.php` und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück, damit Web/CLI auf frischem Checkout ohne Fatal Error starten.
@@ -46,7 +53,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Detail-Rework**: Die Media-Detailseite bietet nun einen Version-Switch (Original/Forge-Versionen) mit expliziter Asset-Auswahl (Baseline vs. Job-Preview/Backup/Output), einen editierbaren NSFW-Schalter mit Pfad-Move in die passende Root, sowie einen geführten Recreate-Block (Strategie wählen → Parameter prüfen → Preview/Replace-Job starten). Tags können im selben Screen editiert oder gelockt werden; ein Rescan-Button reiht einen `rescan_media`-Job ein, pollt den Status (queued/running/done/error) und zeigt den letzten Scan (Zeit/Scanner/NSFW) inkl. Fehler an. Compare A/B blendet die gewählten Assets nebeneinander ein und hebt Parameterunterschiede hervor, Job-Status wird live per Polling nachgeladen. Forge-Modelle werden aus der Forge-API gelistet (kurzer Cache) und als Dropdown (Auto/Resolved/Fallback) angeboten.
 
   Die Detailansicht blendet zusätzlich Rescan-Job-Zeitpunkte (gestartet/fertig), Tag-Writes und letzte Scan-Fehler ein; die Gallery-Liste (`mediadb.php`) zeigt Scan-Zeit/Scanner plus Fehler-/Missing-Indikator kompakt an.
-- **Media-Grid (Legacy)**: `media.php` bleibt als ältere Grid-Variante (Hover-Aktionen Forge/Details/Missing) erhalten, wird aber nicht mehr als Hauptpfad beworben.
+- **Media-Grid (Legacy)**: `media.php` bleibt als ältere Grid-Variante (Hover-Aktionen Forge/Details/Missing) erhalten, ist im UI als Legacy gekennzeichnet und nicht mehr verlinkt.
 - **Einzel-Rebuild / logisches Löschen**: In `media_view.php` können einzelne Medien erneut durch die Prompt-Pipeline geschickt oder als `missing` markiert werden (keine Dateilöschung, Status-Umschaltung über `operations.php`).
 - **Sicherheitsmodell**: Schreibende Webaktionen verlangen Internal-Key + IP-Whitelist; Pfadvalidierung verhindert Symlinks/Webroot-Bypass; Audit-Log dokumentiert kritische Operationen.
 

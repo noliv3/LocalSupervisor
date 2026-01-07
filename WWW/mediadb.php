@@ -838,7 +838,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
 <?php endif; ?>
 
 <div class="meta" style="text-align:center; padding:0.6rem; color:#9ca3af;">
-    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Card Grid · Legacy-Grid media.php bleibt unverändert
+    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Card Grid · Legacy-Grid ist nur noch per Direktaufruf erreichbar
 </div>
 
 <div class="pager compact">
