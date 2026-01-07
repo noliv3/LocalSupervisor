@@ -143,13 +143,15 @@ $statusFilter     = $_GET['status'] ?? 'all';
 $minRating        = (int)($_GET['min_rating'] ?? 0);
 $incompleteFilter = $_GET['incomplete'] ?? 'none';
 $promptQualityFilter = $_GET['prompt_quality'] ?? 'all';
+$curationFilter   = $_GET['curation'] ?? 'all';
 
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
 $allowedMeta      = ['all', 'with', 'without'];
 $allowedStatus    = ['all', 'active', 'archived', 'deleted', 'missing', 'deleted_logical'];
 $allowedIncomplete= ['none', 'prompt', 'tags', 'meta', 'any'];
-$allowedQuality   = ['all', 'A', 'B', 'C', 'critical'];
+$allowedQuality   = array_merge(['all'], sv_prompt_quality_values());
+$allowedCuration  = array_merge(['all'], sv_quality_status_values());
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
 $hasPromptFilter  = sv_normalize_enum($hasPromptFilter, $allowedPrompt, 'all');
 $hasMetaFilter    = sv_normalize_enum($hasMetaFilter, $allowedMeta, 'all');
@@ -157,7 +159,7 @@ $statusFilter     = sv_normalize_enum($statusFilter, $allowedStatus, 'all');
 $minRating        = sv_clamp_int($minRating, 0, 3, 0);
 $incompleteFilter = sv_normalize_enum($incompleteFilter, $allowedIncomplete, 'none');
 $promptQualityFilter = sv_normalize_enum($promptQualityFilter, $allowedQuality, 'all');
-$promptQualityFilter = $promptQualityFilter === 'critical' ? 'C' : $promptQualityFilter;
+$curationFilter   = sv_normalize_enum($curationFilter, $allowedCuration, 'all');
 
 $where  = [];
 $params = [];
@@ -182,6 +184,15 @@ if ($pathFilter !== '') {
 if ($statusFilter !== 'all') {
     $where[]              = 'm.status = :status';
     $params[':status'] = $statusFilter;
+}
+
+if ($curationFilter !== 'all') {
+    if ($curationFilter === SV_QUALITY_UNKNOWN) {
+        $where[] = '(m.quality_status IS NULL OR m.quality_status = :quality_status)';
+    } else {
+        $where[] = 'm.quality_status = :quality_status';
+    }
+    $params[':quality_status'] = $curationFilter;
 }
 
 if ($minRating > 0) {
@@ -371,6 +382,7 @@ $queryParams = [
     'has_meta'       => $hasMetaFilter,
     'q'              => $pathFilter,
     'status'         => $statusFilter,
+    'curation'       => $curationFilter,
     'min_rating'     => $minRating,
     'incomplete'     => $incompleteFilter,
     'issues'         => $issueFilter ? '1' : '0',
@@ -453,6 +465,8 @@ function sv_tab_active(array $current, array $overrides): bool
 }
 
 $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !== null);
+$qualityStatusLabels = sv_quality_status_labels();
+$promptQualityLabels = sv_prompt_quality_labels();
 ?>
 <!doctype html>
 <html lang="de">
@@ -531,7 +545,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
 </form>
 
 <form id="filters-form" method="get" class="controls">
-    <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','min_rating','incomplete','prompt_quality','view','p'], true)) { continue; } ?>
+    <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','view','p'], true)) { continue; } ?>
         <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
     <?php endforeach; ?>
     <input type="hidden" name="p" value="1">
@@ -579,12 +593,25 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
         </select>
     </label>
     <label>
+        Curation
+        <select name="curation">
+            <option value="all" <?= $curationFilter === 'all' ? 'selected' : '' ?>>alle</option>
+            <?php foreach (sv_quality_status_labels() as $statusValue => $statusLabel): ?>
+                <option value="<?= htmlspecialchars($statusValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $curationFilter === $statusValue ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+    </label>
+    <label>
         Prompt-Qualität
         <select name="prompt_quality">
             <option value="all" <?= $promptQualityFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="A" <?= $promptQualityFilter === 'A' ? 'selected' : '' ?>>A</option>
-            <option value="B" <?= $promptQualityFilter === 'B' ? 'selected' : '' ?>>B</option>
-            <option value="C" <?= $promptQualityFilter === 'C' ? 'selected' : '' ?>>C</option>
+            <?php foreach (sv_prompt_quality_labels() as $qualityValue => $qualityLabel): ?>
+                <option value="<?= htmlspecialchars($qualityValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $promptQualityFilter === $qualityValue ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                </option>
+            <?php endforeach; ?>
         </select>
     </label>
     <button type="submit">Filter anwenden</button>
@@ -619,7 +646,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $rating  = (int)($row['rating'] ?? 0);
             $status  = (string)($row['status'] ?? '');
             $lifecycleStatus = (string)($row['lifecycle_status'] ?? '');
-            $qualityStatus = (string)($row['quality_status'] ?? '');
+            $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
             $qualityBadge = 'pill-muted';
             if ($qualityStatus === SV_QUALITY_OK) {
                 $qualityBadge = 'pill';
@@ -628,6 +655,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             } elseif ($qualityStatus === SV_QUALITY_BLOCKED) {
                 $qualityBadge = 'pill-bad';
             }
+            $qualityLabel = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
             $hash    = (string)($row['hash'] ?? '');
             $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
             $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
@@ -652,6 +680,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
             $qualityClass = $qualityData['quality_class'];
             $qualityScore = (int)$qualityData['score'];
             $qualityIssues = array_slice($qualityData['issues'] ?? [], 0, 2);
+            $promptBadgeClass = $qualityClass === 'A' ? 'pill' : ($qualityClass === 'B' ? 'pill-muted' : 'pill-warn');
 
             $statusVariant = 'clean';
             if ($hasIssues) {
@@ -704,9 +733,8 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                     <?php if ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE): ?>
                         <span class="pill pill-warn" title="Lifecycle"><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php endif; ?>
-                    <?php if ($qualityStatus !== '' && $qualityStatus !== SV_QUALITY_UNKNOWN): ?>
-                        <span class="<?= htmlspecialchars($qualityBadge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Quality-Status"><?= htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <?php endif; ?>
+                    <span class="<?= htmlspecialchars($qualityBadge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Curation (Quality-Status)"><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <span class="<?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Prompt-Qualität (A/B/C)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <?php if ($jobRunning): ?>
                         <span class="pill pill-warn">Job running</span>
                     <?php endif; ?>
@@ -741,7 +769,7 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         <?php if ($duration !== null): ?>
                             <span class="info-chip"><?= htmlspecialchars(number_format($duration, 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span>
                         <?php endif; ?>
-                        <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">PQ <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                         <?php if ($promptModel !== ''): ?><span class="info-chip">Model <?= htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                         <?php if ($hasMeta): ?><span class="info-chip">Meta</span><?php endif; ?>
                         <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
@@ -786,7 +814,8 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <th>Scan</th>
                             <th>Issues</th>
                             <th>Rating</th>
-                            <th>Quality</th>
+                            <th>Curation</th>
+                            <th>Prompt</th>
                             <th>Status</th>
                             <th>Aktion</th>
                         </tr>
@@ -797,7 +826,8 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         $path    = (string)$row['path'];
                         $pathLabel = sv_safe_path_label($path);
                         $type    = (string)$row['type'];
-                        $qualityStatus = (string)($row['quality_status'] ?? '');
+                        $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
+                        $qualityLabel = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
                         $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
                         $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
                         $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
@@ -813,6 +843,12 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                         $status  = (string)($row['status'] ?? '');
                         $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
                         $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
+                        $promptQualityData = $row['quality'] ?? sv_prompt_quality_from_text(
+                            $row['prompt_text'] ?? null,
+                            isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
+                            isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
+                        );
+                        $promptQualityClass = $promptQualityData['quality_class'] ?? 'C';
                         ?>
                         <tr style="border-bottom:1px solid #111827;">
                             <td><?= $id ?></td>
@@ -825,7 +861,8 @@ $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !=
                             <td><?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?><?php if ($lastScanScanner !== ''): ?> (<?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?><?php if ($lastScanError): ?> · <span title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?></td>
                             <td><?= $hasIssues ? 'ja' : '—' ?></td>
                             <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
-                            <td><?= $qualityStatus !== '' ? htmlspecialchars($qualityStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'unknown' ?></td>
+                            <td><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                            <td><?= htmlspecialchars($promptQualityLabels[$promptQualityClass] ?? $promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                             <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?><?= $scanStale ? ' (stale)' : '' ?><?= $jobRunning ? ' (job)' : '' ?></td>
                             <td><a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a></td>
                         </tr>

@@ -38,6 +38,46 @@ const SV_QUALITY_OK               = 'ok';
 const SV_QUALITY_REVIEW           = 'review';
 const SV_QUALITY_BLOCKED          = 'blocked';
 
+function sv_quality_status_values(): array
+{
+    return [SV_QUALITY_UNKNOWN, SV_QUALITY_OK, SV_QUALITY_REVIEW, SV_QUALITY_BLOCKED];
+}
+
+function sv_quality_status_labels(): array
+{
+    return [
+        SV_QUALITY_UNKNOWN => 'Unknown',
+        SV_QUALITY_OK      => 'OK',
+        SV_QUALITY_REVIEW  => 'Review',
+        SV_QUALITY_BLOCKED => 'Blocked',
+    ];
+}
+
+function sv_normalize_quality_status(?string $value, string $default = SV_QUALITY_REVIEW): string
+{
+    $value = is_string($value) ? trim($value) : '';
+    if ($value === '') {
+        return $default;
+    }
+
+    $allowed = sv_quality_status_values();
+    return in_array($value, $allowed, true) ? $value : $default;
+}
+
+function sv_prompt_quality_values(): array
+{
+    return ['A', 'B', 'C'];
+}
+
+function sv_prompt_quality_labels(): array
+{
+    return [
+        'A' => 'A',
+        'B' => 'B',
+        'C' => 'C',
+    ];
+}
+
 function sv_forge_limit_error(string $value, int $maxLen = 240): string
 {
     $value = trim($value);
@@ -524,7 +564,7 @@ function sv_set_media_quality_status(
     string $actor,
     ?callable $logger = null
 ): array {
-    $qualityStatus = trim($qualityStatus) === '' ? SV_QUALITY_REVIEW : $qualityStatus;
+    $qualityStatus = sv_normalize_quality_status($qualityStatus, SV_QUALITY_REVIEW);
     $stmt = $pdo->prepare('SELECT quality_status FROM media WHERE id = ?');
     $stmt->execute([$mediaId]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);

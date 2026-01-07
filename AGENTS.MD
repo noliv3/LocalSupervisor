@@ -62,6 +62,12 @@
 - Forge-Healthcheck läuft vor Web-Start von Forge-Regen; bei fehlender Erreichbarkeit wird der Start blockiert und auditiert.
 - Wenn Forge-Refresh ohne Scanner läuft, wird `media_meta.scan_stale=1` gesetzt und als Badge in Grid/Detail angezeigt; beim nächsten erfolgreichen Scan wird der Flag entfernt.
 
+## Status-System (Curation vs. Prompt-Qualität)
+- **Curation / Quality-Status (operativer Freigabezustand)**: Feld `media.quality_status` (`unknown/ok/review/blocked`) + optional `quality_score`/`quality_notes`; Änderungen werden als `quality_eval` in `media_lifecycle_events` protokolliert.
+- **Prompt-Qualität (A/B/C)**: Abgeleitet über `SCRIPTS/operations.php` (`sv_analyze_prompt_quality`/`sv_prompt_quality_from_text`), bleibt read-only und darf nicht mit Curation vermischt werden.
+- **UI-Orte & Filter**: Galerie (`WWW/mediadb.php`) zeigt getrennte Badges/Spalten „Curation“ und „Prompt“ mit separaten Filtern (`curation=` vs. `prompt_quality=`). Detailansicht (`WWW/media_view.php`) zeigt beide Werte klar getrennt inkl. letzter Änderung (sofern vorhanden).
+- **Internal-Key Pflicht**: Jede Curation-Änderung bleibt an `sv_require_internal_access` gebunden; keine neuen Endpunkte, keine direkte DB-Schreiblogik in der Webschicht.
+
 ## Hashbasierte Library / Dupes
 - Importiert wird nur noch in das Schema `<hh>/<hash>.<ext>` innerhalb der konfigurierten Roots (`sv_resolve_library_path`).
 - Ursprüngliche Pfade landen als `media_meta` (`original_path`, `original_name`), ext-Mismatches als Meta-Eintrag.

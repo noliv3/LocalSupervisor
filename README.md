@@ -16,9 +16,17 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## UI Map (Operator-Startpunkte)
 - **Startpunkt (Galerie)**: `WWW/mediadb.php` ist die einzige produktive Galerie-UI (Card-Grid + List-Mode).
 - **Operator-Dashboard**: `WWW/index.php` bündelt Startzugang, Health Snapshot, Job-Center, Operator-Aktionen (Scan/Rescan) und einen kurzen Ereignisverlauf.
-- **Detailansicht**: `WWW/media_view.php` für Einzelmedium (Forge/Rescan/Tags/Quality).
+- **Detailansicht**: `WWW/media_view.php` für Einzelmedium (Forge/Rescan/Tags/Curation/Prompt-Qualität).
 - **Legacy-Pfad (nicht mehr verlinkt)**: `WWW/media.php` bleibt nur für Übergang/Alt-Workflows erreichbar und ist im UI als Legacy gekennzeichnet.
 - **Nicht mehr nutzen**: Links/Navigation, die `media.php` als Standardzugang anbieten.
+
+## Status-System (Curation vs. Prompt-Qualität)
+- **Curation / Quality-Status (operativer Freigabezustand)**: Feld `media.quality_status` mit erlaubten Werten `unknown`, `ok`, `review`, `blocked` sowie optional `quality_score`/`quality_notes`. Änderungen werden in `media_lifecycle_events` protokolliert.
+- **Prompt-Qualität (A/B/C)**: Abgeleitet aus Prompt/Parametern über `SCRIPTS/operations.php` (keine Persistenz). A/B/C beschreibt die Textqualität, nicht die Freigabe.
+- **UI-Orte**:
+  - Galerie (`WWW/mediadb.php`): getrennte Badges/Spalten „Curation“ und „Prompt“. Separate Filter: `curation=<unknown|ok|review|blocked>` und `prompt_quality=<A|B|C>`.
+  - Detail (`WWW/media_view.php`): beide Werte klar getrennt angezeigt; Curation ist editierbar (Curation-Formular), Prompt-Qualität ist read-only. Letzte Änderung, sofern vorhanden, wird angezeigt.
+- **Internal-Key**: Jede Änderung an Curation läuft ausschließlich über bestehende Internal-Key-geschützte POST-Flows (kein neuer Endpoint).
 
 ## Baseline (V1)
 - Fallback-Konfiguration: Der Loader sucht zuerst nach `/mnt/data/config.php` (z. B. Docker-Volume), nutzt danach `CONFIG/config.php` und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück, damit Web/CLI auf frischem Checkout ohne Fatal Error starten.
@@ -73,7 +81,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | Endpoint | Zweck | Internal-Key |
 | --- | --- | --- |
 | `WWW/index.php` (Action-POSTs) | Scan/Rescan/Job-Recovery (Requeue/Cancel) | erforderlich |
-| `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Quality, Rescan-Job | erforderlich |
+| `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Curation, Rescan-Job | erforderlich |
 | `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status für Detailansicht | erforderlich |
 | `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status für Detailansicht | erforderlich |
 | `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
@@ -216,7 +224,7 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 ## Bekannte Einschränkungen / Offene Baustellen
 - Prompt-Historie: Prompts werden versioniert und pro Medium als Timeline angezeigt (`prompt_history`). Jede neue Persistierung (Scan/Rescan/Forge/Manual) legt einen Versionsdatensatz mit Rohtext an, ein einfacher Diff-Vergleich steht in der Detailansicht bereit.
 - Snapshot-Rebuild: Prompt-Rebuild kann auf gespeicherte `media_meta`-Snapshots (`meta_key=prompt_raw`) zurückgreifen, wenn die Quelldatei fehlt; fällt sonst auf Originaldatei zurück.
-- Delete-/Quality-Flows: Neue Lifecycle-/Quality-Felder (`media.lifecycle_status`, `media.quality_status` etc.) plus Event-Log (`media_lifecycle_events`). UI bietet „pending_delete“-Markierung und Quality-Flags, alles auditierbar ohne stilles Löschen. Quality-Status (`unknown/ok/review/blocked` + Score/Notes) ist klar von der Prompt-Qualität (A/B/C) getrennt und wird im UI als eigener Badge/Hinweis angezeigt.
+- Delete-/Curation-Flows: Neue Lifecycle-/Curation-Felder (`media.lifecycle_status`, `media.quality_status` etc.) plus Event-Log (`media_lifecycle_events`). UI bietet „pending_delete“-Markierung und Curation-Flags, alles auditierbar ohne stilles Löschen. Quality-Status (`unknown/ok/review/blocked` + Score/Notes) ist klar von der Prompt-Qualität (A/B/C) getrennt und wird im UI als eigener Badge/Hinweis angezeigt.
 - UI-Modernisierung teilweise umgesetzt: Die Media-Detailansicht nutzt bereits das neue Workbench-Layout; Dashboard und Listenansicht bleiben funktional, aber ohne moderne UX/JS-Verbesserungen.
 
 ## V2-Design (Kurzspezifikation)
@@ -224,13 +232,13 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 - Prompt-Historie-Writes laufen transaktional mit begrenzten Retries; Unique-Konflikte werden auditiert und führen zu einem harten Fehler statt stiller Duplikate.
 - **Prompt-Rohdaten**: `prompt_raw` wird auf 20kB begrenzt; Trunkierungen werden auditiert, Versionierung erfolgt transaktional.
 - **Snapshot-Rebuild**: `prompts_rebuild` nutzt bevorzugt gespeicherte `media_meta.prompt_raw`, fallback auf Quelldatei. Ohne Datei und Snapshot bleibt der Eintrag unverändert.
-- **Lifecycle/Quality**: Erweiterte Felder auf `media` für `lifecycle_status`, `quality_status`, `quality_score/-notes`, `deleted_at` sowie Event-Log `media_lifecycle_events` (Statuswechsel, Delete-Requests, Quality-Evals). Kein automatisches Löschen; Statusänderungen werden protokolliert.
-- **UI/Compare**: Detailansicht zeigt Prompt-Historie mit Rohdaten, einfachem Diff und manueller Auswahl von A/B-Versionen. Quality- und Delete-Formulare nutzen weiterhin Internal-Key/IP-Whitelist.
+- **Lifecycle/Curation**: Erweiterte Felder auf `media` für `lifecycle_status`, `quality_status`, `quality_score/-notes`, `deleted_at` sowie Event-Log `media_lifecycle_events` (Statuswechsel, Delete-Requests, Quality-Evals). Kein automatisches Löschen; Statusänderungen werden protokolliert.
+- **UI/Compare**: Detailansicht zeigt Prompt-Historie mit Rohdaten, einfachem Diff und manueller Auswahl von A/B-Versionen. Curation- und Delete-Formulare nutzen weiterhin Internal-Key/IP-Whitelist.
 - **Security**: Neue Aktionen laufen über bestehende Internal-Key-Checks; keine zusätzlichen Web-Endpunkte, Audit via `media_lifecycle_events` + bestehendes Audit-Log.
 - **Versionierung geschützt**: `prompt_history` besitzt einen Unique-Index `(media_id, version)` (Migration `20260720_001_prompt_history_unique`), History-Writes laufen transaktional mit Längenlimit auf `prompt_raw`.
 
 ## Migrationen / Setup (V2)
-- Neue Migration `20260701_001_prompt_history_and_lifecycle.php` anlegen lassen (`php SCRIPTS/migrate.php`). Sie ergänzt Lifecycle-/Quality-Felder, Prompt-Historie und Lifecycle-Event-Log.
+- Neue Migration `20260701_001_prompt_history_and_lifecycle.php` anlegen lassen (`php SCRIPTS/migrate.php`). Sie ergänzt Lifecycle-/Curation-Felder, Prompt-Historie und Lifecycle-Event-Log.
 - `DB/schema.sql` enthält die neuen Tabellen/Indizes; Deployment nutzt wie gehabt manuelle Migrationen (kein Auto-DDL).
 - `php SCRIPTS/db_status.php` prüft Treiber/DSN, vergleicht das erwartete Schema (Kerntabellen/-spalten) und listet offene Migrationen. Non-zero Exit signalisiert fehlende Spalten/Tabellen oder nicht eingetragene Migrationen.
 - `schema_migrations` wird ausschließlich durch `SCRIPTS/migrate.php` gepflegt; einzelne Migrationen schreiben nicht selbst in diese Tabelle, Idempotenz bleibt über IF-NOT-EXISTS-DDL erhalten.
