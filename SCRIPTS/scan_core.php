@@ -8,6 +8,60 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/prompt_parser.php';
+require_once __DIR__ . '/security.php';
+
+function sv_scanner_log_event(?array $pathsCfg, string $event, array $payload): void
+{
+    $config = ['paths' => $pathsCfg ?? []];
+    $payload['event'] = $event;
+    if (!isset($payload['ts'])) {
+        $payload['ts'] = date('c');
+    }
+
+    sv_write_jsonl_log($config, 'scanner_ingest.jsonl', $payload, 30);
+}
+
+function sv_detect_scanner_response_type(array $data): string
+{
+    if (isset($data['modules']) && is_array($data['modules'])) {
+        return 'A';
+    }
+
+    foreach ($data as $key => $value) {
+        if (is_string($key) && strpos($key, 'modules.') === 0) {
+            return 'B';
+        }
+    }
+
+    foreach (['tags', 'danbooru_tags', 'hentai', 'porn', 'sexy', 'neutral', 'drawings'] as $key) {
+        if (array_key_exists($key, $data)) {
+            return 'C';
+        }
+    }
+
+    return 'unknown';
+}
+
+function sv_scanner_persist_log(
+    ?array $pathsCfg,
+    array $logContext,
+    int $tagsWritten,
+    ?float $nsfwScore,
+    ?string $runAt,
+    bool $errorSaved,
+    bool $lockedTagPolicyApplied,
+    bool $unlockedReplaced
+): void {
+    sv_scanner_log_event($pathsCfg, 'scanner_persist', [
+        'media_id'                 => $logContext['media_id'] ?? null,
+        'tags_written'             => $tagsWritten,
+        'nsfw_score_saved'         => $nsfwScore,
+        'run_at_saved'             => $runAt,
+        'error_saved'              => $errorSaved,
+        'locked_tag_policy_applied'=> $lockedTagPolicyApplied,
+        'unlocked_replaced'        => $unlockedReplaced,
+    ]);
+}
 
 function sv_record_prompt_history(
     PDO $pdo,
@@ -373,16 +427,24 @@ function sv_get_image_size(string $file): array
  *   }
  * }
  */
-function sv_interpret_scanner_response(array $data, ?callable $logger = null): array
+function sv_interpret_scanner_response(
+    array $data,
+    ?callable $logger = null,
+    array $logContext = [],
+    ?array $pathsCfg = null
+): array
 {
+    $responseTypeDetected = sv_detect_scanner_response_type($data);
     $data = sv_expand_scanner_modules($data, $logger);
     $hits = [];
+    $tagSourceHits = [];
     $nsfwPaths = [
         ['modules', 'nsfw_scanner'],
         ['modules', 'nsfw', 'scanner'],
         ['modules', 'nsfw'],
     ];
     $nsfw     = sv_get_any($data, $nsfwPaths);
+    $nsfwScoreRaw = null;
     if (is_array($nsfw)) {
         $hits[] = 'nsfw_scanner';
     } else {
@@ -397,12 +459,25 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         ['modules', 'deepdanbooru_tags'],
         ['modules', 'deepdanbooru', 'tags'],
     ];
+    if ($responseTypeDetected === 'C') {
+        $tagSources[] = ['tags'];
+        $tagSources[] = ['danbooru_tags'];
+    }
+    $tagCountIn = 0;
     foreach ($tagSources as $path) {
         $candidate = sv_get_any($data, [$path]);
+        $sourceLabel = is_array($path) ? implode('.', $path) : (string)$path;
+        if ($responseTypeDetected === 'C' && is_array($path) && count($path) === 1 && in_array($path[0], ['tags', 'danbooru_tags'], true)) {
+            $sourceLabel = 'top.' . $path[0];
+        }
         if ($candidate !== null) {
-            $hits[] = is_array($path) ? implode('.', $path) : (string)$path;
+            $tagSourceHits[] = $sourceLabel;
+            $hits[] = $sourceLabel;
         }
         $normalized = sv_normalize_tag_payload($candidate);
+        if (is_array($normalized)) {
+            $tagCountIn += count($normalized);
+        }
         if ($normalized !== []) {
             $tagCandidates[] = $normalized;
         }
@@ -412,9 +487,11 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
     if ($nsfw !== null) {
         if (is_numeric($nsfw)) {
             $nsfwScore = (float)$nsfw;
+            $nsfwScoreRaw = $nsfwScore;
         } elseif (is_array($nsfw)) {
             if (isset($nsfw['nsfw_score']) && is_numeric($nsfw['nsfw_score'])) {
                 $nsfwScore = (float)$nsfw['nsfw_score'];
+                $nsfwScoreRaw = $nsfwScore;
             }
             if ($nsfwScore === null && isset($nsfw['classes']) && is_array($nsfw['classes'])) {
                 $classMax = null;
@@ -440,12 +517,26 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
             }
         }
     }
+    if ($nsfwScore === null && $responseTypeDetected === 'C') {
+        foreach (['hentai', 'porn', 'sexy'] as $k) {
+            if (isset($data[$k]) && is_numeric($data[$k])) {
+                $nsfwScore = $nsfwScore === null
+                    ? (float)$data[$k]
+                    : max($nsfwScore, (float)$data[$k]);
+            }
+        }
+    }
 
     $allDdbLabels = [];
     foreach ($tagCandidates as $tagMod) {
         foreach ($tagMod as $t) {
             if (is_array($t) && isset($t['label']) && is_string($t['label'])) {
                 $allDdbLabels[] = $t['label'];
+            } elseif (is_string($t)) {
+                $label = trim($t);
+                if ($label !== '') {
+                    $allDdbLabels[] = $label;
+                }
             }
         }
     }
@@ -460,7 +551,8 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
 
     // Tags aus Tagging + DeepDanbooru bündeln
     $tagSet = [];
-    $addTag = function ($t) use (&$tagSet): void {
+    $tagCountNormalized = 0;
+    $addTag = function ($t) use (&$tagSet, &$tagCountNormalized): void {
         if ($t === null) {
             return;
         }
@@ -494,6 +586,7 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         if ($confidence <= 0.0) {
             return;
         }
+        $tagCountNormalized++;
         if (!isset($tagSet[$label]) || $tagSet[$label]['confidence'] < $confidence) {
             $tagSet[$label] = [
                 'name'       => $label,
@@ -510,6 +603,15 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
     }
 
     $tags = array_values($tagSet);
+    $tagCountDeduped = count($tags);
+    $emptyReason = null;
+    if ($tagCountDeduped === 0) {
+        if ($tagSourceHits === []) {
+            $emptyReason = 'no_sources_matched';
+        } else {
+            $emptyReason = 'all_invalid';
+        }
+    }
 
     if ($logger && $hits !== []) {
         $logger('Scanner Parser-Pfade: ' . implode(', ', array_unique($hits)));
@@ -545,6 +647,22 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         $hasNsfw = 0;
     }
 
+    sv_scanner_log_event($pathsCfg, 'scanner_parse', array_filter([
+        'media_id'             => $logContext['media_id'] ?? null,
+        'response_type_used'   => $responseTypeDetected,
+        'tag_sources_used'     => $tagSourceHits ? array_values(array_unique($tagSourceHits)) : [],
+        'tag_count_in'         => $tagCountIn,
+        'tag_count_normalized' => $tagCountNormalized,
+        'tag_count_deduped'    => $tagCountDeduped,
+        'nsfw_score_raw'       => $nsfwScoreRaw,
+        'nsfw_score_computed'  => $nsfwScore,
+        'rating_detected'      => $rating,
+        'has_nsfw'             => $hasNsfw,
+        'empty_reason'         => $emptyReason,
+    ], static function ($value) {
+        return $value !== null;
+    }));
+
     return [
         'nsfw_score' => $nsfwScore,
         'tags'       => $tags,
@@ -554,6 +672,18 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         'rating'     => $rating,
         'has_nsfw'   => $hasNsfw,
         'raw'        => $data,
+        'debug'      => [
+            'response_type'       => $responseTypeDetected,
+            'tag_sources_used'    => $tagSourceHits ? array_values(array_unique($tagSourceHits)) : [],
+            'tag_count_in'        => $tagCountIn,
+            'tag_count_normalized'=> $tagCountNormalized,
+            'tag_count_deduped'   => $tagCountDeduped,
+            'nsfw_score_raw'      => $nsfwScoreRaw,
+            'nsfw_score_computed' => $nsfwScore,
+            'rating_detected'     => $rating,
+            'has_nsfw'            => $hasNsfw,
+            'empty_reason'        => $emptyReason,
+        ],
     ];
 }
 
@@ -562,7 +692,13 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
  * - Feldname: "image"
  * - Header:   Authorization: <TOKEN>
  */
-function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $logger = null): ?array
+function sv_scan_with_local_scanner(
+    string $file,
+    array $scannerCfg,
+    ?callable $logger = null,
+    array $logContext = [],
+    ?array $pathsCfg = null
+): ?array
 {
     $baseUrl = (string)($scannerCfg['base_url'] ?? '');
     $token   = (string)($scannerCfg['token']     ?? '');
@@ -625,22 +761,64 @@ function sv_scan_with_local_scanner(string $file, array $scannerCfg, ?callable $
     $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
 
+    $data = json_decode($resp, true);
+    $responseType = is_array($data) ? sv_detect_scanner_response_type($data) : 'unknown';
+    $responseKeys = is_array($data) ? array_keys($data) : [];
+    if (count($responseKeys) > 50) {
+        $responseKeys = array_slice($responseKeys, 0, 50);
+    }
+    sv_scanner_log_event($pathsCfg, 'scanner_ingest', [
+        'media_id'                 => $logContext['media_id'] ?? null,
+        'operation'                => $logContext['operation'] ?? null,
+        'file_basename'            => $logContext['file_basename'] ?? basename($file),
+        'http_status'              => $status,
+        'response_bytes'           => strlen($resp),
+        'response_keys_top'        => $responseKeys,
+        'response_type_detected'   => $responseType,
+        'response_snippet_sanitized' => sv_sanitize_scanner_log_snippet($resp, 4096),
+    ]);
+
     if ($status < 200 || $status >= 300) {
         if ($logger) {
             $logger("Scanner HTTP-Status {$status} für Datei {$file}");
         }
+        sv_scanner_log_event($pathsCfg, 'scanner_parse', [
+            'media_id'           => $logContext['media_id'] ?? null,
+            'response_type_used' => $responseType,
+            'tag_sources_used'   => [],
+            'tag_count_in'       => 0,
+            'tag_count_normalized' => 0,
+            'tag_count_deduped'  => 0,
+            'nsfw_score_raw'     => null,
+            'nsfw_score_computed'=> null,
+            'rating_detected'    => null,
+            'has_nsfw'           => null,
+            'empty_reason'       => 'parse_error',
+        ]);
         return null;
     }
 
-    $data = json_decode($resp, true);
     if (!is_array($data)) {
         if ($logger) {
             $logger("Scanner lieferte ungültiges JSON für {$file}");
         }
+        sv_scanner_log_event($pathsCfg, 'scanner_parse', [
+            'media_id'           => $logContext['media_id'] ?? null,
+            'response_type_used' => 'unknown',
+            'tag_sources_used'   => [],
+            'tag_count_in'       => 0,
+            'tag_count_normalized' => 0,
+            'tag_count_deduped'  => 0,
+            'nsfw_score_raw'     => null,
+            'nsfw_score_computed'=> null,
+            'rating_detected'    => null,
+            'has_nsfw'           => null,
+            'empty_reason'       => 'parse_error',
+        ]);
         return null;
     }
 
-    return sv_interpret_scanner_response($data, $logger);
+    return sv_interpret_scanner_response($data, $logger, $logContext, $pathsCfg);
 }
 
 function sv_store_tags(PDO $pdo, int $mediaId, array $tags): int
@@ -1296,7 +1474,12 @@ function sv_import_file(
         $height = $h;
     }
 
-    $scanData  = sv_scan_with_local_scanner($file, $scannerCfg, $logger);
+    $logContext = [
+        'operation'     => 'import',
+        'media_id'      => null,
+        'file_basename' => $originalName,
+    ];
+    $scanData  = sv_scan_with_local_scanner($file, $scannerCfg, $logger, $logContext, $pathsCfg);
     $nsfwScore = null;
     $hasNsfw   = 0;
     $rating    = 0;
@@ -1450,6 +1633,7 @@ function sv_import_file(
         ]);
 
         $mediaId = (int)$pdo->lastInsertId();
+        $logContext['media_id'] = $mediaId;
 
         if ($scanData !== null) {
             $raw = is_array($scanData['raw'] ?? null) ? $scanData['raw'] : [];
@@ -1469,6 +1653,27 @@ function sv_import_file(
                     'has_nsfw'     => $hasNsfw,
                     'rating'       => $rating,
                 ]
+            );
+            sv_scanner_persist_log(
+                $pathsCfg,
+                $logContext,
+                $writtenTags,
+                $nsfwScore,
+                $runAt,
+                false,
+                false,
+                false
+            );
+        } else {
+            sv_scanner_persist_log(
+                $pathsCfg,
+                $logContext,
+                0,
+                null,
+                null,
+                true,
+                false,
+                false
             );
         }
 
@@ -1666,6 +1871,11 @@ function sv_rescan_media(
     ];
 
     $fullPath = str_replace('\\', '/', $path);
+    $logContext = [
+        'operation'     => 'rescan',
+        'media_id'      => $id,
+        'file_basename' => basename($fullPath),
+    ];
     if (!is_file($fullPath)) {
         if ($logger) {
             $logger("Media ID {$id}: Datei nicht gefunden: {$fullPath}");
@@ -1694,11 +1904,21 @@ function sv_rescan_media(
             ],
             $resultMeta['error']
         );
+        sv_scanner_persist_log(
+            $pathsCfg,
+            $logContext,
+            0,
+            null,
+            $runAt,
+            true,
+            true,
+            false
+        );
 
         return false;
     }
 
-    $scanData  = sv_scan_with_local_scanner($fullPath, $scannerCfg, $logger);
+    $scanData  = sv_scan_with_local_scanner($fullPath, $scannerCfg, $logger, $logContext, $pathsCfg);
     if ($scanData === null) {
         if ($logger) {
             $logger("Media ID {$id}: Scanner fehlgeschlagen.");
@@ -1720,6 +1940,16 @@ function sv_rescan_media(
                 'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
             ],
             $resultMeta['error']
+        );
+        sv_scanner_persist_log(
+            $pathsCfg,
+            $logContext,
+            0,
+            null,
+            $runAt,
+            true,
+            true,
+            false
         );
         return false;
     }
@@ -1829,6 +2059,16 @@ function sv_rescan_media(
                 'rating'       => $rating,
             ]
         );
+        sv_scanner_persist_log(
+            $pathsCfg,
+            $logContext,
+            $writtenTags,
+            $nsfwScore,
+            $runAt,
+            false,
+            true,
+            true
+        );
 
         $stmt = $pdo->prepare("
             UPDATE media
@@ -1865,6 +2105,16 @@ function sv_rescan_media(
                 'rating'       => $rating,
             ],
             $resultMeta['error']
+        );
+        sv_scanner_persist_log(
+            $pathsCfg,
+            $logContext,
+            $resultMeta['tags_written'] ?? 0,
+            $nsfwScore,
+            $runAt,
+            true,
+            true,
+            false
         );
         return false;
     }

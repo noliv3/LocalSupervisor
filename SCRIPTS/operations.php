@@ -4263,7 +4263,13 @@ function sv_refresh_media_after_regen(
         'prompt_created' => false,
     ];
 
-    $scanData  = sv_scan_with_local_scanner($path, $scannerCfg, $logger);
+    $pathsCfg = $config['paths'] ?? [];
+    $logContext = [
+        'operation'     => 'regen',
+        'media_id'      => $mediaId,
+        'file_basename' => basename($path),
+    ];
+    $scanData  = sv_scan_with_local_scanner($path, $scannerCfg, $logger, $logContext, $pathsCfg);
     $hasNsfw   = (int)($config['default_nsfw'] ?? 0);
     $rating    = 0;
     $scanTags  = [];
@@ -4301,6 +4307,16 @@ function sv_refresh_media_after_regen(
                 'has_nsfw'     => $hasNsfw,
                 'rating'       => $rating,
             ]
+        );
+        sv_scanner_persist_log(
+            $pathsCfg,
+            $logContext,
+            $writtenTags,
+            $nsfwScore,
+            $runAt,
+            false,
+            true,
+            true
         );
 
         $stmt = $pdo->prepare('UPDATE media SET has_nsfw = ?, rating = ?, status = "active" WHERE id = ?');

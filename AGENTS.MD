@@ -149,7 +149,8 @@
 
 ## Laufzeit-Notizen (aktuell)
 - Scanner-HTTP liegt zentral in `scan_core.php` und akzeptiert `scanner.token` oder Legacy `scanner.api_key`/`scanner.api_key_header`; Dateien gehen als `image` und `file` raus.
-- Scanner-Responses liefern bevorzugt ein verschachteltes `modules`-Objekt (`tagging`, `deepdanbooru_tags`, `nsfw_scanner`); gepunktete Legacy-Keys (`modules.tagging` etc.) werden beim Parsen in `modules` gespiegelt.
+- Scanner-Responses unterstützen Typ A (verschachteltes `modules`-Objekt), Typ B (gepunktete Legacy-Keys wie `modules.tagging`) sowie Typ C (flache `tags`/`danbooru_tags` + NSFW-Klassen `hentai`/`porn`/`sexy`); `rating:*` in String-Listen wird erkannt.
+- Scanner-Logs landen als JSONL in `LOGS/scanner_ingest.jsonl` (sanitisiert/gekürzt) mit ingest/parse/persist-Events.
 - Parser liest verschachtelte oder gepunktete Modul-Keys; NSFW bleibt `null` wenn kein Modul greift.
 - `media_tags.locked` schützt manuelle Tags: Rescan/Regeneration löschen nur Einträge mit `locked=0`.
 - Video-Unterstützung: `thumb.php` erzeugt JPEG-Thumbs via ffmpeg, `media_stream.php` liefert HTTP-Range, UI zeigt Video-Thumb+Player.

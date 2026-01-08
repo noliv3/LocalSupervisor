@@ -217,6 +217,20 @@ function sv_sanitize_error_message(string $message, int $maxLen = 200): string
     return $message;
 }
 
+function sv_sanitize_scanner_log_snippet(string $message, int $maxLen = 4096): string
+{
+    $message = trim($message);
+    if ($message === '') {
+        return '';
+    }
+
+    $message = preg_replace('~data:[^;]+;base64,[A-Za-z0-9+/=]+~', '<base64>', $message);
+    $message = preg_replace('/[A-Za-z0-9+\/=]{120,}/', '<base64>', $message);
+    $message = preg_replace('/\s+/', ' ', $message);
+
+    return sv_sanitize_error_message($message, $maxLen);
+}
+
 function sv_sanitize_audit_details($value)
 {
     if (is_string($value)) {
