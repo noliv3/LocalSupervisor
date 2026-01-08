@@ -102,6 +102,7 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
     - Scanner-Auth unterstützt entweder `scanner.token` (Header `Authorization: <token>`) oder das Legacy-Paar `scanner.api_key` + `scanner.api_key_header`. Die Datei wird als `image` und `file` gesendet, `autorefresh=1` bleibt erhalten.
 - **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen.
+- **Scanner-Response Contract**: Der Scanner liefert ein verschachteltes `modules`-Objekt mit `tagging.tags`, `deepdanbooru_tags.tags` und `nsfw_scanner` (bevorzugt `nsfw_score`, sonst `classes`-Max). Legacy-Responses mit gepunkteten Keys (`modules.tagging`, `modules.nsfw_scanner`) werden beim Parsen in `modules` gespiegelt; Tags akzeptieren Strings oder Objekte (`label`/`name`, `score`/`confidence`/`probability`).
 
 ### Setup & Assets (VA/VIDAX)
 - **State-Verzeichnis**: Standard `~/.va`, anpassbar über `VA_STATE_DIR`; `va install` legt u. a. `state/comfyui/workflows`, `state/comfyui/models` und `state/config` an.
