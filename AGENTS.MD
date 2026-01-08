@@ -30,6 +30,8 @@
 - Pfadvalidierung nicht umgehen: keine Symlinks nutzen, keine Direktzugriffe außerhalb der erlaubten Media-Roots.
 - Forge-Preview/Backup/Output werden in `thumb.php`/`media_stream.php` ausschließlich über `job_id` + `asset` (preview|backup|output) aufgelöst; Pfadfreigabe nur über Preview-/Backup-Roots, NSFW-Check bleibt an `media_id` gekoppelt.
 - Fehler-/Audit-Ausgaben und UI dürfen keine Secrets, Tokens, DSNs oder absoluten Pfade enthalten; Antworten sind kurz und einheitlich (`Forbidden.` bzw. `Server error.`).
+- Public-Modus ist read-only: `mediadb.php`/`media_view.php` dürfen per GET ohne Internal-Key rendern, POST/AJAX bleiben gesperrt.
+- `media_stream.php`/`thumb.php` dürfen reguläre Medien (`id=`) read-only ausliefern; Job-Assets (`job_id`/`asset`) bleiben Internal-Key-geschützt.
 
 ### Internal-Key Required Matrix (Web)
 | Endpoint | Zweck | Internal-Key |
@@ -41,8 +43,8 @@
 | `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
 | `WWW/media.php?ajax=forge_jobs` | Forge-Job-Status (Legacy-Grid) | erforderlich |
 | `WWW/media.php?ajax=scan_jobs` | Scan-Job-Status (Legacy-Grid) | erforderlich |
-| `WWW/media_stream.php` | Stream/Download | erforderlich |
-| `WWW/thumb.php` | Thumbnails/Assets | erforderlich |
+| `WWW/media_stream.php` (`job_id`/`asset`) | Stream/Download | erforderlich |
+| `WWW/thumb.php` (`job_id`/`asset`) | Thumbnails/Assets | erforderlich |
 
 ## Dokumentationspflichten
 - Jede Codeänderung im PR-Output knapp dokumentieren (Kernstellen, keine Diff-Wände).
@@ -140,6 +142,18 @@
 - **Detailansicht**: `WWW/media_view.php` für Einzelmedium (Forge/Rescan/Tags/Quality).
 - **Legacy-Pfad (nicht verlinkt)**: `WWW/media.php` bleibt nur für Übergang/Alt-Workflows erreichbar und ist im UI als Legacy gekennzeichnet.
 - **Nicht mehr nutzen**: Links/Navigation, die `media.php` als Standardzugang anbieten.
+
+## Public vs Internal Mode & Featureview
+- **Routing**: Nicht-whitelisted Clients werden von `WWW/index.php` direkt zur Galerie (`WWW/mediadb.php`) geleitet.
+- **Public UI**: Galerie/Detailansicht sind read-only; keine Operator-Panels, kein Rescan/Forge/Tagging sichtbar.
+- **Featureview**: `mediadb.php` zeigt die 10 Medien mit dem niedrigsten Aktivitäts-Score über der normalen Liste.
+- **Aktivitäts-Score**: `score = clicks - floor((now - last_click_at_or_created_at) / 86400)` (Decay in Tagen, nur interne Detail-Klicks schreiben).
+- **media_meta Keys**:
+  - `activity.clicks` (int)
+  - `activity.last_click_at` (unix ts)
+  - `vote.state` (-1/0/+1)
+  - `curation.checked` (0/1)
+  - `curation.checked_at` (unix ts, optional)
 
 ## Dashboard Contract (Operator-Control-Center)
 - **Zweck**: `WWW/index.php` ist der klare Operator-Startpunkt (kein Debug-/Statistik-View).

@@ -77,6 +77,25 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - IP-Whitelist bleibt bestehen; bei nicht erlaubter Quell-IP schlägt der Zugriff weiterhin fehl.
 - Web-Endpunkte liefern bei fehlendem/ungültigem Key stets dieselbe kurze Antwort (`Forbidden.`), ohne Stacktraces oder Pfade. Absolute Pfade und Secrets werden in UI/JSON/Audit-Logs redigiert.
 
+## Public vs Internal Mode
+- **Public (nicht whitelisted)**: `WWW/index.php` leitet direkt auf `WWW/mediadb.php` weiter; Galerie und Detailansicht sind read-only, Operator-Panels/Schreibaktionen werden nicht gerendert.
+- **Internal (whitelisted + Internal-Key)**: Dashboard bleibt Startpunkt, Operator-Aktionen sind sichtbar und nutzbar.
+- **Read-only Streams**: `media_stream.php` und `thumb.php` erlauben GET-Auslieferung für reguläre Medien (`id=`) auch ohne Internal-Key, Job-Assets (`job_id`/`asset`) bleiben Internal-only.
+- **POST/AJAX**: alle schreibenden Aktionen bleiben Internal-Key + IP-Whitelist-gebunden.
+
+## Featureview & Activity-Score
+- `mediadb.php` zeigt einen Featureview-Block mit den 10 Medien der niedrigsten Aktivität oberhalb der normalen Galerie.
+- Aktivität steigt nur bei internen Detailaufrufen (`media_view.php` GET mit Internal-Key).
+- Score-Formel (Decay in Tagen):  
+  `score = clicks - floor((now - last_click_at_or_created_at) / 86400)`
+
+### Media-Meta-Keys (media_meta)
+- `activity.clicks` (int)
+- `activity.last_click_at` (unix ts)
+- `vote.state` (-1/0/+1)
+- `curation.checked` (0/1)
+- `curation.checked_at` (unix ts, optional)
+
 ### Internal-Key Required Matrix (Web)
 | Endpoint | Zweck | Internal-Key |
 | --- | --- | --- |
@@ -87,8 +106,8 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 | `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
 | `WWW/media.php?ajax=forge_jobs` | Forge-Job-Status (Legacy-Grid) | erforderlich |
 | `WWW/media.php?ajax=scan_jobs` | Scan-Job-Status (Legacy-Grid) | erforderlich |
-| `WWW/media_stream.php` | Stream/Download von Medien/Assets | erforderlich |
-| `WWW/thumb.php` | Thumbnail-Ausgabe inkl. Forge-Assets | erforderlich |
+| `WWW/media_stream.php` (`job_id`/`asset`) | Stream/Download von Job-Assets | erforderlich |
+| `WWW/thumb.php` (`job_id`/`asset`) | Thumbnail-Ausgabe für Job-Assets | erforderlich |
 
 **Beispiele für Blockierungen**
 - Fehlender/ungültiger Key: `Forbidden.`
@@ -149,9 +168,9 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 | `WWW/index.php` | Dashboard: Operator-Control-Center (Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf) | Internal-Key + IP-Whitelist für Write-Actions |
 | `WWW/mediadb.php` | Listenansicht mit Filtern | type, prompt, meta, status, rating_min, path_substring, adult |
 | `WWW/media_view.php?id=<id>` | Detailansicht eines Mediums | id (Integer), optional adult |
-| `WWW/media_stream.php?path=<path>` | Streamt Originaldateien nach Pfad-Validierung | **Internal-Key erforderlich**; path (unterhalb erlaubter Roots) |
+| `WWW/media_stream.php?id=<id>` | Streamt Originaldateien nach Pfad-Validierung | Read-only (GET), optional adult |
 | `WWW/media_stream.php?job_id=<id>&asset=preview|backup|output` | Streamt Forge-Preview/Backup/Output (Pfad aus Job-Response, NSFW-Regeln via media_id) | **Internal-Key erforderlich**; job_id, asset, optional adult |
-| `WWW/thumb.php?path=<path>` | Thumbnails nach Pfad-Validierung | **Internal-Key erforderlich**; path (unterhalb erlaubter Roots) |
+| `WWW/thumb.php?id=<id>` | Thumbnails nach Pfad-Validierung | Read-only (GET), optional adult |
 | `WWW/thumb.php?job_id=<id>&asset=preview|backup|output` | Thumb aus Forge-Preview/Backup/Output (Pfad aus Job-Response, read-only Roots) | **Internal-Key erforderlich**; job_id, asset, optional adult |
 > Hinweis: `SCRIPTS/consistency_check.php` beendet sich mit Exit-Code ≠ 0, sobald Findings erkannt werden (Report und Simple-Repair). Snapshot-Format (DB/Job/Scan) ist identisch in CLI und Dashboard.
 

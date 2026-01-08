@@ -53,6 +53,23 @@ function sv_get_client_ip(): string
     return '';
 }
 
+function sv_is_client_local(array $config): bool
+{
+    if (sv_is_cli()) {
+        return true;
+    }
+
+    $security  = $config['security'] ?? [];
+    $whitelist = $security['ip_whitelist'] ?? [];
+    $clientIp  = sv_get_client_ip();
+
+    if (!is_array($whitelist) || $whitelist === []) {
+        return true;
+    }
+
+    return in_array($clientIp, $whitelist, true);
+}
+
 function sv_validate_internal_access(array $config, string $action, bool $hardFail = true): bool
 {
     $GLOBALS['sv_last_internal_key_valid'] = false;

@@ -314,6 +314,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif (!empty($worker['unknown'])) {
                 $actionMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
             }
+            if ($actionSuccess) {
+                sv_audit_log($pdo, 'rescan_start', 'media', $id, [
+                    'job_id'     => $jobId,
+                    'worker_pid' => $worker['pid'] ?? null,
+                ]);
+            }
+        } elseif ($action === 'vote_up' || $action === 'vote_down') {
+            $voteValue = $action === 'vote_up' ? 1 : -1;
+            sv_set_media_meta_value($pdo, $id, 'vote.state', $voteValue);
+            sv_audit_log($pdo, 'vote_set', 'media', $id, [
+                'state' => $voteValue,
+            ]);
+            $actionSuccess = true;
+            $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
+        } elseif ($action === 'checked_toggle') {
+            $checkedValue = isset($_POST['checked_value']) && (string)$_POST['checked_value'] === '1' ? 1 : 0;
+            sv_set_media_meta_value($pdo, $id, 'curation.checked', $checkedValue);
+            if ($checkedValue === 1) {
+                sv_set_media_meta_value($pdo, $id, 'curation.checked_at', time());
+            }
+            sv_audit_log($pdo, 'curation_checked', 'media', $id, [
+                'checked' => $checkedValue,
+            ]);
+            $actionSuccess = true;
+            $actionMessage = $checkedValue === 1 ? 'Checked gesetzt.' : 'Checked entfernt.';
         } elseif (in_array($action, ['tag_add', 'tag_remove', 'tag_lock', 'tag_unlock'], true)) {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'tag_edit', $actionLogs, 10);
             $payload = [
@@ -384,6 +409,15 @@ if (!$showAdult && (int)($media['has_nsfw'] ?? 0) === 1) {
     exit;
 }
 
+if ($hasInternalAccess && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    try {
+        sv_inc_media_meta_int($pdo, $id, 'activity.clicks', 1);
+        sv_set_media_meta_value($pdo, $id, 'activity.last_click_at', time());
+    } catch (Throwable $e) {
+        // Aktivitäts-Tracking darf die Ansicht nicht blockieren.
+    }
+}
+
 $promptStmt = $pdo->prepare('SELECT * FROM prompts WHERE media_id = :id ORDER BY id DESC LIMIT 1');
 $promptStmt->execute([':id' => $id]);
 $prompt = $promptStmt->fetch(PDO::FETCH_ASSOC) ?: null;
@@ -445,6 +479,15 @@ $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta W
 $metaStmt->execute([':id' => $id]);
 $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
 $hasStaleScan = false;
+
+$voteState = (int)(sv_get_media_meta_value($pdo, $id, 'vote.state') ?? 0);
+$checkedFlag = (int)(sv_get_media_meta_value($pdo, $id, 'curation.checked') ?? 0) === 1;
+$activityClicks = (int)(sv_get_media_meta_value($pdo, $id, 'activity.clicks') ?? 0);
+$activityLastClick = sv_get_media_meta_value($pdo, $id, 'activity.last_click_at');
+$activityLastTs = is_numeric($activityLastClick) ? (int)$activityLastClick : null;
+$createdAtTs = !empty($media['created_at']) ? (int)strtotime((string)$media['created_at']) : 0;
+$activityBaseTs = $activityLastTs ?? $createdAtTs ?? 0;
+$activityScore = $activityClicks - (int)floor((time() - $activityBaseTs) / 86400);
 
 $tagStmt = $pdo->prepare('SELECT t.name, t.type, mt.confidence, mt.locked FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :id ORDER BY t.type, t.name');
 $tagStmt->execute([':id' => $id]);
@@ -1018,17 +1061,23 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
             <div class="subtitle">ID <?= (int)$id ?> • Typ: <?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
         </div>
         <div class="header-info">
-            <form method="post" class="nsfw-toggle-form">
-                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                <input type="hidden" name="action" value="toggle_nsfw">
-                <label>FSK18
-                    <select name="nsfw_value" <?= $hasInternalAccess ? '' : 'disabled' ?>>
-                        <option value="0" <?= !$nsfwFlag ? 'selected' : '' ?>>nein</option>
-                        <option value="1" <?= $nsfwFlag ? 'selected' : '' ?>>ja</option>
-                    </select>
-                </label>
-                <button class="btn secondary small" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Speichern</button>
-            </form>
+            <?php if ($hasInternalAccess): ?>
+                <form method="post" class="nsfw-toggle-form">
+                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                    <input type="hidden" name="action" value="toggle_nsfw">
+                    <label>FSK18
+                        <select name="nsfw_value">
+                            <option value="0" <?= !$nsfwFlag ? 'selected' : '' ?>>nein</option>
+                            <option value="1" <?= $nsfwFlag ? 'selected' : '' ?>>ja</option>
+                        </select>
+                    </label>
+                    <button class="btn secondary small" type="submit">Speichern</button>
+                </form>
+            <?php else: ?>
+                <div class="nsfw-toggle-form">
+                    <strong>FSK18:</strong> <?= $nsfwFlag ? 'ja' : 'nein' ?>
+                </div>
+            <?php endif; ?>
             <div class="badge-row">
                 <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -1036,6 +1085,10 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 <span class="<?= htmlspecialchars($promptQualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Prompt: <?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <?php if ($hasStaleScan): ?><span class="pill pill-warn">Scan stale</span><?php endif; ?>
                 <?php if (!empty($media['rating'])): ?><span class="pill">Rating <?= htmlspecialchars((string)$media['rating'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                <?php if ($hasInternalAccess): ?>
+                    <span class="pill">Vote <?= $voteState ?></span>
+                    <span class="pill"><?= $checkedFlag ? 'Checked' : 'Unchecked' ?></span>
+                <?php endif; ?>
             </div>
         </div>
     </header>
@@ -1210,11 +1263,16 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Curation: <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                     <span class="<?= htmlspecialchars($promptQualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Prompt: <?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                    <?php if ($hasInternalAccess): ?>
+                        <span class="pill">Clicks: <?= $activityClicks ?></span>
+                        <span class="pill">Score: <?= $activityScore ?></span>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
 
         <div class="media-right">
+            <?php if ($hasInternalAccess): ?>
             <div class="panel action-panel">
                 <div class="panel-header">Aktionen</div>
                 <?php if ($actionMessage !== null): ?>
@@ -1236,6 +1294,35 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <div class="action-feedback error">
                         <div class="action-feedback-title">Scan veraltet</div>
                         <div>Scanner war beim letzten Forge-Lauf nicht erreichbar. Tags/Rating sind möglicherweise veraltet.</div>
+                    </div>
+                <?php endif; ?>
+
+                <?php if ($hasInternalAccess): ?>
+                    <div class="action-feedback">
+                        <div class="action-feedback-title">Operator Quick Actions</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:center;">
+                            <form method="post">
+                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                                <input type="hidden" name="action" value="rescan_job">
+                                <button class="btn secondary small" type="submit">Tag-Rescan</button>
+                            </form>
+                            <form method="post">
+                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                                <input type="hidden" name="action" value="vote_up">
+                                <button class="btn <?= $voteState === 1 ? 'primary' : 'secondary' ?> small" type="submit">👍</button>
+                            </form>
+                            <form method="post">
+                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                                <input type="hidden" name="action" value="vote_down">
+                                <button class="btn <?= $voteState === -1 ? 'primary' : 'secondary' ?> small" type="submit">👎</button>
+                            </form>
+                            <form method="post">
+                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                                <input type="hidden" name="action" value="checked_toggle">
+                                <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
+                                <button class="btn <?= $checkedFlag ? 'primary' : 'secondary' ?> small" type="submit"><?= $checkedFlag ? 'Checked ✓' : 'Checked ✗' ?></button>
+                            </form>
+                        </div>
                     </div>
                 <?php endif; ?>
 
@@ -1432,7 +1519,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     <form method="post" class="stacked">
                         <input type="hidden" name="media_id" value="<?= (int)$id ?>">
                         <input type="hidden" name="action" value="rescan_job">
-                        <button class="btn primary" id="rescan-button" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Rescan (Job)</button>
+                        <button class="btn primary" id="rescan-button" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Tag-Rescan (Job)</button>
                         <div class="hint">Stellt einen Rescan als Job in die Queue (locked=1 bleibt geschützt).</div>
                     </form>
                 </div>
@@ -1441,6 +1528,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 <?php endif; ?>
                 <div class="action-note">Alle Aktionen nutzen die bestehende Internal-Key/IP-Prüfung.</div>
             </div>
+            <?php endif; ?>
 
             <div class="panel status-panel">
                 <div class="panel-header">Status</div>
@@ -1486,6 +1574,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 <?php endif; ?>
             </div>
 
+            <?php if ($hasInternalAccess): ?>
             <div class="panel rescan-panel">
                 <div class="panel-header">Rescan-Jobs</div>
                 <?php if ($rescanJobs === []): ?>
@@ -1522,6 +1611,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                     </div>
                 <?php endif; ?>
             </div>
+            <?php endif; ?>
 
             <div class="panel forge-panel">
                 <div class="panel-header">Forge-Jobs</div>
@@ -1833,23 +1923,25 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
         <?php endif; ?>
     </details>
 
-    <details class="panel collapsible" id="logs-panel">
-        <summary>Logs</summary>
-        <?php if ($actionLogsSafe === []): ?>
-            <div class="tab-hint">Keine aktuellen Logeinträge.</div>
-        <?php else: ?>
-            <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
-        <?php endif; ?>
-    </details>
+    <?php if ($hasInternalAccess): ?>
+        <details class="panel collapsible" id="logs-panel">
+            <summary>Logs</summary>
+            <?php if ($actionLogsSafe === []): ?>
+                <div class="tab-hint">Keine aktuellen Logeinträge.</div>
+            <?php else: ?>
+                <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+            <?php endif; ?>
+        </details>
 
-    <form id="rebuild-form" method="post">
-        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-        <input type="hidden" name="action" value="rebuild_prompt">
-    </form>
-    <form id="missing-form" method="post" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
-        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-        <input type="hidden" name="action" value="logical_delete">
-    </form>
+        <form id="rebuild-form" method="post">
+            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+            <input type="hidden" name="action" value="rebuild_prompt">
+        </form>
+        <form id="missing-form" method="post" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
+            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+            <input type="hidden" name="action" value="logical_delete">
+        </form>
+    <?php endif; ?>
 
     <div id="fullscreen-viewer" class="lightbox hidden">
         <div class="lightbox-inner">
