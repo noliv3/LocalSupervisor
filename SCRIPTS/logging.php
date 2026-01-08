@@ -43,6 +43,33 @@ function sv_prepare_log_file(array $config, string $type, bool $unique, int $ret
     return $logFile;
 }
 
+function sv_write_jsonl_log(array $config, string $filename, array $payload, int $retention = 30): void
+{
+    $logsRoot = sv_logs_root($config);
+    if (!is_dir($logsRoot)) {
+        @mkdir($logsRoot, 0777, true);
+    }
+
+    $logFile = $logsRoot . DIRECTORY_SEPARATOR . $filename;
+    $prefix = pathinfo($filename, PATHINFO_FILENAME);
+
+    if (is_file($logFile)) {
+        $mtime = @filemtime($logFile);
+        if ($mtime !== false && date('Ymd', $mtime) !== date('Ymd')) {
+            $archive = $logsRoot . DIRECTORY_SEPARATOR . $prefix . '_' . date('Ymd', $mtime) . '.log';
+            @rename($logFile, $archive);
+            sv_rotate_logs($logsRoot, $prefix, $retention);
+        }
+    }
+
+    $line = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($line === false) {
+        return;
+    }
+
+    file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+}
+
 function sv_operation_logger(?string $logFile, ?array &$buffer = null): callable
 {
     if ($logFile !== null) {
