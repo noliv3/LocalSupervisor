@@ -270,6 +270,64 @@ function sv_get_any(array $data, array $paths)
     return null;
 }
 
+function sv_expand_scanner_modules(array $data, ?callable $logger = null): array
+{
+    $modules = isset($data['modules']) && is_array($data['modules']) ? $data['modules'] : [];
+    $added   = false;
+
+    foreach ($data as $key => $value) {
+        if (!is_string($key) || strpos($key, 'modules.') !== 0) {
+            continue;
+        }
+        $segments = explode('.', $key);
+        if (count($segments) < 2) {
+            continue;
+        }
+        array_shift($segments);
+
+        $cursor =& $modules;
+        for ($i = 0; $i < count($segments) - 1; $i++) {
+            $seg = $segments[$i];
+            if ($seg === '') {
+                continue;
+            }
+            if (!isset($cursor[$seg]) || !is_array($cursor[$seg])) {
+                $cursor[$seg] = [];
+            }
+            $cursor =& $cursor[$seg];
+        }
+
+        $last = $segments[count($segments) - 1];
+        if ($last === '' || array_key_exists($last, $cursor)) {
+            continue;
+        }
+        $cursor[$last] = $value;
+        $added = true;
+    }
+
+    if ($added) {
+        $data['modules'] = $modules;
+        if ($logger) {
+            $logger('Scanner Parser: dotted module keys zu modules[] normalisiert.');
+        }
+    } elseif ($modules !== [] && !isset($data['modules'])) {
+        $data['modules'] = $modules;
+    }
+
+    return $data;
+}
+
+function sv_normalize_tag_payload($candidate): array
+{
+    if (!is_array($candidate)) {
+        return [];
+    }
+    if (isset($candidate['tags']) && is_array($candidate['tags'])) {
+        return $candidate['tags'];
+    }
+    return $candidate;
+}
+
 function sv_move_file(string $src, string $dest): bool
 {
     $destDir = dirname($dest);
@@ -308,17 +366,18 @@ function sv_get_image_size(string $file): array
  *
  * Erwartete Struktur (scanner_api.process_image):
  * {
- *   "modules.nsfw_scanner": {...},
- *   "modules.tagging": {"tags": [...]},
- *   "modules.deepdanbooru_tags": {"tags": [...]},
- *   ...
+ *   "modules": {
+ *     "nsfw_scanner": {...},
+ *     "tagging": {"tags": [...]},
+ *     "deepdanbooru_tags": {"tags": [...]}
+ *   }
  * }
  */
 function sv_interpret_scanner_response(array $data, ?callable $logger = null): array
 {
+    $data = sv_expand_scanner_modules($data, $logger);
     $hits = [];
     $nsfwPaths = [
-        'modules.nsfw_scanner',
         ['modules', 'nsfw_scanner'],
         ['modules', 'nsfw', 'scanner'],
         ['modules', 'nsfw'],
@@ -335,27 +394,49 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         ['modules', 'tagging', 'tags'],
         ['modules', 'tagging'],
         ['modules', 'deepdanbooru_tags', 'tags'],
+        ['modules', 'deepdanbooru_tags'],
         ['modules', 'deepdanbooru', 'tags'],
-        'modules.tagging.tags',
-        'modules.deepdanbooru_tags.tags',
     ];
     foreach ($tagSources as $path) {
         $candidate = sv_get_any($data, [$path]);
         if ($candidate !== null) {
             $hits[] = is_array($path) ? implode('.', $path) : (string)$path;
         }
-        if (is_array($candidate)) {
-            $tagCandidates[] = $candidate;
+        $normalized = sv_normalize_tag_payload($candidate);
+        if ($normalized !== []) {
+            $tagCandidates[] = $normalized;
         }
     }
 
-    // Risk-Berechnung: max(hentai,porn,sexy) + DeepDanbooru-Rating
-    $risk = null;
+    $nsfwScore = null;
     if ($nsfw !== null) {
-        $risk = 0.0;
-        foreach (['hentai', 'porn', 'sexy'] as $k) {
-            if (isset($nsfw[$k]) && is_numeric($nsfw[$k])) {
-                $risk = max($risk, (float)$nsfw[$k]);
+        if (is_numeric($nsfw)) {
+            $nsfwScore = (float)$nsfw;
+        } elseif (is_array($nsfw)) {
+            if (isset($nsfw['nsfw_score']) && is_numeric($nsfw['nsfw_score'])) {
+                $nsfwScore = (float)$nsfw['nsfw_score'];
+            }
+            if ($nsfwScore === null && isset($nsfw['classes']) && is_array($nsfw['classes'])) {
+                $classMax = null;
+                foreach (['hentai', 'porn', 'sexy'] as $k) {
+                    if (isset($nsfw['classes'][$k]) && is_numeric($nsfw['classes'][$k])) {
+                        $classMax = $classMax === null
+                            ? (float)$nsfw['classes'][$k]
+                            : max($classMax, (float)$nsfw['classes'][$k]);
+                    }
+                }
+                if ($classMax !== null) {
+                    $nsfwScore = $classMax;
+                }
+            }
+            if ($nsfwScore === null) {
+                foreach (['hentai', 'porn', 'sexy'] as $k) {
+                    if (isset($nsfw[$k]) && is_numeric($nsfw[$k])) {
+                        $nsfwScore = $nsfwScore === null
+                            ? (float)$nsfw[$k]
+                            : max($nsfwScore, (float)$nsfw[$k]);
+                    }
+                }
             }
         }
     }
@@ -372,9 +453,9 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         $hits[] = 'deepdanbooru_rating';
     }
     if (in_array('rating:explicit', $allDdbLabels, true)) {
-        $risk = max($risk ?? 0.0, 1.0);
+        $nsfwScore = max($nsfwScore ?? 0.0, 1.0);
     } elseif (in_array('rating:questionable', $allDdbLabels, true)) {
-        $risk = max($risk ?? 0.0, 0.7);
+        $nsfwScore = max($nsfwScore ?? 0.0, 0.7);
     }
 
     // Tags aus Tagging + DeepDanbooru bündeln
@@ -434,10 +515,44 @@ function sv_interpret_scanner_response(array $data, ?callable $logger = null): a
         $logger('Scanner Parser-Pfade: ' . implode(', ', array_unique($hits)));
     }
 
+    $scanner = null;
+    $runAt   = null;
+    if (isset($data['meta']) && is_array($data['meta'])) {
+        $scanner = isset($data['meta']['scanner']) && is_string($data['meta']['scanner'])
+            ? $data['meta']['scanner']
+            : null;
+        $runAt = isset($data['meta']['run_at']) && is_string($data['meta']['run_at'])
+            ? $data['meta']['run_at']
+            : null;
+    }
+    if ($scanner === null && isset($data['scanner']) && is_string($data['scanner'])) {
+        $scanner = $data['scanner'];
+    }
+    if ($runAt === null && isset($data['run_at']) && is_string($data['run_at'])) {
+        $runAt = $data['run_at'];
+    }
+
+    $rating = null;
+    $hasNsfw = null;
+    if (in_array('rating:explicit', $allDdbLabels, true)) {
+        $rating = 3;
+        $hasNsfw = 1;
+    } elseif (in_array('rating:questionable', $allDdbLabels, true)) {
+        $rating = 2;
+        $hasNsfw = 1;
+    } elseif (in_array('rating:safe', $allDdbLabels, true)) {
+        $rating = 1;
+        $hasNsfw = 0;
+    }
+
     return [
-        'nsfw_score' => $risk,
+        'nsfw_score' => $nsfwScore,
         'tags'       => $tags,
         'flags'      => [],
+        'scanner'    => $scanner,
+        'run_at'     => $runAt,
+        'rating'     => $rating,
+        'has_nsfw'   => $hasNsfw,
         'raw'        => $data,
     ];
 }
