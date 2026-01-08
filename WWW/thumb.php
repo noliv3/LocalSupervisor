@@ -13,7 +13,7 @@ try {
     sv_security_error(500, 'config');
 }
 
-sv_require_internal_access($config, 'thumb');
+$hasInternalAccess = sv_validate_internal_access($config, 'thumb', false);
 
 $dsn      = $config['db']['dsn'];
 $user     = $config['db']['user']     ?? null;
@@ -71,7 +71,14 @@ $id      = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000,
 $jobAsset = null;
 $usingJobAsset = false;
 
+if (!$hasInternalAccess && ($_SERVER['REQUEST_METHOD'] !== 'GET')) {
+    sv_security_error(403, 'Forbidden.');
+}
+
 if ($jobId > 0) {
+    if (!$hasInternalAccess) {
+        sv_security_error(403, 'Forbidden.');
+    }
     if (!in_array((string)$asset, ['preview', 'backup', 'output'], true)) {
         http_response_code(400);
         exit;

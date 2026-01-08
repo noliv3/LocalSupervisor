@@ -3734,6 +3734,102 @@ function sv_ensure_media_seed(PDO $pdo, int $mediaId, ?string $existingSeed, cal
     return ['seed' => $seed, 'created' => true];
 }
 
+function sv_get_media_meta_value(PDO $pdo, int $mediaId, string $key): ?string
+{
+    $stmt = $pdo->prepare(
+        'SELECT meta_value FROM media_meta WHERE media_id = :media_id AND meta_key = :meta_key ORDER BY id DESC LIMIT 1'
+    );
+    $stmt->execute([
+        ':media_id' => $mediaId,
+        ':meta_key' => $key,
+    ]);
+    $value = $stmt->fetchColumn();
+    if ($value === false || $value === null) {
+        return null;
+    }
+
+    return (string)$value;
+}
+
+function sv_set_media_meta_value(PDO $pdo, int $mediaId, string $key, $value, string $source = 'web'): bool
+{
+    $valueStr = is_bool($value) ? ($value ? '1' : '0') : (string)$value;
+    $valueStr = trim($valueStr);
+    $now      = date('c');
+
+    $pdo->beginTransaction();
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT meta_value FROM media_meta WHERE media_id = :media_id AND meta_key = :meta_key ORDER BY id DESC LIMIT 1'
+        );
+        $stmt->execute([
+            ':media_id' => $mediaId,
+            ':meta_key' => $key,
+        ]);
+        $current = $stmt->fetchColumn();
+        if ($current !== false && $current !== null && (string)$current === $valueStr) {
+            $pdo->commit();
+            return false;
+        }
+
+        $insert = $pdo->prepare(
+            'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
+        );
+        $insert->execute([
+            $mediaId,
+            $source,
+            $key,
+            $valueStr,
+            $now,
+        ]);
+        $pdo->commit();
+        return true;
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+}
+
+function sv_inc_media_meta_int(PDO $pdo, int $mediaId, string $key, int $delta = 1, string $source = 'web'): int
+{
+    $pdo->beginTransaction();
+    try {
+        $current = 0;
+        $stmt = $pdo->prepare(
+            'SELECT meta_value FROM media_meta WHERE media_id = :media_id AND meta_key = :meta_key ORDER BY id DESC LIMIT 1'
+        );
+        $stmt->execute([
+            ':media_id' => $mediaId,
+            ':meta_key' => $key,
+        ]);
+        $currentVal = $stmt->fetchColumn();
+        if ($currentVal !== false && $currentVal !== null && is_numeric($currentVal)) {
+            $current = (int)$currentVal;
+        }
+
+        $next = $current + $delta;
+        $insert = $pdo->prepare(
+            'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
+        );
+        $insert->execute([
+            $mediaId,
+            $source,
+            $key,
+            (string)$next,
+            date('c'),
+        ]);
+        $pdo->commit();
+        return $next;
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+}
+
 function sv_resolve_negative_prompt(array $mediaRow, array $overrides, array $regenPlan, array $tags): array
 {
     $manualNegativeSet = !empty($overrides['manual_negative_set']);

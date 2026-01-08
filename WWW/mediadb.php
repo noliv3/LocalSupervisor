@@ -17,12 +17,65 @@ $dsn           = $config['db']['dsn'];
 $user          = $config['db']['user']     ?? null;
 $password      = $config['db']['password'] ?? null;
 $options       = $config['db']['options']  ?? [];
+$hasInternalAccess = sv_validate_internal_access($config, 'mediadb', false);
 
 try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 } catch (Throwable $e) {
     sv_security_error(500, 'db');
+}
+
+$actionMessage = null;
+$actionError = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        sv_require_internal_access($config, 'mediadb_action');
+        $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
+        $mediaId = isset($_POST['media_id']) ? (int)$_POST['media_id'] : 0;
+
+        if ($mediaId <= 0) {
+            throw new RuntimeException('Ungültige Media-ID.');
+        }
+
+        if ($action === 'vote_up' || $action === 'vote_down') {
+            $voteValue = $action === 'vote_up' ? 1 : -1;
+            sv_set_media_meta_value($pdo, $mediaId, 'vote.state', $voteValue);
+            sv_audit_log($pdo, 'vote_set', 'media', $mediaId, [
+                'state' => $voteValue,
+            ]);
+            $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
+        } elseif ($action === 'checked_toggle') {
+            $checkedValue = isset($_POST['checked_value']) && (string)$_POST['checked_value'] === '1' ? 1 : 0;
+            sv_set_media_meta_value($pdo, $mediaId, 'curation.checked', $checkedValue);
+            if ($checkedValue === 1) {
+                sv_set_media_meta_value($pdo, $mediaId, 'curation.checked_at', time());
+            }
+            sv_audit_log($pdo, 'curation_checked', 'media', $mediaId, [
+                'checked' => $checkedValue,
+            ]);
+            $actionMessage = $checkedValue === 1 ? 'Checked gesetzt.' : 'Checked entfernt.';
+        } elseif ($action === 'rescan_job') {
+            $logLines = [];
+            $logger = sv_operation_logger(null, $logLines);
+            $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $mediaId, $logger);
+            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $mediaId);
+            $jobId   = (int)($enqueue['job_id'] ?? 0);
+            if ($jobId <= 0) {
+                throw new RuntimeException('Rescan-Job konnte nicht angelegt werden.');
+            }
+            sv_audit_log($pdo, 'rescan_start', 'media', $mediaId, [
+                'job_id'     => $jobId,
+                'worker_pid' => $worker['pid'] ?? null,
+            ]);
+            $actionMessage = 'Tag-Rescan-Job #' . $jobId . ' eingereiht.';
+        } else {
+            throw new RuntimeException('Unbekannte Aktion.');
+        }
+    } catch (Throwable $e) {
+        $actionError = sv_sanitize_error_message($e->getMessage());
+    }
 }
 
 function sv_media_stream_url(int $id, bool $adult, bool $download = false): string
@@ -144,6 +197,9 @@ $minRating        = (int)($_GET['min_rating'] ?? 0);
 $incompleteFilter = $_GET['incomplete'] ?? 'none';
 $promptQualityFilter = $_GET['prompt_quality'] ?? 'all';
 $curationFilter   = $_GET['curation'] ?? 'all';
+$voteFilter       = $_GET['vote'] ?? 'any';
+$checkedFilter    = $_GET['checked'] ?? 'any';
+$lowActivityFilter = $_GET['low_activity'] ?? 'all';
 
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
@@ -152,6 +208,9 @@ $allowedStatus    = ['all', 'active', 'archived', 'deleted', 'missing', 'deleted
 $allowedIncomplete= ['none', 'prompt', 'tags', 'meta', 'any'];
 $allowedQuality   = array_merge(['all'], sv_prompt_quality_values());
 $allowedCuration  = array_merge(['all'], sv_quality_status_values());
+$allowedVote      = ['any', 'up', 'down'];
+$allowedChecked   = ['any', 'checked', 'unchecked'];
+$allowedLowActivity = ['all', 'low'];
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
 $hasPromptFilter  = sv_normalize_enum($hasPromptFilter, $allowedPrompt, 'all');
 $hasMetaFilter    = sv_normalize_enum($hasMetaFilter, $allowedMeta, 'all');
@@ -160,12 +219,28 @@ $minRating        = sv_clamp_int($minRating, 0, 3, 0);
 $incompleteFilter = sv_normalize_enum($incompleteFilter, $allowedIncomplete, 'none');
 $promptQualityFilter = sv_normalize_enum($promptQualityFilter, $allowedQuality, 'all');
 $curationFilter   = sv_normalize_enum($curationFilter, $allowedCuration, 'all');
+$voteFilter       = sv_normalize_enum($voteFilter, $allowedVote, 'any');
+$checkedFilter    = sv_normalize_enum($checkedFilter, $allowedChecked, 'any');
+$lowActivityFilter = sv_normalize_enum($lowActivityFilter, $allowedLowActivity, 'all');
+
+if (!$hasInternalAccess) {
+    $voteFilter = 'any';
+    $checkedFilter = 'any';
+    $lowActivityFilter = 'all';
+}
 
 $where  = [];
 $params = [];
 
 $promptCompleteClause = sv_prompt_core_complete_condition('p');
 $latestPromptJoin = 'LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1)';
+$activityNow = time();
+$activityClicksSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mm WHERE mm.media_id = m.id AND mm.meta_key = 'activity.clicks' ORDER BY mm.id DESC LIMIT 1)";
+$activityLastSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mm WHERE mm.media_id = m.id AND mm.meta_key = 'activity.last_click_at' ORDER BY mm.id DESC LIMIT 1)";
+$activityBaseSql = "COALESCE($activityLastSql, CAST(strftime('%s', m.created_at) AS INTEGER), 0)";
+$activityScoreSql = "COALESCE($activityClicksSql, 0) - CAST((:activity_now - $activityBaseSql) / 86400 AS INTEGER)";
+$voteStateSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mmv WHERE mmv.media_id = m.id AND mmv.meta_key = 'vote.state' ORDER BY mmv.id DESC LIMIT 1)";
+$checkedStateSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mmc WHERE mmc.media_id = m.id AND mmc.meta_key = 'curation.checked' ORDER BY mmc.id DESC LIMIT 1)";
 
 if (!$showAdult) {
     $where[] = '(m.has_nsfw IS NULL OR m.has_nsfw = 0)';
@@ -198,6 +273,27 @@ if ($curationFilter !== 'all') {
 if ($minRating > 0) {
     $where[]               = 'm.rating >= :minRating';
     $params[':minRating'] = $minRating;
+}
+
+if ($hasInternalAccess) {
+    $voteStateExpr = 'COALESCE(' . $voteStateSql . ', 0)';
+    if ($voteFilter === 'up') {
+        $where[] = $voteStateExpr . ' = 1';
+    } elseif ($voteFilter === 'down') {
+        $where[] = $voteStateExpr . ' = -1';
+    }
+
+    $checkedStateExpr = 'COALESCE(' . $checkedStateSql . ', 0)';
+    if ($checkedFilter === 'checked') {
+        $where[] = $checkedStateExpr . ' = 1';
+    } elseif ($checkedFilter === 'unchecked') {
+        $where[] = $checkedStateExpr . ' = 0';
+    }
+
+    if ($lowActivityFilter === 'low') {
+        $where[] = '(' . $activityScoreSql . ') <= 0';
+        $params[':activity_now'] = $activityNow;
+    }
 }
 
 if ($dupeFilter) {
@@ -249,6 +345,43 @@ $latestScanCols = "
            (SELECT sr.scanner FROM scan_results sr WHERE sr.media_id = m.id ORDER BY sr.run_at DESC, sr.id DESC LIMIT 1) AS last_scan_scanner,
            (SELECT sr.raw_json FROM scan_results sr WHERE sr.media_id = m.id ORDER BY sr.run_at DESC, sr.id DESC LIMIT 1) AS last_scan_raw,
 ";
+$activitySelectCols = "
+           COALESCE($activityClicksSql, 0) AS activity_clicks,
+           COALESCE($activityLastSql, 0) AS activity_last_click_at,
+           ($activityScoreSql) AS activity_score,
+           COALESCE($voteStateSql, 0) AS vote_state,
+           COALESCE($checkedStateSql, 0) AS checked_flag,
+";
+$baseSelectCols = "m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
+           m.width, m.height, m.duration, m.fps, m.filesize,
+           $latestScanCols
+           $activitySelectCols
+           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
+           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
+            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND $promptCompleteClause) AS prompt_complete,
+           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
+           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
+           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = 'scan_stale') AS scan_stale,
+           EXISTS (SELECT 1 FROM jobs j WHERE j.media_id = m.id AND j.type = 'forge_regen' AND j.status IN ('queued','pending','created','running')) AS job_running";
+
+$featureRows = [];
+try {
+    $featureSql = 'SELECT ' . $baseSelectCols . '
+FROM media m
+' . $latestPromptJoin . '
+WHERE ' . $whereSql . '
+ORDER BY activity_score ASC, m.created_at ASC, m.id ASC
+LIMIT 10';
+    $featureStmt = $pdo->prepare($featureSql);
+    foreach ($params as $k => $v) {
+        $featureStmt->bindValue($k, $v);
+    }
+    $featureStmt->bindValue(':activity_now', $activityNow, PDO::PARAM_INT);
+    $featureStmt->execute();
+    $featureRows = $featureStmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $featureRows = [];
+}
 
 if ($issueFilter) {
     $idSql = 'SELECT m.id FROM media m ' . $latestPromptJoin . ' WHERE ' . $whereSql . ' ORDER BY m.id DESC';
@@ -274,21 +407,17 @@ if ($issueFilter) {
         $rows = [];
     } else {
         $placeholders = implode(',', array_fill(0, count($pageIssueIds), '?'));
-        $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
-           ' . $latestScanCols . '
-           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
-           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
-            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
-           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
-           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \'scan_stale\') AS scan_stale,
-           EXISTS (SELECT 1 FROM jobs j WHERE j.media_id = m.id AND j.type = \'forge_regen\' AND j.status IN (\'queued\',\'pending\',\'created\',\'running\')) AS job_running
+        $listSql = 'SELECT ' . $baseSelectCols . '
 FROM media m
-LEFT JOIN prompts p ON p.id = (SELECT p2.id FROM prompts p2 WHERE p2.media_id = m.id ORDER BY p2.id DESC LIMIT 1)
+' . $latestPromptJoin . '
 WHERE m.id IN (' . $placeholders . ')
 ORDER BY m.id DESC';
         $listStmt = $pdo->prepare($listSql);
-        $listStmt->execute($pageIssueIds);
+        $listStmt->bindValue(':activity_now', $activityNow, PDO::PARAM_INT);
+        foreach ($pageIssueIds as $idx => $pid) {
+            $listStmt->bindValue($idx + 1, $pid, PDO::PARAM_INT);
+        }
+        $listStmt->execute();
         $fetched = $listStmt->fetchAll(PDO::FETCH_ASSOC);
         $rows = [];
         $map = [];
@@ -302,16 +431,7 @@ ORDER BY m.id DESC';
         }
     }
 } elseif ($promptQualityFilter !== 'all') {
-$qualitySql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
-           m.width, m.height, m.duration, m.fps, m.filesize,
-           ' . $latestScanCols . '
-           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
-           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
-            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
-           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
-           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \'scan_stale\') AS scan_stale,
-           EXISTS (SELECT 1 FROM jobs j WHERE j.media_id = m.id AND j.type = \'forge_regen\' AND j.status IN (\'queued\',\'pending\',\'created\',\'running\')) AS job_running
+$qualitySql = 'SELECT ' . $baseSelectCols . '
 FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
@@ -321,6 +441,7 @@ ORDER BY m.id DESC';
     foreach ($params as $k => $v) {
         $qualityStmt->bindValue($k, $v);
     }
+    $qualityStmt->bindValue(':activity_now', $activityNow, PDO::PARAM_INT);
     $qualityStmt->execute();
     $candidateRows = $qualityStmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -347,16 +468,7 @@ ORDER BY m.id DESC';
     $countStmt->execute($params);
     $total = (int)$countStmt->fetchColumn();
 
-    $listSql = 'SELECT m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
-           m.width, m.height, m.duration, m.fps, m.filesize,
-           ' . $latestScanCols . '
-           p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
-           EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
-            EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND ' . $promptCompleteClause . ') AS prompt_complete,
-           EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
-           EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id) AS has_tags,
-           EXISTS (SELECT 1 FROM media_meta mm2 WHERE mm2.media_id = m.id AND mm2.meta_key = \'scan_stale\') AS scan_stale,
-           EXISTS (SELECT 1 FROM jobs j WHERE j.media_id = m.id AND j.type = \'forge_regen\' AND j.status IN (\'queued\',\'pending\',\'created\',\'running\')) AS job_running
+    $listSql = 'SELECT ' . $baseSelectCols . '
 FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
@@ -367,6 +479,7 @@ LIMIT :limit OFFSET :offset';
     foreach ($params as $k => $v) {
         $listStmt->bindValue($k, $v);
     }
+    $listStmt->bindValue(':activity_now', $activityNow, PDO::PARAM_INT);
     $listStmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
     $listStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
     $listStmt->execute();
@@ -385,6 +498,9 @@ $queryParams = [
     'curation'       => $curationFilter,
     'min_rating'     => $minRating,
     'incomplete'     => $incompleteFilter,
+    'vote'           => $voteFilter,
+    'checked'        => $checkedFilter,
+    'low_activity'   => $lowActivityFilter,
     'issues'         => $issueFilter ? '1' : '0',
     'prompt_quality' => $promptQualityFilter,
     'adult'          => $showAdult ? '1' : '0',
@@ -464,6 +580,207 @@ function sv_tab_active(array $current, array $overrides): bool
     return true;
 }
 
+function sv_render_media_card(array $row, array $context): void
+{
+    $id      = (int)$row['id'];
+    $path    = (string)$row['path'];
+    $pathLabel = sv_safe_path_label($path);
+    $type    = (string)$row['type'];
+    $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
+    $rating  = (int)($row['rating'] ?? 0);
+    $status  = (string)($row['status'] ?? '');
+    $lifecycleStatus = (string)($row['lifecycle_status'] ?? '');
+    $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
+    $qualityBadge = 'pill-muted';
+    if ($qualityStatus === SV_QUALITY_OK) {
+        $qualityBadge = 'pill';
+    } elseif ($qualityStatus === SV_QUALITY_REVIEW) {
+        $qualityBadge = 'pill-warn';
+    } elseif ($qualityStatus === SV_QUALITY_BLOCKED) {
+        $qualityBadge = 'pill-bad';
+    }
+    $qualityLabels = $context['qualityStatusLabels'] ?? [];
+    $qualityLabel = $qualityLabels[$qualityStatus] ?? $qualityStatus;
+    $hash    = (string)($row['hash'] ?? '');
+    $dupeCounts = $context['dupeCounts'] ?? [];
+    $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
+    $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
+    $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
+    $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
+    $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
+    $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
+    $jobRunning = (int)($row['job_running'] ?? 0) === 1;
+    $issuesByMedia = $context['issuesByMedia'] ?? [];
+    $hasIssues = isset($issuesByMedia[$id]);
+    $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
+    $lastScanScanner = (string)($row['last_scan_scanner'] ?? '');
+    $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
+    $lastScanError = $scanInfo['error'] ?? null;
+    $scanTagsWritten = $scanInfo['tags_written'] ?? null;
+    $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
+
+    $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
+        $row['prompt_text'] ?? null,
+        isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
+        isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
+    );
+    $qualityClass = $qualityData['quality_class'];
+    $qualityScore = (int)$qualityData['score'];
+    $qualityIssues = array_slice($qualityData['issues'] ?? [], 0, 2);
+    $promptBadgeClass = $qualityClass === 'A' ? 'pill' : ($qualityClass === 'B' ? 'pill-muted' : 'pill-warn');
+
+    $statusVariant = 'clean';
+    if ($hasIssues) {
+        $statusVariant = 'warn';
+    }
+    if ($qualityClass === 'C') {
+        $statusVariant = 'warn';
+    }
+    if ($status !== '' && $status !== 'active') {
+        $statusVariant = 'bad';
+    }
+    if ($qualityStatus === SV_QUALITY_BLOCKED) {
+        $statusVariant = 'bad';
+    } elseif ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE) {
+        $statusVariant = 'warn';
+    }
+
+    $paginationBase = $context['paginationBase'] ?? [];
+    $page = (int)($context['page'] ?? 1);
+    $showAdult = !empty($context['showAdult']);
+    $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
+    $detailUrl = 'media_view.php?' . http_build_query($detailParams);
+    $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
+    $streamUrl = sv_media_stream_url($id, $showAdult, false);
+
+    $mediaWidth  = isset($row['width']) ? (int)$row['width'] : null;
+    $mediaHeight = isset($row['height']) ? (int)$row['height'] : null;
+    if ($type === 'image') {
+        if ($mediaWidth && $mediaHeight) {
+            $resolution = $mediaWidth . '×' . $mediaHeight;
+        } elseif (isset($row['prompt_width'], $row['prompt_height']) && $row['prompt_width'] && $row['prompt_height']) {
+            $resolution = (int)$row['prompt_width'] . '×' . (int)$row['prompt_height'];
+        } else {
+            $resolution = 'keine Größe';
+        }
+    } else {
+        $resolution = ($mediaWidth && $mediaHeight) ? ($mediaWidth . '×' . $mediaHeight) : 'keine Größe';
+    }
+    $duration = $type === 'video' && isset($row['duration']) ? (float)$row['duration'] : null;
+
+    $voteState = (int)($row['vote_state'] ?? 0);
+    $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
+    $activityScore = (int)($row['activity_score'] ?? 0);
+    $hasInternalAccess = !empty($context['hasInternalAccess']);
+    ?>
+    <article class="media-card status-<?= $statusVariant ?>" data-media-id="<?= $id ?>">
+        <div class="card-badges">
+            <?php if ($dupeCount > 1): ?>
+                <span class="pill pill-warn">Dupe x<?= (int)$dupeCount ?></span>
+            <?php endif; ?>
+            <?php if ($hasIssues): ?>
+                <span class="pill pill-warn" title="Integritätsprobleme erkannt">Issues</span>
+            <?php endif; ?>
+            <?php if ($hasNsfw): ?>
+                <span class="pill pill-nsfw">FSK18</span>
+            <?php endif; ?>
+            <?php if ($status !== '' && $status !== 'active'): ?>
+                <span class="pill pill-bad">Status <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+            <?php endif; ?>
+            <?php if ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE): ?>
+                <span class="pill pill-warn" title="Lifecycle"><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+            <?php endif; ?>
+            <span class="<?= htmlspecialchars($qualityBadge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Curation (Quality-Status)"><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+            <span class="<?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Prompt-Qualität (A/B/C)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+            <?php if ($jobRunning): ?>
+                <span class="pill pill-warn">Job running</span>
+            <?php endif; ?>
+            <?php if ($scanStale): ?>
+                <span class="pill pill-warn" title="Scanner nicht erreichbar, Tags/Rating veraltet">Scan stale</span>
+            <?php endif; ?>
+            <?php if ($lastScanError): ?>
+                <span class="pill pill-bad" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Scan error</span>
+            <?php elseif ($lastScanAt === ''): ?>
+                <span class="pill pill-warn">Scan fehlt</span>
+            <?php endif; ?>
+            <?php if ($rating > 0): ?>
+                <span class="pill">Rating <?= $rating ?></span>
+            <?php endif; ?>
+            <?php if ($hasInternalAccess && $activityScore <= 0): ?>
+                <span class="pill pill-warn">Low activity</span>
+            <?php endif; ?>
+        </div>
+
+        <div class="thumb-wrap">
+            <a href="<?= htmlspecialchars($detailUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                <img
+                    src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
+                    data-media-id="<?= $id ?>"
+                    loading="lazy"
+                    alt="ID <?= $id ?>">
+            </a>
+        </div>
+
+        <div class="card-info">
+            <div class="info-line">
+                <span class="info-chip"><?= $type === 'video' ? 'Video' : 'Bild' ?></span>
+                <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <?php if ($duration !== null): ?>
+                    <span class="info-chip"><?= htmlspecialchars(number_format($duration, 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span>
+                <?php endif; ?>
+                <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <?php if ($promptModel !== ''): ?><span class="info-chip">Model <?= htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                <?php if ($hasMeta): ?><span class="info-chip">Meta</span><?php endif; ?>
+                <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
+                <?php if ($hasPrompt && !$promptComplete): ?><span class="info-chip chip-warn">Prompt unvollständig</span><?php endif; ?>
+                <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
+                <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan stale</span><?php endif; ?>
+                <?php if ($hasInternalAccess): ?>
+                    <span class="info-chip">Vote <?= $voteState ?></span>
+                    <span class="info-chip"><?= $checkedFlag ? 'Checked' : 'Unchecked' ?></span>
+                    <span class="info-chip">Score <?= $activityScore ?></span>
+                <?php endif; ?>
+            </div>
+            <div class="info-line">
+                <span class="info-chip">Scan <?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?></span>
+                <?php if ($lastScanScanner !== ''): ?><span class="info-chip">Scanner <?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+                <?php if ($scanTagsWritten !== null): ?><span class="info-chip">Tags <?= (int)$scanTagsWritten ?></span><?php endif; ?>
+                <?php if ($lastScanError): ?><span class="info-chip chip-warn" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?>
+            </div>
+            <div class="info-path" title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                ID <?= $id ?> · <?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            </div>
+            <div class="info-line">
+                <a class="btn btn-primary" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
+                <?php if ($hasInternalAccess): ?>
+                    <form method="post" style="display:inline;">
+                        <input type="hidden" name="action" value="rescan_job">
+                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                        <button class="btn btn-secondary" type="submit">Tag-Rescan</button>
+                    </form>
+                    <form method="post" style="display:inline;">
+                        <input type="hidden" name="action" value="vote_up">
+                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                        <button class="btn <?= $voteState === 1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👍</button>
+                    </form>
+                    <form method="post" style="display:inline;">
+                        <input type="hidden" name="action" value="vote_down">
+                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                        <button class="btn <?= $voteState === -1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👎</button>
+                    </form>
+                    <form method="post" style="display:inline;">
+                        <input type="hidden" name="action" value="checked_toggle">
+                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                        <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
+                        <button class="btn <?= $checkedFlag ? 'btn-primary' : 'btn-secondary' ?>" type="submit"><?= $checkedFlag ? 'Checked ✓' : 'Checked ✗' ?></button>
+                    </form>
+                <?php endif; ?>
+            </div>
+        </div>
+    </article>
+    <?php
+}
+
 $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !== null);
 $qualityStatusLabels = sv_quality_status_labels();
 $promptQualityLabels = sv_prompt_quality_labels();
@@ -514,6 +831,12 @@ $promptQualityLabels = sv_prompt_quality_labels();
     </div>
 <?php endif; ?>
 
+<?php if ($actionMessage !== null || $actionError !== null): ?>
+    <div style="margin: 0.5rem 1rem; padding: 0.6rem 0.8rem; background: <?= $actionError ? '#fdecea' : '#e6ffed' ?>; color: <?= $actionError ? '#9b1c1c' : '#14532d' ?>; border: 1px solid <?= $actionError ? '#f5c2c7' : '#b6e2c0' ?>;">
+        <?= htmlspecialchars($actionError ?? $actionMessage ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+    </div>
+<?php endif; ?>
+
 <div class="quick-filters">
     <?php foreach ($tabConfigs as $tab):
         $tabQuery = sv_tab_query($paginationBase, $tab['overrides']);
@@ -545,7 +868,7 @@ $promptQualityLabels = sv_prompt_quality_labels();
 </form>
 
 <form id="filters-form" method="get" class="controls">
-    <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','view','p'], true)) { continue; } ?>
+    <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p'], true)) { continue; } ?>
         <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
     <?php endforeach; ?>
     <input type="hidden" name="p" value="1">
@@ -614,6 +937,31 @@ $promptQualityLabels = sv_prompt_quality_labels();
             <?php endforeach; ?>
         </select>
     </label>
+    <?php if ($hasInternalAccess): ?>
+        <label>
+            Vote
+            <select name="vote">
+                <option value="any" <?= $voteFilter === 'any' ? 'selected' : '' ?>>alle</option>
+                <option value="up" <?= $voteFilter === 'up' ? 'selected' : '' ?>>up</option>
+                <option value="down" <?= $voteFilter === 'down' ? 'selected' : '' ?>>down</option>
+            </select>
+        </label>
+        <label>
+            Checked
+            <select name="checked">
+                <option value="any" <?= $checkedFilter === 'any' ? 'selected' : '' ?>>alle</option>
+                <option value="checked" <?= $checkedFilter === 'checked' ? 'selected' : '' ?>>checked</option>
+                <option value="unchecked" <?= $checkedFilter === 'unchecked' ? 'selected' : '' ?>>unchecked</option>
+            </select>
+        </label>
+        <label>
+            Low Activity
+            <select name="low_activity">
+                <option value="all" <?= $lowActivityFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                <option value="low" <?= $lowActivityFilter === 'low' ? 'selected' : '' ?>>nur low</option>
+            </select>
+        </label>
+    <?php endif; ?>
     <button type="submit">Filter anwenden</button>
     <a class="reset-link" href="?adult=<?= $showAdult ? '1' : '0' ?>">Reset</a>
 </form>
@@ -633,165 +981,34 @@ $promptQualityLabels = sv_prompt_quality_labels();
 </div>
 
 <?php if ($viewMode === 'grid'): ?>
+    <?php
+    $cardContext = [
+        'paginationBase' => $paginationBase,
+        'page' => $page,
+        'showAdult' => $showAdult,
+        'qualityStatusLabels' => $qualityStatusLabels,
+        'promptQualityLabels' => $promptQualityLabels,
+        'issuesByMedia' => $issuesByMedia,
+        'dupeCounts' => $dupeCounts,
+        'hasInternalAccess' => $hasInternalAccess,
+    ];
+    ?>
+    <?php if ($featureRows !== []): ?>
+        <section style="margin: 1rem;">
+            <div class="panel-header">Featureview · niedrigste Aktivität</div>
+            <div class="media-grid">
+                <?php foreach ($featureRows as $row): ?>
+                    <?php sv_render_media_card($row, $cardContext); ?>
+                <?php endforeach; ?>
+            </div>
+        </section>
+    <?php endif; ?>
     <div class="media-grid">
         <?php if ($rows === []): ?>
             <div class="empty">Keine Einträge für diesen Filter.</div>
         <?php endif; ?>
-        <?php foreach ($rows as $row):
-            $id      = (int)$row['id'];
-            $path    = (string)$row['path'];
-            $pathLabel = sv_safe_path_label($path);
-            $type    = (string)$row['type'];
-            $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
-            $rating  = (int)($row['rating'] ?? 0);
-            $status  = (string)($row['status'] ?? '');
-            $lifecycleStatus = (string)($row['lifecycle_status'] ?? '');
-            $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
-            $qualityBadge = 'pill-muted';
-            if ($qualityStatus === SV_QUALITY_OK) {
-                $qualityBadge = 'pill';
-            } elseif ($qualityStatus === SV_QUALITY_REVIEW) {
-                $qualityBadge = 'pill-warn';
-            } elseif ($qualityStatus === SV_QUALITY_BLOCKED) {
-                $qualityBadge = 'pill-bad';
-            }
-            $qualityLabel = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
-            $hash    = (string)($row['hash'] ?? '');
-            $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
-            $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
-            $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
-            $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
-            $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
-            $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
-            $jobRunning = (int)($row['job_running'] ?? 0) === 1;
-            $hasIssues = isset($issuesByMedia[$id]);
-            $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
-            $lastScanScanner = (string)($row['last_scan_scanner'] ?? '');
-            $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
-            $lastScanError = $scanInfo['error'] ?? null;
-            $scanTagsWritten = $scanInfo['tags_written'] ?? null;
-            $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
-
-            $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
-                $row['prompt_text'] ?? null,
-                isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
-                isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
-            );
-            $qualityClass = $qualityData['quality_class'];
-            $qualityScore = (int)$qualityData['score'];
-            $qualityIssues = array_slice($qualityData['issues'] ?? [], 0, 2);
-            $promptBadgeClass = $qualityClass === 'A' ? 'pill' : ($qualityClass === 'B' ? 'pill-muted' : 'pill-warn');
-
-            $statusVariant = 'clean';
-            if ($hasIssues) {
-                $statusVariant = 'warn';
-            }
-            if ($qualityClass === 'C') {
-                $statusVariant = 'warn';
-            }
-            if ($status !== '' && $status !== 'active') {
-                $statusVariant = 'bad';
-            }
-            if ($qualityStatus === SV_QUALITY_BLOCKED) {
-                $statusVariant = 'bad';
-            } elseif ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE) {
-                $statusVariant = 'warn';
-            }
-
-            $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
-            $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
-            $streamUrl = sv_media_stream_url($id, $showAdult, false);
-            $mediaWidth  = isset($row['width']) ? (int)$row['width'] : null;
-            $mediaHeight = isset($row['height']) ? (int)$row['height'] : null;
-            if ($type === 'image') {
-                if ($mediaWidth && $mediaHeight) {
-                    $resolution = $mediaWidth . '×' . $mediaHeight;
-                } elseif (isset($row['prompt_width'], $row['prompt_height']) && $row['prompt_width'] && $row['prompt_height']) {
-                    $resolution = (int)$row['prompt_width'] . '×' . (int)$row['prompt_height'];
-                } else {
-                    $resolution = 'keine Größe';
-                }
-            } else {
-                $resolution = ($mediaWidth && $mediaHeight) ? ($mediaWidth . '×' . $mediaHeight) : 'keine Größe';
-            }
-            $duration = $type === 'video' && isset($row['duration']) ? (float)$row['duration'] : null;
-            ?>
-            <article class="media-card status-<?= $statusVariant ?>" data-media-id="<?= $id ?>">
-                <div class="card-badges">
-                    <?php if ($dupeCount > 1): ?>
-                        <span class="pill pill-warn">Dupe x<?= (int)$dupeCount ?></span>
-                    <?php endif; ?>
-                    <?php if ($hasIssues): ?>
-                        <span class="pill pill-warn" title="Integritätsprobleme erkannt">Issues</span>
-                    <?php endif; ?>
-                    <?php if ($hasNsfw): ?>
-                        <span class="pill pill-nsfw">FSK18</span>
-                    <?php endif; ?>
-                    <?php if ($status !== '' && $status !== 'active'): ?>
-                        <span class="pill pill-bad">Status <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <?php endif; ?>
-                    <?php if ($lifecycleStatus !== '' && $lifecycleStatus !== SV_LIFECYCLE_ACTIVE): ?>
-                        <span class="pill pill-warn" title="Lifecycle"><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <?php endif; ?>
-                    <span class="<?= htmlspecialchars($qualityBadge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Curation (Quality-Status)"><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="<?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Prompt-Qualität (A/B/C)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <?php if ($jobRunning): ?>
-                        <span class="pill pill-warn">Job running</span>
-                    <?php endif; ?>
-                    <?php if ($scanStale): ?>
-                        <span class="pill pill-warn" title="Scanner nicht erreichbar, Tags/Rating veraltet">Scan stale</span>
-                    <?php endif; ?>
-                    <?php if ($lastScanError): ?>
-                        <span class="pill pill-bad" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Scan error</span>
-                    <?php elseif ($lastScanAt === ''): ?>
-                        <span class="pill pill-warn">Scan fehlt</span>
-                    <?php endif; ?>
-                    <?php if ($rating > 0): ?>
-                        <span class="pill">Rating <?= $rating ?></span>
-                    <?php endif; ?>
-                </div>
-
-                <div class="thumb-wrap">
-                    <img
-                        src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-                        data-media-id="<?= $id ?>"
-                        loading="lazy"
-                        alt="ID <?= $id ?>">
-                    <div class="card-actions">
-                        <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
-                    </div>
-                </div>
-
-                <div class="card-info">
-                    <div class="info-line">
-                        <span class="info-chip"><?= $type === 'video' ? 'Video' : 'Bild' ?></span>
-                        <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                        <?php if ($duration !== null): ?>
-                            <span class="info-chip"><?= htmlspecialchars(number_format($duration, 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span>
-                        <?php endif; ?>
-                        <span class="info-chip <?= $qualityClass === 'C' ? 'chip-warn' : '' ?>" title="Prompt-Qualität <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (Score <?= $qualityScore ?><?php if ($qualityIssues !== []): ?> – <?= htmlspecialchars(implode(', ', $qualityIssues), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?php endif; ?>)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                        <?php if ($promptModel !== ''): ?><span class="info-chip">Model <?= htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                        <?php if ($hasMeta): ?><span class="info-chip">Meta</span><?php endif; ?>
-                        <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
-                        <?php if ($hasPrompt && !$promptComplete): ?><span class="info-chip chip-warn">Prompt unvollständig</span><?php endif; ?>
-                        <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
-                        <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan stale</span><?php endif; ?>
-                    </div>
-                    <div class="info-line">
-                        <span class="info-chip">Scan <?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?></span>
-                        <?php if ($lastScanScanner !== ''): ?><span class="info-chip">Scanner <?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                        <?php if ($scanTagsWritten !== null): ?><span class="info-chip">Tags <?= (int)$scanTagsWritten ?></span><?php endif; ?>
-                        <?php if ($lastScanError): ?><span class="info-chip chip-warn" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?>
-                    </div>
-                    <div class="info-path" title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        ID <?= $id ?> · <?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                    </div>
-                    <div class="info-line">
-                        <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
-                        <a class="btn btn-primary" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
-                    </div>
-                </div>
-            </article>
+        <?php foreach ($rows as $row): ?>
+            <?php sv_render_media_card($row, $cardContext); ?>
         <?php endforeach; ?>
     </div>
 <?php else: ?>
@@ -817,6 +1034,11 @@ $promptQualityLabels = sv_prompt_quality_labels();
                             <th>Curation</th>
                             <th>Prompt</th>
                             <th>Status</th>
+                            <?php if ($hasInternalAccess): ?>
+                                <th>Vote</th>
+                                <th>Checked</th>
+                                <th>Aktivität</th>
+                            <?php endif; ?>
                             <th>Aktion</th>
                         </tr>
                     </thead>
@@ -849,6 +1071,9 @@ $promptQualityLabels = sv_prompt_quality_labels();
                             isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
                         );
                         $promptQualityClass = $promptQualityData['quality_class'] ?? 'C';
+                        $voteState = (int)($row['vote_state'] ?? 0);
+                        $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
+                        $activityScore = (int)($row['activity_score'] ?? 0);
                         ?>
                         <tr style="border-bottom:1px solid #111827;">
                             <td><?= $id ?></td>
@@ -864,7 +1089,37 @@ $promptQualityLabels = sv_prompt_quality_labels();
                             <td><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                             <td><?= htmlspecialchars($promptQualityLabels[$promptQualityClass] ?? $promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                             <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?><?= $scanStale ? ' (stale)' : '' ?><?= $jobRunning ? ' (job)' : '' ?></td>
-                            <td><a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a></td>
+                            <?php if ($hasInternalAccess): ?>
+                                <td><?= $voteState ?></td>
+                                <td><?= $checkedFlag ? 'ja' : 'nein' ?></td>
+                                <td><?= $activityScore ?></td>
+                            <?php endif; ?>
+                            <td>
+                                <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
+                                <?php if ($hasInternalAccess): ?>
+                                    <form method="post" style="display:inline;">
+                                        <input type="hidden" name="action" value="rescan_job">
+                                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                                        <button class="btn btn-secondary" type="submit">Tag-Rescan</button>
+                                    </form>
+                                    <form method="post" style="display:inline;">
+                                        <input type="hidden" name="action" value="vote_up">
+                                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                                        <button class="btn <?= $voteState === 1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👍</button>
+                                    </form>
+                                    <form method="post" style="display:inline;">
+                                        <input type="hidden" name="action" value="vote_down">
+                                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                                        <button class="btn <?= $voteState === -1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👎</button>
+                                    </form>
+                                    <form method="post" style="display:inline;">
+                                        <input type="hidden" name="action" value="checked_toggle">
+                                        <input type="hidden" name="media_id" value="<?= $id ?>">
+                                        <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
+                                        <button class="btn <?= $checkedFlag ? 'btn-primary' : 'btn-secondary' ?>" type="submit"><?= $checkedFlag ? 'Checked ✓' : 'Checked ✗' ?></button>
+                                    </form>
+                                <?php endif; ?>
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
