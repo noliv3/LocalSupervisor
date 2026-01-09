@@ -41,6 +41,13 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) und letzte Audit-Events in Kurzform.
 - **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned via Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, nicht als neue Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
+## Update Center (Dashboard)
+- `start.ps1` schreibt alle 3 Stunden einen Git-Status (`git fetch` + ahead/behind/dirty) nach `LOGS/git_status.json`.
+- Der Dashboard-Button (nur Internal-Key/IP-Whitelist) startet einen einmaligen Update-Run über `start.ps1 -Action update_ff_restart`.
+- Update-Run-Reihenfolge: FF-only Pull (nur wenn `behind>0`), `php SCRIPTS/db_backup.php`, Backup-Rotation (Default: 8 letzte Snapshots), `php SCRIPTS/migrate.php`, Dienst-Restart (mindestens PHP-Server).
+- Dirty Working Tree oder nicht mögliches FF (Divergenz) blockiert den Update-Run; kein Restart, klare Fehlerzeile in `LOGS/git_update.last.json`.
+- Merge ist nur via expliziter Action (`merge_restart`) erlaubt und ebenfalls nur mit clean tree; Konflikt → Abbruch ohne Restart.
+
 ### Datenbankschema (Strukturüberblick)
 | Tabelle | Zweck | Kernfelder/Indizes |
 | --- | --- | --- |

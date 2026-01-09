@@ -161,6 +161,13 @@
 - **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) sowie letzte Audit-Events in Kurzform.
 - **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned über das Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, keine neuen Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
+## Update Center Contract
+- `start.ps1` führt alle 3 Stunden `git fetch` aus, berechnet ahead/behind/dirty und schreibt den Status nach `LOGS/git_status.json` (Runtime-File).
+- Der Dashboard-Button (Internal-Key/IP-Whitelist) startet einen einmaligen Update-Run via `start.ps1 -Action update_ff_restart`.
+- Update-Run ist FF-only per Default (nur bei `behind>0`), läuft danach `db_backup.php` + Backup-Rotation, `migrate.php` und führt einen Dienst-Restart aus (mindestens PHP-Server).
+- Merge ist nur mit expliziter Action (`merge_restart`) erlaubt; Konflikte oder dirty working tree führen zum Abbruch ohne Restart.
+- Ergebnisdaten landen in `LOGS/git_update.last.json` (Runtime-File), ohne Secrets/absolute Pfade.
+
 ## Laufzeit-Notizen (aktuell)
 - Scanner-HTTP liegt zentral in `scan_core.php` und akzeptiert `scanner.token` oder Legacy `scanner.api_key`/`scanner.api_key_header`; Dateien gehen als `image` und `file` raus.
 - Scanner-Responses unterstützen Typ A (verschachteltes `modules`-Objekt), Typ B (gepunktete Legacy-Keys wie `modules.tagging`) sowie Typ C (flache `tags`/`danbooru_tags` + NSFW-Klassen `hentai`/`porn`/`sexy`); `rating:*` in String-Listen wird erkannt.
