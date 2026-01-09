@@ -62,46 +62,94 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($action === 'scan_path') {
-            $lastPath = is_string($_POST['scan_path'] ?? null) ? trim($_POST['scan_path']) : '';
+            $rawPaths = is_string($_POST['scan_path'] ?? null) ? (string)$_POST['scan_path'] : '';
             $limit    = isset($_POST['scan_limit']) ? (int)$_POST['scan_limit'] : null;
 
             if ($limit !== null && $limit <= 0) {
                 $limit = null;
             }
 
-            if ($lastPath === '') {
-                $actionError = 'Kein Pfad angegeben.';
-            } elseif (mb_strlen($lastPath) > 500) {
-                $actionError = 'Pfad zu lang (max. 500 Zeichen).';
-            } else {
-                [$logFile, $logger] = sv_create_operation_log($config, 'scan', $logLines, 50);
+            $lines = preg_split('/\R/u', $rawPaths) ?: [];
+            $createdJobs = [];
+            $createdCount = 0;
+            $skippedInvalid = 0;
+            $skippedDup = 0;
+            $seen = [];
+            $isWindows = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
+
+            [$logFile, $logger] = sv_create_operation_log($config, 'scan', $logLines, 50);
+
+            foreach ($lines as $line) {
+                $path = trim((string)$line);
+                if ($path === '') {
+                    $skippedInvalid++;
+                    continue;
+                }
+                if (mb_strlen($path) > 500) {
+                    $skippedInvalid++;
+                    continue;
+                }
+
+                $dupKey = str_replace('\\', '/', $path);
+                if ($dupKey !== '/' && !preg_match('~^[A-Za-z]:/$~', $dupKey)) {
+                    $dupKey = rtrim($dupKey, '/');
+                }
+                if ($isWindows) {
+                    $dupKey = mb_strtolower($dupKey);
+                }
+                if (isset($seen[$dupKey])) {
+                    $skippedDup++;
+                    continue;
+                }
+                $seen[$dupKey] = true;
 
                 try {
-                    $job     = sv_create_scan_job($pdo, $config, $lastPath, $limit, $logger);
-                    $worker  = sv_spawn_scan_worker($config, $job['payload']['path'] ?? $lastPath, null, $logger, null);
-                    $jobId   = (int)($job['job_id'] ?? 0);
-
+                    $job = sv_create_scan_job($pdo, $config, $path, $limit, $logger);
+                    $jobId = (int)($job['job_id'] ?? 0);
                     if ($jobId > 0) {
+                        $createdJobs[] = $jobId;
+                        $createdCount++;
+                    } else {
+                        $skippedInvalid++;
+                    }
+                } catch (Throwable $e) {
+                    $skippedInvalid++;
+                    $logger('Scan-Job verworfen: ' . sv_sanitize_error_message($e->getMessage()));
+                }
+            }
+
+            if ($createdCount === 0) {
+                $actionError = 'Keine gültigen Scan-Pfade.';
+            } else {
+                try {
+                    $worker  = sv_spawn_scan_worker($config, null, null, $logger, null);
+
+                    foreach ($createdJobs as $jobId) {
                         sv_merge_job_response_metadata($pdo, $jobId, [
                             '_sv_worker_pid'        => $worker['pid'],
                             '_sv_worker_started_at' => $worker['started'],
                         ]);
                     }
 
-                    $actionMessage = 'Scan-Job eingereiht (#' . $jobId . ').';
-                    if (!empty($worker['pid'])) {
-                        $actionMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
-                    }
-                    if (!empty($worker['unknown'])) {
-                        $actionMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
+                    $actionMessage = sprintf(
+                        'Scan-Jobs erstellt: created %d, skipped_dup %d, skipped_invalid %d.',
+                        $createdCount,
+                        $skippedDup,
+                        $skippedInvalid
+                    );
+                    if (!empty($createdJobs)) {
+                        $actionMessage .= ' IDs: #' . implode(', #', $createdJobs) . '.';
                     }
 
                     sv_audit_log($pdo, 'scan_start', 'fs', null, [
-                        'limit'       => $limit,
-                        'job_id'      => $jobId,
-                        'worker_pid'  => $worker['pid'] ?? null,
-                        'worker_note' => $worker['unknown'] ? 'pid_unknown' : 'pid_recorded',
-                        'user_agent'  => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                        'limit'          => $limit,
+                        'job_ids'        => $createdJobs,
+                        'created'        => $createdCount,
+                        'skipped_dup'    => $skippedDup,
+                        'skipped_invalid'=> $skippedInvalid,
+                        'worker_pid'     => $worker['pid'] ?? null,
+                        'worker_note'    => $worker['unknown'] ? 'pid_unknown' : 'pid_recorded',
+                        'user_agent'     => $_SERVER['HTTP_USER_AGENT'] ?? null,
                     ]);
                 } catch (Throwable $e) {
                     $actionError = 'Scan-Fehler: ' . $e->getMessage();
@@ -421,10 +469,17 @@ function sv_badge_class(string $status): string
         }
 
         .inline-fields input[type="text"],
-        .inline-fields input[type="number"] {
+        .inline-fields input[type="number"],
+        .inline-fields textarea {
             padding: 6px 8px;
             border-radius: 6px;
             border: 1px solid var(--border);
+        }
+
+        .inline-fields textarea {
+            flex: 1 1 100%;
+            min-height: 120px;
+            resize: vertical;
         }
 
         .event-list {
@@ -577,7 +632,7 @@ function sv_badge_class(string $status): string
                     <form method="post">
                         <input type="hidden" name="action" value="scan_path">
                         <div class="inline-fields">
-                            <input type="text" name="scan_path" placeholder="Pfad" size="32">
+                            <textarea name="scan_path" rows="6" placeholder="Pfad 1&#10;Pfad 2"></textarea>
                             <input type="number" name="scan_limit" min="1" step="1" placeholder="Limit">
                             <?php if ($internalKey !== ''): ?>
                                 <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
@@ -585,6 +640,7 @@ function sv_badge_class(string $status): string
                             <button type="submit">Scan starten</button>
                         </div>
                     </form>
+                    <div class="muted">Ein Pfad pro Zeile (Ordner oder Datei).</div>
                     <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['scan_start'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 </div>
 

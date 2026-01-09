@@ -2020,14 +2020,18 @@ function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $lim
     }
 
     $real = realpath($scanPath);
-    if ($real === false || !is_dir($real)) {
-        throw new RuntimeException('Pfad nicht gefunden oder kein Verzeichnis.');
+    if ($real === false || (!is_dir($real) && !is_file($real))) {
+        throw new RuntimeException('Pfad nicht gefunden oder kein Verzeichnis/Datei.');
     }
 
     $limit = $limit !== null && $limit > 0 ? $limit : null;
     $now   = date('c');
+    $normalizedPath = str_replace('\\', '/', $scanPath);
+    if ($normalizedPath !== '/' && !preg_match('~^[A-Za-z]:/$~', $normalizedPath)) {
+        $normalizedPath = rtrim($normalizedPath, '/');
+    }
     $payload = [
-        'path'            => rtrim(str_replace('\\', '/', $real), '/'),
+        'path'            => $normalizedPath,
         'requested_path'  => $scanPath,
         'limit'           => $limit,
         'nsfw_threshold'  => (float)(($config['scanner']['nsfw_threshold'] ?? 0.7)),
