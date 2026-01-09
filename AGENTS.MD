@@ -159,7 +159,7 @@
 - **Zweck**: `WWW/index.php` ist der klare Operator-Startpunkt (kein Debug-/Statistik-View).
 - **Abschnitte**: Header/Start (Galerie + Anker), Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf.
 - **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) sowie letzte Audit-Events in Kurzform.
-- **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned über das Dashboard. Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, keine neuen Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
+- **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned über das Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, keine neuen Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
 ## Laufzeit-Notizen (aktuell)
 - Scanner-HTTP liegt zentral in `scan_core.php` und akzeptiert `scanner.token` oder Legacy `scanner.api_key`/`scanner.api_key_header`; Dateien gehen als `image` und `file` raus.

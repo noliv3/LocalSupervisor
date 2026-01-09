@@ -1727,8 +1727,62 @@ function sv_run_scan_path(
     ?int $limit = null
 ): array {
     $inputReal = realpath($inputPath);
-    if ($inputReal === false || !is_dir($inputReal)) {
-        throw new RuntimeException("Pfad nicht gefunden oder kein Verzeichnis: {$inputPath}");
+    if ($inputReal === false) {
+        throw new RuntimeException("Pfad nicht gefunden: {$inputPath}");
+    }
+
+    if (is_file($inputReal)) {
+        $inputFile = str_replace('\\', '/', $inputReal);
+        $inputRoot = rtrim(str_replace('\\', '/', dirname($inputReal)), '/');
+
+        if ($logger) {
+            $logger("Starte Scan: {$inputFile}");
+        }
+
+        $processed    = 0;
+        $skipped      = 0;
+        $errors       = 0;
+        $handledTotal = 0;
+        $limitReached = false;
+
+        if ($limit !== null && $limit <= 0) {
+            $limit = null;
+        }
+
+        if ($limit !== null && $handledTotal >= $limit) {
+            $limitReached = true;
+        } else {
+            if ($logger) {
+                $logger('Verarbeite: ' . $inputFile);
+            }
+
+            try {
+                $ok = sv_import_file($pdo, $inputFile, $inputRoot, $pathsCfg, $scannerCfg, $nsfwThreshold, $logger);
+                if ($ok) {
+                    $processed++;
+                } else {
+                    $skipped++;
+                }
+                $handledTotal++;
+            } catch (Throwable $e) {
+                $errors++;
+                $handledTotal++;
+                if ($logger) {
+                    $logger('Fehler bei Datei ' . $inputFile . ': ' . $e->getMessage());
+                }
+            }
+        }
+
+        if ($logger) {
+            $suffix = $limitReached ? ' (Limit erreicht)' : '';
+            $logger("Scan abgeschlossen. processed={$processed}, skipped={$skipped}, errors={$errors}{$suffix}");
+        }
+
+        return [
+            'processed' => $processed,
+            'skipped'   => $skipped,
+            'errors'    => $errors,
+        ];
     }
 
     $inputReal = rtrim(str_replace('\\', '/', $inputReal), '/');
