@@ -2343,6 +2343,58 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     ];
 }
 
+function sv_spawn_update_center_run(array $config, string $action = 'update_ff_restart'): array
+{
+    if (!sv_is_cli() && !sv_has_valid_internal_key()) {
+        throw new RuntimeException('Internal-Key erforderlich, um Update zu starten.');
+    }
+
+    $baseDir = sv_base_dir();
+    $script  = $baseDir . '/start.ps1';
+    if (!is_file($script)) {
+        return [
+            'spawned' => false,
+            'error'   => 'start.ps1 fehlt.',
+        ];
+    }
+
+    $allowedActions = ['update_ff_restart', 'merge_restart'];
+    if (!in_array($action, $allowedActions, true)) {
+        $action = 'update_ff_restart';
+    }
+
+    $startedAt = date('c');
+    $spawned   = false;
+    $error     = null;
+
+    if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
+        $cmd = 'start /B "" powershell -NoProfile -ExecutionPolicy Bypass -File '
+            . escapeshellarg($script) . ' -Action ' . escapeshellarg($action);
+        $proc = @popen($cmd, 'r');
+        if ($proc !== false) {
+            pclose($proc);
+            $spawned = true;
+        } else {
+            $error = 'Update-Start fehlgeschlagen.';
+        }
+    } else {
+        $cmd = 'nohup pwsh -NoProfile -File ' . escapeshellarg($script) . ' -Action ' . escapeshellarg($action)
+            . ' > /dev/null 2>&1 & echo $!';
+        $output = @shell_exec($cmd);
+        if ($output !== null && trim($output) !== '') {
+            $spawned = true;
+        } else {
+            $error = 'Update-Start fehlgeschlagen.';
+        }
+    }
+
+    return [
+        'spawned'   => $spawned,
+        'started'   => $startedAt,
+        'error'     => $error,
+    ];
+}
+
 function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
 {
     $jobId   = (int)($jobRow['id'] ?? 0);
@@ -6911,6 +6963,46 @@ function sv_dashboard_format_value($value, int $maxLen = 160): string
     return sv_sanitize_error_message((string)$value, $maxLen);
 }
 
+function sv_dashboard_sanitize_payload($value, int $maxLen = 160)
+{
+    if (is_array($value)) {
+        $sanitized = [];
+        foreach ($value as $key => $entry) {
+            $sanitized[$key] = sv_dashboard_sanitize_payload($entry, $maxLen);
+        }
+        return $sanitized;
+    }
+
+    if (is_string($value)) {
+        return sv_sanitize_error_message($value, $maxLen);
+    }
+
+    if (is_int($value) || is_float($value) || is_bool($value) || $value === null) {
+        return $value;
+    }
+
+    return sv_sanitize_error_message((string)$value, $maxLen);
+}
+
+function sv_dashboard_read_runtime_json(string $path, int $maxLen = 160): ?array
+{
+    if (!is_file($path)) {
+        return null;
+    }
+
+    $raw = @file_get_contents($path);
+    if ($raw === false || trim($raw) === '') {
+        return null;
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    return sv_dashboard_sanitize_payload($decoded, $maxLen);
+}
+
 function sv_dashboard_job_row(array $row): array
 {
     $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
@@ -7126,6 +7218,11 @@ function sv_collect_dashboard_view_model(PDO $pdo, array $config, array $options
         $forgeOverview = [];
     }
 
+    $logDir = (string)($config['paths']['logs'] ?? (sv_base_dir() . '/LOGS'));
+    $logDir = rtrim(str_replace('\\', '/', $logDir), '/');
+    $gitStatus = sv_dashboard_read_runtime_json($logDir . '/git_status.json', 160);
+    $gitLast   = sv_dashboard_read_runtime_json($logDir . '/git_update.last.json', 200);
+
     return [
         'health' => $health,
         'job_counts' => $jobCounts,
@@ -7138,5 +7235,9 @@ function sv_collect_dashboard_view_model(PDO $pdo, array $config, array $options
         'events' => $events,
         'last_runs' => $lastRuns,
         'forge' => $forgeOverview,
+        'git' => [
+            'status' => $gitStatus,
+            'last'   => $gitLast,
+        ],
     ];
 }

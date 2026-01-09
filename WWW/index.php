@@ -54,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         sv_require_internal_access($config, 'dashboard_action');
 
         $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-        $allowedActions = ['scan_path', 'rescan_db', 'job_requeue', 'job_cancel'];
+        $allowedActions = ['scan_path', 'rescan_db', 'job_requeue', 'job_cancel', 'update_center'];
 
         if (!in_array($action, $allowedActions, true)) {
             $actionError = 'Ungültige Aktion.';
@@ -208,6 +208,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $actionError = 'Abbruch fehlgeschlagen: ' . $e->getMessage();
                 }
             }
+        } elseif ($action === 'update_center') {
+            $updateAction = is_string($_POST['update_action'] ?? null)
+                ? trim((string)$_POST['update_action'])
+                : 'update_ff_restart';
+            if ($updateAction === '') {
+                $updateAction = 'update_ff_restart';
+            }
+            try {
+                $spawn = sv_spawn_update_center_run($config, $updateAction);
+                if (!empty($spawn['spawned'])) {
+                    $actionMessage = 'Update gestartet.';
+                } else {
+                    $actionError = 'Update-Start fehlgeschlagen.';
+                }
+            } catch (Throwable $e) {
+                $actionError = 'Update-Start fehlgeschlagen: ' . $e->getMessage();
+            }
         }
     }
 }
@@ -237,6 +254,8 @@ $events = $dashboard['events'] ?? [];
 $jobSections = $dashboard['jobs'] ?? ['running' => [], 'queued' => [], 'stuck' => [], 'recent' => []];
 $forgeOverview = $dashboard['forge'] ?? [];
 $lastRuns = $dashboard['last_runs'] ?? [];
+$gitStatus = $dashboard['git']['status'] ?? null;
+$gitLast = $dashboard['git']['last'] ?? null;
 
 function sv_badge_class(string $status): string
 {
@@ -516,6 +535,7 @@ function sv_badge_class(string $status): string
                 <a class="button primary" href="mediadb.php">Galerie öffnen</a>
                 <div class="nav-links">
                     <a href="mediadb.php">Letzte Medien</a>
+                    <a href="#update-center">Update Center</a>
                     <a href="#job-center-recent">Letzte Fehler</a>
                     <a href="#job-center">Job-Center</a>
                     <a href="#health-snapshot">Health</a>
@@ -548,6 +568,91 @@ function sv_badge_class(string $status): string
             <div class="banner error">
                 <?= htmlspecialchars(sv_sanitize_error_message($actionError), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
             </div>
+        <?php endif; ?>
+
+        <?php if ($hasInternalAccess): ?>
+            <section id="update-center" class="card">
+                <h2 class="section-title">Update Center</h2>
+                <div class="health-grid">
+                    <div class="health-row">
+                        <strong>Git Status</strong>
+                        <?php if (!is_array($gitStatus)): ?>
+                            <div class="muted">Kein Git-Status verfügbar.</div>
+                        <?php else: ?>
+                            <?php
+                            $gitAhead  = isset($gitStatus['ahead']) ? (int)$gitStatus['ahead'] : 0;
+                            $gitBehind = isset($gitStatus['behind']) ? (int)$gitStatus['behind'] : 0;
+                            $gitDirty  = !empty($gitStatus['dirty']);
+                            $behindClass = $gitBehind > 0 ? 'badge-warn' : 'badge-ok';
+                            $dirtyClass = $gitDirty ? 'badge-warn' : 'badge-ok';
+                            $fetchOk = $gitStatus['fetch_ok'] ?? null;
+                            $fetchBadge = $fetchOk === null ? 'badge' : ($fetchOk ? 'badge-ok' : 'badge-error');
+                            ?>
+                            <div class="line">
+                                <span class="badge <?= $behindClass ?>">behind <?= $gitBehind ?></span>
+                                <span class="badge badge-info">ahead <?= $gitAhead ?></span>
+                                <span class="badge <?= $dirtyClass ?>">dirty <?= $gitDirty ? 'yes' : 'no' ?></span>
+                            </div>
+                            <div class="line">
+                                <span>Branch: <?= htmlspecialchars((string)($gitStatus['branch'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <span>Head: <?= htmlspecialchars((string)($gitStatus['head'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            </div>
+                            <details>
+                                <summary>Show more</summary>
+                                <div class="muted">Upstream: <?= htmlspecialchars((string)($gitStatus['upstream'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <div class="muted">Letztes Fetch: <?= htmlspecialchars((string)($gitStatus['updated_at'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <?php if ($fetchOk !== null): ?>
+                                    <div class="line">
+                                        <span class="badge <?= $fetchBadge ?>">fetch <?= $fetchOk ? 'ok' : 'error' ?></span>
+                                        <?php if (!empty($gitStatus['fetch_error'])): ?>
+                                            <span class="job-error"><?= htmlspecialchars((string)$gitStatus['fetch_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </details>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="health-row">
+                        <strong>Letztes Update</strong>
+                        <?php if (!is_array($gitLast)): ?>
+                            <div class="muted">Kein Update-Status verfügbar.</div>
+                        <?php else: ?>
+                            <?php
+                            $updateResult = (string)($gitLast['result'] ?? 'unknown');
+                            $updateBadge = sv_badge_class($updateResult);
+                            $beforeCommit = is_array($gitLast['before'] ?? null) ? (string)($gitLast['before']['commit'] ?? '—') : '—';
+                            $afterCommit = is_array($gitLast['after'] ?? null) ? (string)($gitLast['after']['commit'] ?? '—') : '—';
+                            ?>
+                            <div class="line">
+                                <span class="badge badge-info"><?= htmlspecialchars((string)($gitLast['action'] ?? 'update'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <span class="<?= $updateBadge ?>"><?= htmlspecialchars($updateResult, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            </div>
+                            <div class="line">
+                                <span>Start: <?= htmlspecialchars((string)($gitLast['started_at'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <span>Ende: <?= htmlspecialchars((string)($gitLast['finished_at'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            </div>
+                            <details>
+                                <summary>Show more</summary>
+                                <div class="muted">Before: <?= htmlspecialchars($beforeCommit, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <div class="muted">After: <?= htmlspecialchars($afterCommit, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <?php if (!empty($gitLast['short_error'])): ?>
+                                    <div class="job-error"><?= htmlspecialchars((string)$gitLast['short_error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <?php endif; ?>
+                            </details>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <form method="post" style="margin-top: 12px;">
+                    <input type="hidden" name="action" value="update_center">
+                    <input type="hidden" name="update_action" value="update_ff_restart">
+                    <?php if ($internalKey !== ''): ?>
+                        <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                    <?php endif; ?>
+                    <button type="submit" class="button primary" onclick="return confirm('Update jetzt starten?');">Update (FF + DB + Restart)</button>
+                </form>
+                <div class="muted" style="margin-top: 8px;">FF-only Standard; Merge nur über separaten Action-Parameter.</div>
+            </section>
         <?php endif; ?>
 
 
