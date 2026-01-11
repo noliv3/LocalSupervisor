@@ -4428,7 +4428,7 @@ function sv_refresh_media_after_regen(
     $scanFlags = [];
     $nsfwScore = null;
 
-    if ($scanData !== null) {
+    if (!empty($scanData['ok'])) {
         $nsfwScore = isset($scanData['nsfw_score']) ? (float)$scanData['nsfw_score'] : null;
         $scanTags  = is_array($scanData['tags'] ?? null) ? $scanData['tags'] : [];
         $scanFlags = is_array($scanData['flags'] ?? null) ? $scanData['flags'] : [];
@@ -4458,6 +4458,9 @@ function sv_refresh_media_after_regen(
                 'path_after'   => $path,
                 'has_nsfw'     => $hasNsfw,
                 'rating'       => $rating,
+                'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
             ]
         );
         sv_scanner_persist_log(
@@ -4477,6 +4480,27 @@ function sv_refresh_media_after_regen(
         $result['scan_updated'] = true;
     } else {
         $logger('Scanner lieferte keine verwertbaren Daten, Tags unverändert.');
+        $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : ['notice' => 'scanner_failed'];
+        $runAt = date('c');
+        sv_store_scan_result(
+            $pdo,
+            $mediaId,
+            'pixai_sensible',
+            null,
+            [],
+            $errorMeta,
+            $runAt,
+            [
+                'tags_written' => 0,
+                'path_after'   => $path,
+                'has_nsfw'     => $hasNsfw,
+                'rating'       => $rating,
+                'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
+            ],
+            sv_scanner_format_error_message($errorMeta)
+        );
         $pdo->prepare("DELETE FROM media_meta WHERE media_id = ? AND meta_key = 'scan_stale'")->execute([$mediaId]);
         $metaStmt = $pdo->prepare("INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)");
         $metaStmt->execute([
