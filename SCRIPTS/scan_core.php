@@ -7,6 +7,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/paths.php';
+require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/prompt_parser.php';
 require_once __DIR__ . '/security.php';
 
@@ -687,6 +688,159 @@ function sv_interpret_scanner_response(
     ];
 }
 
+function sv_scanner_is_list_array(array $data): bool
+{
+    if ($data === []) {
+        return true;
+    }
+    $expected = 0;
+    foreach ($data as $key => $_value) {
+        if ($key !== $expected) {
+            return false;
+        }
+        $expected++;
+    }
+    return true;
+}
+
+function sv_scanner_detect_media_type(string $file): string
+{
+    $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+    $videoExts = ['mp4', 'mkv', 'mov', 'webm', 'avi', 'gif'];
+    if (in_array($ext, $videoExts, true)) {
+        return 'video';
+    }
+
+    return 'image';
+}
+
+function sv_scanner_extract_error_message(array $data): ?string
+{
+    foreach (['error', 'message', 'detail'] as $key) {
+        if (isset($data[$key]) && is_string($data[$key]) && trim($data[$key]) !== '') {
+            return trim($data[$key]);
+        }
+    }
+    if (isset($data['errors']) && is_array($data['errors']) && $data['errors'] !== []) {
+        $first = $data['errors'][0] ?? null;
+        if (is_string($first) && trim($first) !== '') {
+            return trim($first);
+        }
+    }
+
+    return null;
+}
+
+function sv_scanner_collect_parts(array $data, string &$shape): array
+{
+    $shape = 'single';
+    if (sv_scanner_is_list_array($data)) {
+        $shape = 'list';
+        return $data;
+    }
+    if (isset($data['results']) && is_array($data['results'])) {
+        $shape = 'results';
+        return $data['results'];
+    }
+    if (isset($data['frames']) && is_array($data['frames'])) {
+        $shape = 'frames';
+        return $data['frames'];
+    }
+    if (isset($data['data']) && is_array($data['data']) && sv_scanner_is_list_array($data['data'])) {
+        $shape = 'data';
+        return $data['data'];
+    }
+
+    return [$data];
+}
+
+function sv_scanner_merge_parts(array $parts): ?array
+{
+    if ($parts === []) {
+        return null;
+    }
+
+    $mergedTags = [];
+    $nsfwScore = null;
+    $rating = null;
+    $hasNsfw = null;
+    $scanner = null;
+    $runAt = null;
+    $flags = [];
+
+    foreach ($parts as $part) {
+        if (!is_array($part)) {
+            continue;
+        }
+        if ($scanner === null && isset($part['scanner'])) {
+            $scanner = $part['scanner'];
+        }
+        if ($runAt === null && isset($part['run_at'])) {
+            $runAt = $part['run_at'];
+        }
+        if (isset($part['nsfw_score']) && is_numeric($part['nsfw_score'])) {
+            $score = (float)$part['nsfw_score'];
+            $nsfwScore = $nsfwScore === null ? $score : max($nsfwScore, $score);
+        }
+        if (isset($part['rating']) && is_numeric($part['rating'])) {
+            $partRating = (int)$part['rating'];
+            $rating = $rating === null ? $partRating : max($rating, $partRating);
+        }
+        if (isset($part['has_nsfw']) && is_numeric($part['has_nsfw'])) {
+            $partHas = (int)$part['has_nsfw'];
+            $hasNsfw = $hasNsfw === null ? $partHas : max($hasNsfw, $partHas);
+        }
+        if (isset($part['flags']) && is_array($part['flags'])) {
+            $flags = array_merge($flags, $part['flags']);
+        }
+        $tags = is_array($part['tags'] ?? null) ? $part['tags'] : [];
+        foreach ($tags as $tag) {
+            if (!is_array($tag)) {
+                continue;
+            }
+            $name = isset($tag['name']) ? trim((string)$tag['name']) : '';
+            if ($name === '') {
+                continue;
+            }
+            $type = isset($tag['type']) ? (string)$tag['type'] : 'content';
+            $confidence = isset($tag['confidence']) && is_numeric($tag['confidence']) ? (float)$tag['confidence'] : 1.0;
+            if ($confidence <= 0.0) {
+                continue;
+            }
+            $key = strtolower($name) . '|' . strtolower($type);
+            if (!isset($mergedTags[$key]) || $mergedTags[$key]['confidence'] < $confidence) {
+                $mergedTags[$key] = [
+                    'name'       => $name,
+                    'type'       => $type,
+                    'confidence' => $confidence,
+                ];
+            }
+        }
+    }
+
+    return [
+        'nsfw_score' => $nsfwScore,
+        'tags'       => array_values($mergedTags),
+        'flags'      => array_values(array_unique($flags)),
+        'scanner'    => $scanner,
+        'run_at'     => $runAt,
+        'rating'     => $rating,
+        'has_nsfw'   => $hasNsfw,
+    ];
+}
+
+function sv_scanner_format_error_message(array $errorMeta): string
+{
+    $message = isset($errorMeta['error']) && is_string($errorMeta['error']) && $errorMeta['error'] !== ''
+        ? $errorMeta['error']
+        : 'Scanner fehlgeschlagen';
+    if (!empty($errorMeta['http_status'])) {
+        $message .= ' (HTTP ' . $errorMeta['http_status'] . ')';
+    }
+
+    return $message;
+}
+
 /**
  * Lokalen PixAI-Scanner via HTTP /check aufrufen.
  * - Feldname: "image"
@@ -697,19 +851,36 @@ function sv_scan_with_local_scanner(
     array $scannerCfg,
     ?callable $logger = null,
     array $logContext = [],
-    ?array $pathsCfg = null
-): ?array
+    ?array $pathsCfg = null,
+    array $options = []
+): array
 {
     $baseUrl = (string)($scannerCfg['base_url'] ?? '');
     $token   = (string)($scannerCfg['token']     ?? '');
     $apiKey  = (string)($scannerCfg['api_key']   ?? '');
     $apiHdr  = (string)($scannerCfg['api_key_header'] ?? '');
+    $allowFallback = isset($options['allow_fallback']) ? (bool)$options['allow_fallback'] : true;
 
     if ($baseUrl === '') {
         if ($logger) {
             $logger('Scanner nicht konfiguriert (base_url fehlt).');
         }
-        return null;
+        return [
+            'ok'    => false,
+            'error' => 'Scanner nicht konfiguriert',
+            'error_meta' => [
+                'http_status' => null,
+                'endpoint'    => null,
+                'error'       => 'scanner_not_configured',
+                'body_snippet'=> null,
+                'response_type_detected' => 'none',
+            ],
+            'debug' => [
+                'response_shape'     => 'none',
+                'merged_parts_count' => 0,
+                'fallback_used'      => false,
+            ],
+        ];
     }
 
     $authMode = 'none';
@@ -718,17 +889,26 @@ function sv_scan_with_local_scanner(
     } elseif ($apiKey !== '' && $apiHdr !== '') {
         $authMode = 'api_key';
     }
+
+    $mediaType = sv_scanner_detect_media_type($file);
+    $endpoint = $mediaType === 'video'
+        ? (string)($scannerCfg['batch_endpoint'] ?? '/batch')
+        : '/check';
+    $fieldName = $mediaType === 'video' ? 'file' : 'image';
+
     if ($logger) {
-        $logger('Scanner-Aufruf mit Auth=' . $authMode . ' Felder=image+file');
+        $logger('Scanner-Aufruf mit Auth=' . $authMode . ' Endpoint=' . $endpoint . ' Feld=' . $fieldName);
     }
 
-    $url = rtrim($baseUrl, '/') . '/check';
+    if (strpos($endpoint, 'http://') === 0 || strpos($endpoint, 'https://') === 0) {
+        $url = $endpoint;
+    } else {
+        $url = rtrim($baseUrl, '/') . '/' . ltrim($endpoint, '/');
+    }
 
     $ch = curl_init();
     $postFields = [
-        'image' => new CURLFile($file),
-        'file'  => new CURLFile($file),
-        'autorefresh' => '1',
+        $fieldName => new CURLFile($file),
     ];
 
     curl_setopt($ch, CURLOPT_URL, $url);
@@ -755,7 +935,35 @@ function sv_scan_with_local_scanner(
         if ($logger) {
             $logger("Scanner CURL-Fehler: {$err}");
         }
-        return null;
+        $errorMeta = [
+            'http_status' => null,
+            'endpoint'    => $endpoint,
+            'error'       => $err,
+            'body_snippet'=> null,
+            'response_type_detected' => 'curl_error',
+        ];
+        sv_scanner_log_event($pathsCfg, 'scanner_ingest', [
+            'media_id'    => $logContext['media_id'] ?? null,
+            'operation'   => $logContext['operation'] ?? null,
+            'file_basename' => $logContext['file_basename'] ?? basename($file),
+            'endpoint'    => $endpoint,
+            'field_name'  => $fieldName,
+            'media_type'  => $mediaType,
+            'file_size'   => @filesize($file),
+            'http_status' => null,
+            'response_type_detected' => 'curl_error',
+            'response_snippet_sanitized' => null,
+        ]);
+        return [
+            'ok'         => false,
+            'error'      => sv_scanner_format_error_message($errorMeta),
+            'error_meta' => $errorMeta,
+            'debug'      => [
+                'response_shape'     => 'none',
+                'merged_parts_count' => 0,
+                'fallback_used'      => false,
+            ],
+        ];
     }
 
     $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -767,58 +975,284 @@ function sv_scan_with_local_scanner(
     if (count($responseKeys) > 50) {
         $responseKeys = array_slice($responseKeys, 0, 50);
     }
+    $responseShape = 'unknown';
+    $partsCount = 0;
+    if (is_array($data)) {
+        $parts = sv_scanner_collect_parts($data, $responseShape);
+        $partsCount = count($parts);
+    }
     sv_scanner_log_event($pathsCfg, 'scanner_ingest', [
         'media_id'                 => $logContext['media_id'] ?? null,
         'operation'                => $logContext['operation'] ?? null,
         'file_basename'            => $logContext['file_basename'] ?? basename($file),
+        'endpoint'                 => $endpoint,
+        'field_name'               => $fieldName,
+        'media_type'               => $mediaType,
+        'file_size'                => @filesize($file),
         'http_status'              => $status,
         'response_bytes'           => strlen($resp),
         'response_keys_top'        => $responseKeys,
         'response_type_detected'   => $responseType,
+        'response_shape'           => $responseShape,
         'response_snippet_sanitized' => sv_sanitize_scanner_log_snippet($resp, 4096),
     ]);
 
-    if ($status < 200 || $status >= 300) {
+    $errorMessage = is_array($data) ? sv_scanner_extract_error_message($data) : null;
+    $hardFail = ($status < 200 || $status >= 300 || $errorMessage !== null || !is_array($data));
+    if ($hardFail) {
+        $snippet = sv_sanitize_scanner_log_snippet($resp, 512);
         if ($logger) {
             $logger("Scanner HTTP-Status {$status} für Datei {$file}");
         }
-        sv_scanner_log_event($pathsCfg, 'scanner_parse', [
-            'media_id'           => $logContext['media_id'] ?? null,
-            'response_type_used' => $responseType,
-            'tag_sources_used'   => [],
-            'tag_count_in'       => 0,
-            'tag_count_normalized' => 0,
-            'tag_count_deduped'  => 0,
-            'nsfw_score_raw'     => null,
-            'nsfw_score_computed'=> null,
-            'rating_detected'    => null,
-            'has_nsfw'           => null,
-            'empty_reason'       => 'parse_error',
-        ]);
-        return null;
-    }
-
-    if (!is_array($data)) {
-        if ($logger) {
-            $logger("Scanner lieferte ungültiges JSON für {$file}");
+        $errorMeta = [
+            'http_status' => $status,
+            'endpoint'    => $endpoint,
+            'error'       => $errorMessage ?? 'http_error',
+            'body_snippet'=> $snippet !== '' ? $snippet : null,
+            'response_type_detected' => $responseType,
+        ];
+        if ($mediaType === 'video' && $allowFallback) {
+            $fallback = sv_scan_video_fallback_frames($file, $scannerCfg, $logger, $logContext, $pathsCfg);
+            $fallback['debug']['fallback_used'] = true;
+            $fallback['debug']['response_shape'] = 'fallback_frames';
+            $fallback['debug']['merged_parts_count'] = $fallback['debug']['merged_parts_count'] ?? 0;
+            if ($fallback['ok'] ?? false) {
+                $fallback['error_meta'] = $errorMeta;
+                return $fallback;
+            }
+            return $fallback;
         }
-        sv_scanner_log_event($pathsCfg, 'scanner_parse', [
-            'media_id'           => $logContext['media_id'] ?? null,
-            'response_type_used' => 'unknown',
-            'tag_sources_used'   => [],
-            'tag_count_in'       => 0,
-            'tag_count_normalized' => 0,
-            'tag_count_deduped'  => 0,
-            'nsfw_score_raw'     => null,
-            'nsfw_score_computed'=> null,
-            'rating_detected'    => null,
-            'has_nsfw'           => null,
-            'empty_reason'       => 'parse_error',
-        ]);
-        return null;
+
+        return [
+            'ok'         => false,
+            'error'      => sv_scanner_format_error_message($errorMeta),
+            'error_meta' => $errorMeta,
+            'debug'      => [
+                'response_shape'     => $responseShape,
+                'merged_parts_count' => $partsCount,
+                'fallback_used'      => false,
+            ],
+        ];
     }
 
-    return sv_interpret_scanner_response($data, $logger, $logContext, $pathsCfg);
+    $parts = sv_scanner_collect_parts($data, $responseShape);
+    $parsedParts = [];
+    foreach ($parts as $part) {
+        if (!is_array($part)) {
+            continue;
+        }
+        if (isset($part['result']) && is_array($part['result'])) {
+            $part = $part['result'];
+        }
+        $parsedParts[] = sv_interpret_scanner_response($part, $logger, $logContext, $pathsCfg);
+    }
+    $merged = sv_scanner_merge_parts($parsedParts);
+    if ($merged === null) {
+        $errorMeta = [
+            'http_status' => $status,
+            'endpoint'    => $endpoint,
+            'error'       => 'no_parts_parsed',
+            'body_snippet'=> sv_sanitize_scanner_log_snippet($resp, 512),
+            'response_type_detected' => $responseType,
+        ];
+        return [
+            'ok'         => false,
+            'error'      => sv_scanner_format_error_message($errorMeta),
+            'error_meta' => $errorMeta,
+            'debug'      => [
+                'response_shape'     => $responseShape,
+                'merged_parts_count' => 0,
+                'fallback_used'      => false,
+            ],
+        ];
+    }
+
+    $merged['raw'] = $data;
+    $merged['debug'] = array_merge($merged['debug'] ?? [], [
+        'response_shape'     => $responseShape,
+        'merged_parts_count' => count($parsedParts),
+        'fallback_used'      => false,
+    ]);
+    $merged['ok'] = true;
+
+    return $merged;
+}
+
+function sv_scan_video_fallback_frames(
+    string $file,
+    array $scannerCfg,
+    ?callable $logger,
+    array $logContext,
+    ?array $pathsCfg
+): array {
+    $config = sv_load_config();
+    $toolsCfg = $config['tools'] ?? [];
+    $ffmpeg = !empty($toolsCfg['ffmpeg']) ? (string)$toolsCfg['ffmpeg'] : 'ffmpeg';
+
+    $available = false;
+    if (is_file($ffmpeg) && is_executable($ffmpeg)) {
+        $available = true;
+    } else {
+        $which = @shell_exec('command -v ' . escapeshellarg($ffmpeg));
+        if (is_string($which) && trim($which) !== '') {
+            $available = true;
+            $ffmpeg = trim($which);
+        } else {
+            $probe = @shell_exec(escapeshellarg($ffmpeg) . ' -version 2>&1');
+            if (is_string($probe) && trim($probe) !== '') {
+                $available = true;
+            }
+        }
+    }
+
+    if (!$available) {
+        if ($logger) {
+            $logger('FFmpeg nicht verfügbar, Frame-Fallback nicht möglich.');
+        }
+        return [
+            'ok'    => false,
+            'error' => 'FFmpeg nicht verfügbar',
+            'error_meta' => [
+                'http_status' => null,
+                'endpoint'    => 'ffmpeg',
+                'error'       => 'ffmpeg_missing',
+                'body_snippet'=> null,
+                'response_type_detected' => 'ffmpeg_missing',
+            ],
+            'debug' => [
+                'response_shape'     => 'fallback_frames',
+                'merged_parts_count' => 0,
+                'fallback_used'      => true,
+            ],
+        ];
+    }
+
+    $frameCount = isset($scannerCfg['video_fallback_frames']) ? (int)$scannerCfg['video_fallback_frames'] : 4;
+    if ($frameCount < 3) {
+        $frameCount = 3;
+    } elseif ($frameCount > 8) {
+        $frameCount = 8;
+    }
+    $maxDim = isset($scannerCfg['video_fallback_max_dim']) ? (int)$scannerCfg['video_fallback_max_dim'] : 1280;
+    if ($maxDim < 256) {
+        $maxDim = 1280;
+    }
+
+    $tempDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'sv_scan_frames_' . uniqid('', true);
+    if (!@mkdir($tempDir, 0777, true) && !is_dir($tempDir)) {
+        return [
+            'ok'    => false,
+            'error' => 'Fallback-Tempverzeichnis konnte nicht angelegt werden',
+            'error_meta' => [
+                'http_status' => null,
+                'endpoint'    => 'ffmpeg',
+                'error'       => 'tempdir_failed',
+                'body_snippet'=> null,
+                'response_type_detected' => 'ffmpeg_fallback',
+            ],
+            'debug' => [
+                'response_shape'     => 'fallback_frames',
+                'merged_parts_count' => 0,
+                'fallback_used'      => true,
+            ],
+        ];
+    }
+
+    $pattern = $tempDir . DIRECTORY_SEPARATOR . 'frame_%02d.jpg';
+    $vf = "scale='min({$maxDim},iw)':-2";
+    $cmd = escapeshellarg($ffmpeg)
+        . ' -hide_banner -loglevel error -i ' . escapeshellarg($file)
+        . ' -vf ' . escapeshellarg($vf)
+        . ' -frames:v ' . $frameCount
+        . ' ' . escapeshellarg($pattern)
+        . ' 2>&1';
+    $out = @shell_exec($cmd);
+
+    $frames = glob($tempDir . DIRECTORY_SEPARATOR . 'frame_*.jpg') ?: [];
+    if ($frames === []) {
+        if ($logger) {
+            $logger('Frame-Fallback fehlgeschlagen: keine Frames extrahiert.');
+        }
+        sv_scanner_log_event($pathsCfg, 'scanner_fallback', [
+            'media_id'      => $logContext['media_id'] ?? null,
+            'operation'     => $logContext['operation'] ?? null,
+            'file_basename' => $logContext['file_basename'] ?? basename($file),
+            'fallback'      => 'ffmpeg_frames',
+            'error'         => 'no_frames',
+            'command'       => $cmd,
+            'output'        => sv_sanitize_scanner_log_snippet((string)$out, 1024),
+        ]);
+        @rmdir($tempDir);
+        return [
+            'ok'    => false,
+            'error' => 'FFmpeg konnte keine Frames extrahieren',
+            'error_meta' => [
+                'http_status' => null,
+                'endpoint'    => 'ffmpeg',
+                'error'       => 'no_frames',
+                'body_snippet'=> sv_sanitize_scanner_log_snippet((string)$out, 512),
+                'response_type_detected' => 'ffmpeg_fallback',
+            ],
+            'debug' => [
+                'response_shape'     => 'fallback_frames',
+                'merged_parts_count' => 0,
+                'fallback_used'      => true,
+            ],
+        ];
+    }
+
+    $scanParts = [];
+    foreach ($frames as $frame) {
+        $frameContext = $logContext;
+        $frameContext['operation'] = ($frameContext['operation'] ?? 'scan') . '_fallback';
+        $frameContext['file_basename'] = basename($frame);
+        $scan = sv_scan_with_local_scanner($frame, $scannerCfg, $logger, $frameContext, $pathsCfg, ['allow_fallback' => false]);
+        if ($scan['ok'] ?? false) {
+            $scanParts[] = $scan;
+        }
+    }
+
+    foreach ($frames as $frame) {
+        @unlink($frame);
+    }
+    @rmdir($tempDir);
+
+    if ($scanParts === []) {
+        return [
+            'ok'    => false,
+            'error' => 'Frame-Fallback lieferte keine verwertbaren Scanner-Ergebnisse',
+            'error_meta' => [
+                'http_status' => null,
+                'endpoint'    => 'ffmpeg',
+                'error'       => 'fallback_scan_failed',
+                'body_snippet'=> null,
+                'response_type_detected' => 'ffmpeg_fallback',
+            ],
+            'debug' => [
+                'response_shape'     => 'fallback_frames',
+                'merged_parts_count' => 0,
+                'fallback_used'      => true,
+            ],
+        ];
+    }
+
+    $merged = sv_scanner_merge_parts($scanParts);
+    $merged['raw'] = [
+        'fallback' => [
+            'frames' => array_map('basename', $frames),
+            'parts'  => array_map(static function (array $part): array {
+                return $part['raw'] ?? [];
+            }, $scanParts),
+        ],
+    ];
+    $merged['debug'] = array_merge($merged['debug'] ?? [], [
+        'response_shape'     => 'fallback_frames',
+        'merged_parts_count' => count($scanParts),
+        'fallback_used'      => true,
+    ]);
+    $merged['ok'] = true;
+
+    return $merged;
 }
 
 function sv_store_tags(PDO $pdo, int $mediaId, array $tags): int
@@ -1441,7 +1875,7 @@ function sv_import_file(
 
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
     $isImage = in_array($ext, ['png', 'jpg', 'jpeg', 'webp', 'bmp']);
-    $isVideo = in_array($ext, ['mp4', 'mkv', 'mov', 'webm', 'avi']);
+    $isVideo = in_array($ext, ['mp4', 'mkv', 'mov', 'webm', 'avi', 'gif']);
 
     if (!$isImage && !$isVideo) {
         return false;
@@ -1486,7 +1920,7 @@ function sv_import_file(
     $scanTags  = [];
     $scanFlags = [];
 
-    if ($scanData !== null) {
+    if (!empty($scanData['ok'])) {
         $nsfwScore = isset($scanData['nsfw_score']) ? (float)$scanData['nsfw_score'] : null;
         $scanTags  = is_array($scanData['tags'] ?? null) ? $scanData['tags'] : [];
         $scanFlags = is_array($scanData['flags'] ?? null) ? $scanData['flags'] : [];
@@ -1635,14 +2069,15 @@ function sv_import_file(
         $mediaId = (int)$pdo->lastInsertId();
         $logContext['media_id'] = $mediaId;
 
-        if ($scanData !== null) {
+        $scannerName = (string)($scannerCfg['name'] ?? 'pixai_sensible');
+        $runAt = date('c');
+        if (!empty($scanData['ok'])) {
             $raw = is_array($scanData['raw'] ?? null) ? $scanData['raw'] : [];
-            $runAt = date('c');
             $writtenTags = sv_store_tags($pdo, $mediaId, $scanTags);
             sv_store_scan_result(
                 $pdo,
                 $mediaId,
-                'pixai_sensible',
+                $scannerName,
                 $nsfwScore,
                 $scanFlags,
                 $raw,
@@ -1652,6 +2087,9 @@ function sv_import_file(
                     'path_after'   => $destPathDb,
                     'has_nsfw'     => $hasNsfw,
                     'rating'       => $rating,
+                    'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                    'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                    'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
                 ]
             );
             sv_scanner_persist_log(
@@ -1665,12 +2103,32 @@ function sv_import_file(
                 false
             );
         } else {
+            $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : ['notice' => 'scanner_failed'];
+            sv_store_scan_result(
+                $pdo,
+                $mediaId,
+                $scannerName,
+                null,
+                [],
+                $errorMeta,
+                $runAt,
+                [
+                    'tags_written' => 0,
+                    'path_after'   => $destPathDb,
+                    'has_nsfw'     => $hasNsfw,
+                    'rating'       => $rating,
+                    'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                    'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                    'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
+                ],
+                sv_scanner_format_error_message($errorMeta)
+            );
             sv_scanner_persist_log(
                 $pathsCfg,
                 $logContext,
                 0,
                 null,
-                null,
+                $runAt,
                 true,
                 false,
                 false
@@ -1973,18 +2431,19 @@ function sv_rescan_media(
     }
 
     $scanData  = sv_scan_with_local_scanner($fullPath, $scannerCfg, $logger, $logContext, $pathsCfg);
-    if ($scanData === null) {
+    if (empty($scanData['ok'])) {
         if ($logger) {
             $logger("Media ID {$id}: Scanner fehlgeschlagen.");
         }
-        $resultMeta['error'] = 'Scanner fehlgeschlagen';
+        $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : ['notice' => 'scanner_failed'];
+        $resultMeta['error'] = sv_scanner_format_error_message($errorMeta);
         sv_store_scan_result(
             $pdo,
             $id,
             $scannerName,
             null,
             [],
-            ['notice' => 'scanner_failed'],
+            $errorMeta,
             $runAt,
             [
                 'tags_written' => 0,
@@ -1992,6 +2451,9 @@ function sv_rescan_media(
                 'path_after'   => $fullPath,
                 'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
                 'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
+                'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
             ],
             $resultMeta['error']
         );
@@ -2111,6 +2573,9 @@ function sv_rescan_media(
                 'path_after'   => $newPath,
                 'has_nsfw'     => $hasNsfw,
                 'rating'       => $rating,
+                'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
             ]
         );
         sv_scanner_persist_log(
