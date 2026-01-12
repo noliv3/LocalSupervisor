@@ -48,6 +48,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - Update-Run-Reihenfolge: FF-only Pull (nur wenn `behind>0`), `php SCRIPTS/db_backup.php`, Backup-Rotation (Default: 8 letzte Snapshots), `php SCRIPTS/migrate.php`, Dienst-Restart (mindestens PHP-Server).
 - Dirty Working Tree oder nicht mögliches FF (Divergenz) blockiert den Update-Run; kein Restart, klare Fehlerzeile in `LOGS/git_update.last.json`.
 - Merge ist nur via expliziter Action (`merge_restart`) erlaubt und ebenfalls nur mit clean tree; Konflikt → Abbruch ohne Restart.
+- Start/Update sind durch Lockfiles serialisiert (`LOGS/start.lock`, `LOGS/update.lock`); PHP-Server-Logs landen in `LOGS/php_server.out.log`/`LOGS/php_server.err.log`.
 
 ### Datenbankschema (Strukturüberblick)
 | Tabelle | Zweck | Kernfelder/Indizes |
@@ -124,10 +125,10 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 
 ## Installation / Setup
 - **Voraussetzungen**: PHP 8.1+ mit PDO (SQLite/MySQL), JSON, mbstring, fileinfo, gd/imagick; ffmpeg/ffprobe für Videometadaten, Video-Thumbnails und den Selftest; optional exiftool für Metadaten. Datenbank per SQLite-File oder MySQL/MariaDB.
-- **Konfiguration**: `CONFIG/config.php` definiert DB-DSN, Pfade für SFW/NSFW-Bild/Video, Logs/Temp/Backups, optionale Tool-Pfade (ffmpeg/exiftool), Scanner-Endpunkte (Base-URL, Token ODER api_key/api_key_header, Timeout, NSFW-Schwelle), Sicherheitsparameter (internal_api_key, ip_whitelist).
+- **Konfiguration**: `CONFIG/config.php` definiert DB-DSN, Pfade für SFW/NSFW-Bild/Video, Logs/Temp/Backups, optionale Tool-Pfade (ffmpeg/exiftool), Scanner-Endpunkte (Base-URL, Token ODER api_key/api_key_header, Timeout, NSFW-Schwelle), Sicherheitsparameter (internal_api_key, ip_whitelist) sowie `php_cli` (absoluter PHP-CLI-Pfad für Worker-Spawns, z. B. `TOOLS/php/php.exe`).
     - Primäre Quelle ist `/mnt/data/config.php` (z. B. per Container-Volume). Falls dort nichts liegt, nutzt der Loader `CONFIG/config.php` im Repo und fällt mit Warnhinweis auf `CONFIG/config.example.php` zurück; für Deployments die Example-Datei kopieren und insbesondere `internal_api_key`/Pfad-Settings anpassen.
     - Scanner-Auth unterstützt entweder `scanner.token` (Header `Authorization: <token>`) oder das Legacy-Paar `scanner.api_key` + `scanner.api_key_header`. Bilder gehen als Multipart-Feld `image` an `/check`, Videos/GIFs als Multipart-Feld `file` an `/batch` (konfigurierbar über `scanner.batch_endpoint`, Default `/batch`).
-- **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`.
+- **Serverstart**: PHP-Builtin-Server oder Webserver auf `WWW/` zeigen; CLI-Aufrufe von `SCRIPTS/` benötigen PHP-CLI und Zugriff auf `CONFIG/config.php`. `WWW/health.php` liefert einen JSON-Healthcheck (200 + `ok/ts/version`) und wird beim Start geprüft.
 - **Scanner-Verbindung**: `scan_core` ruft den konfigurierten Scanner via HTTP; Token/URL in `CONFIG/config.php` pflegen und Netzwerkzugriff sicherstellen. Bei Scanner-Fehlern werden `scan_results.raw_json` mit `http_status`, `endpoint`, `error` und Snippet gefüllt.
 - **Scanner-Response Contract**: Unterstützt werden drei Response-Typen: **A** (`modules`-Objekt mit `tagging.tags`, `deepdanbooru_tags.tags`, `nsfw_scanner`), **B** (Legacy-Keys wie `modules.tagging`/`modules.nsfw_scanner`, werden in `modules` gespiegelt) und **C** (flaches JSON mit `tags`, `danbooru_tags` sowie NSFW-Klassen `hentai`/`porn`/`sexy`). Tags akzeptieren Strings oder Objekte (`label`/`name`, `score`/`confidence`/`probability`); `rating:*` in String-Listen wird als NSFW-Rating erkannt.
 - **Scanner-Logs (JSONL)**: Jeder Import/Rescan schreibt JSONL-Einträge in `LOGS/scanner_ingest.jsonl` (sanitisiert/gekürzt) mit den ingest/parse/persist-Events. Upload-Metadaten (Endpoint, Feldname, Medientyp, Dateigröße, HTTP-Status) werden mitgeführt.

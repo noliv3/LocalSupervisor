@@ -872,6 +872,7 @@ function sv_scan_with_local_scanner(
                 'http_status' => null,
                 'endpoint'    => null,
                 'error'       => 'scanner_not_configured',
+                'error_code'  => 'scanner_not_configured',
                 'body_snippet'=> null,
                 'response_type_detected' => 'none',
             ],
@@ -939,6 +940,7 @@ function sv_scan_with_local_scanner(
             'http_status' => null,
             'endpoint'    => $endpoint,
             'error'       => $err,
+            'error_code'  => 'curl_error',
             'body_snippet'=> null,
             'response_type_detected' => 'curl_error',
         ];
@@ -1008,6 +1010,7 @@ function sv_scan_with_local_scanner(
             'http_status' => $status,
             'endpoint'    => $endpoint,
             'error'       => $errorMessage ?? 'http_error',
+            'error_code'  => 'http_error',
             'body_snippet'=> $snippet !== '' ? $snippet : null,
             'response_type_detected' => $responseType,
         ];
@@ -1052,6 +1055,7 @@ function sv_scan_with_local_scanner(
             'http_status' => $status,
             'endpoint'    => $endpoint,
             'error'       => 'no_parts_parsed',
+            'error_code'  => 'no_parts_parsed',
             'body_snippet'=> sv_sanitize_scanner_log_snippet($resp, 512),
             'response_type_detected' => $responseType,
         ];
@@ -1072,6 +1076,9 @@ function sv_scan_with_local_scanner(
         'response_shape'     => $responseShape,
         'merged_parts_count' => count($parsedParts),
         'fallback_used'      => false,
+        'http_status'        => $status,
+        'endpoint'           => $endpoint,
+        'response_type_detected' => $responseType,
     ]);
     $merged['ok'] = true;
 
@@ -1116,6 +1123,7 @@ function sv_scan_video_fallback_frames(
                 'http_status' => null,
                 'endpoint'    => 'ffmpeg',
                 'error'       => 'ffmpeg_missing',
+                'error_code'  => 'ffmpeg_missing',
                 'body_snippet'=> null,
                 'response_type_detected' => 'ffmpeg_missing',
             ],
@@ -1147,6 +1155,7 @@ function sv_scan_video_fallback_frames(
                 'http_status' => null,
                 'endpoint'    => 'ffmpeg',
                 'error'       => 'tempdir_failed',
+                'error_code'  => 'tempdir_failed',
                 'body_snippet'=> null,
                 'response_type_detected' => 'ffmpeg_fallback',
             ],
@@ -1190,6 +1199,7 @@ function sv_scan_video_fallback_frames(
                 'http_status' => null,
                 'endpoint'    => 'ffmpeg',
                 'error'       => 'no_frames',
+                'error_code'  => 'no_frames',
                 'body_snippet'=> sv_sanitize_scanner_log_snippet((string)$out, 512),
                 'response_type_detected' => 'ffmpeg_fallback',
             ],
@@ -1225,6 +1235,7 @@ function sv_scan_video_fallback_frames(
                 'http_status' => null,
                 'endpoint'    => 'ffmpeg',
                 'error'       => 'fallback_scan_failed',
+                'error_code'  => 'fallback_scan_failed',
                 'body_snippet'=> null,
                 'response_type_detected' => 'ffmpeg_fallback',
             ],
@@ -1249,6 +1260,9 @@ function sv_scan_video_fallback_frames(
         'response_shape'     => 'fallback_frames',
         'merged_parts_count' => count($scanParts),
         'fallback_used'      => true,
+        'http_status'        => null,
+        'endpoint'           => 'ffmpeg',
+        'response_type_detected' => 'fallback_frames',
     ]);
     $merged['ok'] = true;
 
@@ -1296,7 +1310,7 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): int
         "INSERT OR IGNORE INTO tags (name, type, locked) VALUES (?, ?, 0)"
     );
     $getTagId = $pdo->prepare(
-        "SELECT id FROM tags WHERE name = ?"
+        "SELECT id FROM tags WHERE name = ? AND type = ?"
     );
     $insertMediaTag = $pdo->prepare(
         "INSERT INTO media_tags (media_id, tag_id, confidence, locked) VALUES (?, ?, ?, 0)"
@@ -1309,7 +1323,7 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): int
     foreach ($normalized as $tagInfo) {
         $insertTag->execute([$tagInfo['name'], $tagInfo['type']]);
 
-        $getTagId->execute([$tagInfo['name']]);
+        $getTagId->execute([$tagInfo['name'], $tagInfo['type']]);
         $tagId = (int)$getTagId->fetchColumn();
         if ($tagId <= 0) {
             continue;
@@ -1357,6 +1371,20 @@ function sv_store_scan_result(
         $flags ? json_encode($flags, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
         json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
     ]);
+}
+
+function sv_merge_scan_result_meta(array $baseMeta, array $scanData, ?array $errorMeta, ?string $errorText): array
+{
+    $debug = is_array($scanData['debug'] ?? null) ? $scanData['debug'] : [];
+
+    $baseMeta['error_text'] = $errorText;
+    $baseMeta['error_code'] = $errorMeta['error_code'] ?? ($debug['error_code'] ?? null);
+    $baseMeta['http_status'] = $errorMeta['http_status'] ?? ($debug['http_status'] ?? null);
+    $baseMeta['endpoint'] = $errorMeta['endpoint'] ?? ($debug['endpoint'] ?? null);
+    $baseMeta['body_snippet'] = $errorMeta['body_snippet'] ?? null;
+    $baseMeta['response_type_detected'] = $errorMeta['response_type_detected'] ?? ($debug['response_type_detected'] ?? null);
+
+    return $baseMeta;
 }
 
 function sv_fetch_latest_scan_result(PDO $pdo, int $mediaId): ?array
@@ -2074,6 +2102,15 @@ function sv_import_file(
         if (!empty($scanData['ok'])) {
             $raw = is_array($scanData['raw'] ?? null) ? $scanData['raw'] : [];
             $writtenTags = sv_store_tags($pdo, $mediaId, $scanTags);
+            $scanMeta = sv_merge_scan_result_meta([
+                'tags_written' => $writtenTags,
+                'path_after'   => $destPathDb,
+                'has_nsfw'     => $hasNsfw,
+                'rating'       => $rating,
+                'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
+            ], $scanData, null, null);
             sv_store_scan_result(
                 $pdo,
                 $mediaId,
@@ -2082,15 +2119,7 @@ function sv_import_file(
                 $scanFlags,
                 $raw,
                 $runAt,
-                [
-                    'tags_written' => $writtenTags,
-                    'path_after'   => $destPathDb,
-                    'has_nsfw'     => $hasNsfw,
-                    'rating'       => $rating,
-                    'response_shape' => $scanData['debug']['response_shape'] ?? null,
-                    'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
-                    'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
-                ]
+                $scanMeta
             );
             sv_scanner_persist_log(
                 $pathsCfg,
@@ -2103,7 +2132,24 @@ function sv_import_file(
                 false
             );
         } else {
-            $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : ['notice' => 'scanner_failed'];
+            $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : [
+                'http_status' => null,
+                'endpoint'    => null,
+                'error'       => 'scanner_failed',
+                'error_code'  => 'scanner_failed',
+                'body_snippet'=> null,
+                'response_type_detected' => 'none',
+            ];
+            $errorText = sv_scanner_format_error_message($errorMeta);
+            $scanMeta = sv_merge_scan_result_meta([
+                'tags_written' => 0,
+                'path_after'   => $destPathDb,
+                'has_nsfw'     => $hasNsfw,
+                'rating'       => $rating,
+                'response_shape' => $scanData['debug']['response_shape'] ?? null,
+                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
+            ], $scanData, $errorMeta, $errorText);
             sv_store_scan_result(
                 $pdo,
                 $mediaId,
@@ -2112,16 +2158,8 @@ function sv_import_file(
                 [],
                 $errorMeta,
                 $runAt,
-                [
-                    'tags_written' => 0,
-                    'path_after'   => $destPathDb,
-                    'has_nsfw'     => $hasNsfw,
-                    'rating'       => $rating,
-                    'response_shape' => $scanData['debug']['response_shape'] ?? null,
-                    'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
-                    'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
-                ],
-                sv_scanner_format_error_message($errorMeta)
+                $scanMeta,
+                $errorText
             );
             sv_scanner_persist_log(
                 $pathsCfg,
@@ -2394,26 +2432,35 @@ function sv_rescan_media(
         }
 
         $resultMeta['error'] = 'Datei nicht gefunden';
+        $errorMeta = [
+            'http_status' => null,
+            'endpoint'    => null,
+            'error'       => 'file_missing',
+            'error_code'  => 'file_missing',
+            'body_snippet'=> null,
+            'response_type_detected' => 'none',
+        ];
 
         // Status auf missing setzen
         $stmt = $pdo->prepare("UPDATE media SET status = 'missing' WHERE id = ?");
         $stmt->execute([$id]);
 
+        $scanMeta = sv_merge_scan_result_meta([
+            'tags_written' => 0,
+            'path_before'  => $fullPath,
+            'path_after'   => $fullPath,
+            'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
+            'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
+        ], [], $errorMeta, $resultMeta['error']);
         sv_store_scan_result(
             $pdo,
             $id,
             $scannerName,
             null,
             [],
-            ['notice' => 'file_missing'],
+            $errorMeta,
             $runAt,
-            [
-                'tags_written' => 0,
-                'path_before'  => $fullPath,
-                'path_after'   => $fullPath,
-                'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
-                'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
-            ],
+            $scanMeta,
             $resultMeta['error']
         );
         sv_scanner_persist_log(
@@ -2435,8 +2482,25 @@ function sv_rescan_media(
         if ($logger) {
             $logger("Media ID {$id}: Scanner fehlgeschlagen.");
         }
-        $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : ['notice' => 'scanner_failed'];
+        $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : [
+            'http_status' => null,
+            'endpoint'    => null,
+            'error'       => 'scanner_failed',
+            'error_code'  => 'scanner_failed',
+            'body_snippet'=> null,
+            'response_type_detected' => 'none',
+        ];
         $resultMeta['error'] = sv_scanner_format_error_message($errorMeta);
+        $scanMeta = sv_merge_scan_result_meta([
+            'tags_written' => 0,
+            'path_before'  => $fullPath,
+            'path_after'   => $fullPath,
+            'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
+            'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
+            'response_shape' => $scanData['debug']['response_shape'] ?? null,
+            'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+            'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
+        ], $scanData, $errorMeta, $resultMeta['error']);
         sv_store_scan_result(
             $pdo,
             $id,
@@ -2445,16 +2509,7 @@ function sv_rescan_media(
             [],
             $errorMeta,
             $runAt,
-            [
-                'tags_written' => 0,
-                'path_before'  => $fullPath,
-                'path_after'   => $fullPath,
-                'has_nsfw'     => isset($mediaRow['has_nsfw']) ? (int)$mediaRow['has_nsfw'] : null,
-                'rating'       => isset($mediaRow['rating']) ? (int)$mediaRow['rating'] : null,
-                'response_shape' => $scanData['debug']['response_shape'] ?? null,
-                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
-                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
-            ],
+            $scanMeta,
             $resultMeta['error']
         );
         sv_scanner_persist_log(
@@ -2559,6 +2614,16 @@ function sv_rescan_media(
         $resultMeta['tags_written'] = $writtenTags;
         $runAt = date('c');
         $resultMeta['run_at'] = $runAt;
+        $scanMeta = sv_merge_scan_result_meta([
+            'tags_written' => $writtenTags,
+            'path_before'  => $fullPath,
+            'path_after'   => $newPath,
+            'has_nsfw'     => $hasNsfw,
+            'rating'       => $rating,
+            'response_shape' => $scanData['debug']['response_shape'] ?? null,
+            'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
+            'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
+        ], $scanData, null, null);
         sv_store_scan_result(
             $pdo,
             $id,
@@ -2567,16 +2632,7 @@ function sv_rescan_media(
             $scanFlags,
             $raw,
             $runAt,
-            [
-                'tags_written' => $writtenTags,
-                'path_before'  => $fullPath,
-                'path_after'   => $newPath,
-                'has_nsfw'     => $hasNsfw,
-                'rating'       => $rating,
-                'response_shape' => $scanData['debug']['response_shape'] ?? null,
-                'merged_parts_count' => $scanData['debug']['merged_parts_count'] ?? null,
-                'fallback_used' => $scanData['debug']['fallback_used'] ?? null,
-            ]
+            $scanMeta
         );
         sv_scanner_persist_log(
             $pathsCfg,
@@ -2608,6 +2664,21 @@ function sv_rescan_media(
             $logger("Media ID {$id}: DB-Fehler beim Rescan: " . $e->getMessage());
         }
         $resultMeta['error'] = $e->getMessage();
+        $dbErrorMeta = [
+            'http_status' => null,
+            'endpoint'    => null,
+            'error'       => 'db_error',
+            'error_code'  => 'db_error',
+            'body_snippet'=> null,
+            'response_type_detected' => 'none',
+        ];
+        $scanMeta = sv_merge_scan_result_meta([
+            'tags_written' => $resultMeta['tags_written'] ?? 0,
+            'path_before'  => $fullPath,
+            'path_after'   => $newPath,
+            'has_nsfw'     => $hasNsfw,
+            'rating'       => $rating,
+        ], $scanData, $dbErrorMeta, $resultMeta['error']);
         sv_store_scan_result(
             $pdo,
             $id,
@@ -2616,13 +2687,7 @@ function sv_rescan_media(
             $scanFlags,
             $raw ?? [],
             $runAt,
-            [
-                'tags_written' => $resultMeta['tags_written'] ?? 0,
-                'path_before'  => $fullPath,
-                'path_after'   => $newPath,
-                'has_nsfw'     => $hasNsfw,
-                'rating'       => $rating,
-            ],
+            $scanMeta,
             $resultMeta['error']
         );
         sv_scanner_persist_log(

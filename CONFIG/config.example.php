@@ -30,6 +30,7 @@ return [
         'ip_whitelist'     => ['127.0.0.1', '::1'],
     ],
     'default_nsfw' => 0,
+    'php_cli' => $baseDir . '/TOOLS/php/php.exe',
     'tools' => [
         'ffmpeg'  => 'ffmpeg',
         'ffprobe' => 'ffprobe',

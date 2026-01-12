@@ -164,6 +164,7 @@
 ## Update Center Contract
 - `start.ps1` führt alle 3 Stunden `git fetch` aus, berechnet ahead/behind/dirty und schreibt den Status nach `LOGS/git_status.json` (Runtime-File).
 - `start.ps1` nutzt standardmäßig das Skriptverzeichnis als Basis (über `SV_BASE` überschreibbar) und bevorzugt den PHP-Interpreter unter `TOOLS/php` mit Fallback auf `php` im `PATH`.
+- Start/Update sind durch Lockfiles serialisiert (`LOGS/start.lock`, `LOGS/update.lock`); PHP-Server-Logs landen in `LOGS/php_server.out.log`/`LOGS/php_server.err.log` und der Start prüft `WWW/health.php`.
 - Der Dashboard-Button (Internal-Key/IP-Whitelist) startet einen einmaligen Update-Run via `start.ps1 -Action update_ff_restart`.
 - Update-Run ist FF-only per Default (nur bei `behind>0`), läuft danach `db_backup.php` + Backup-Rotation, `migrate.php` und führt einen Dienst-Restart aus (mindestens PHP-Server).
 - Merge ist nur mit expliziter Action (`merge_restart`) erlaubt; Konflikte oder dirty working tree führen zum Abbruch ohne Restart.
@@ -171,6 +172,7 @@
 
 ## Laufzeit-Notizen (aktuell)
 - Scanner-HTTP liegt zentral in `scan_core.php` und akzeptiert `scanner.token` oder Legacy `scanner.api_key`/`scanner.api_key_header`; Bilder gehen als `image` an `/check`, Videos/GIFs als `file` an `/batch` (Default, override via `scanner.batch_endpoint`). Video-/GIF-Fallback extrahiert temporär Frames per FFmpeg (`scanner.video_fallback_frames=4`, `scanner.video_fallback_max_dim=1280`) und scannt sie über `/check`.
+- Worker-Spawns nutzen `php_cli` aus der Config (absoluter Pfad), mit Fallback auf `TOOLS/php/php.exe` und `php` im PATH.
 - Scanner-Responses unterstützen Typ A (verschachteltes `modules`-Objekt), Typ B (gepunktete Legacy-Keys wie `modules.tagging`) sowie Typ C (flache `tags`/`danbooru_tags` + NSFW-Klassen `hentai`/`porn`/`sexy`); `rating:*` in String-Listen wird erkannt.
 - Scanner-Logs landen als JSONL in `LOGS/scanner_ingest.jsonl` (sanitisiert/gekürzt) mit ingest/parse/persist-Events inkl. Endpoint/Feldname/Medientyp/Dateigröße/HTTP-Status.
 - Parser liest verschachtelte oder gepunktete Modul-Keys; NSFW bleibt `null` wenn kein Modul greift.
