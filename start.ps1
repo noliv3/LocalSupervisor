@@ -200,44 +200,16 @@ function Release-Lock {
 
 function Test-PhpServerPid {
     param([int]$PhpPid)
-    if ($PhpPid -le 0) {
+
+    if ($PhpPid -le 0) { return $false }
+
+    try {
+        $proc = Get-Process -Id $PhpPid -ErrorAction Stop
+    } catch {
         return $false
     }
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$PhpPid" -ErrorAction SilentlyContinue
-    if ($null -eq $proc) {
-        return $false
-    }
-    if ($proc.Name -and $proc.Name -ne 'php.exe') {
-        return $false
-    }
-    if ($proc.ExecutablePath) {
-        $expectedExe = (Resolve-Path -Path $phpExe).Path
-        $procExe = $null
-        try {
-            $procExe = (Resolve-Path -Path $proc.ExecutablePath).Path
-        } catch {
-            $procExe = $proc.ExecutablePath
-        }
-        if ($procExe -and $expectedExe -and ($procExe -ne $expectedExe)) {
-            return $false
-        }
-    }
-    $cmd = $proc.CommandLine
-    if ([string]::IsNullOrWhiteSpace($cmd)) {
-        return $false
-    }
-    $webRoot = (Resolve-Path -Path (Join-Path $base 'WWW')).Path
-    $cmdNormalized = $cmd -replace '/', '\'
-    if ($cmdNormalized -notmatch [regex]::Escape($webRoot)) {
-        return $false
-    }
-    if ($cmdNormalized -notmatch '\-S\s+127\.0\.0\.1:8080') {
-        return $false
-    }
-    if ($cmdNormalized -notmatch '\-t\s+') {
-        return $false
-    }
-    return $true
+
+    return ($proc.ProcessName -ieq 'php')
 }
 
 function Invoke-HealthCheck {
