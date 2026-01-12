@@ -1761,29 +1761,9 @@ function sv_spawn_forge_worker_for_media(
     $spawnCmd       = null;
     $errSnippet     = null;
 
-    $resolvePhpCli = function () use ($config): ?string {
-        $binary      = PHP_BINARY ?? null;
-        $isWindows   = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
-        $hasPhpExe   = is_string($binary) && stripos($binary, 'php.exe') !== false && is_file($binary);
-
-        if ($isWindows && $hasPhpExe) {
-            return $binary;
-        }
-
-        if (!$isWindows && is_string($binary) && $binary !== '') {
-            return $binary;
-        }
-
-        if (!empty($config['php_cli'])) {
-            return (string)$config['php_cli'];
-        }
-
-        return null;
-    };
-
-    $phpCli = $resolvePhpCli();
-    if ($phpCli === null) {
-        $spawnError = 'php cli not resolvable';
+    $phpCli = sv_get_php_cli($config);
+    if ($phpCli === '') {
+        $spawnError = 'php cli not configured';
         $recordSpawnLog('error', $spawnError);
         $errSnippet = substr($spawnError, 0, 200);
     } else {
@@ -2302,22 +2282,55 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     $pid       = null;
     $unknown   = false;
 
-    $parts = ['php', escapeshellarg($script)];
+    $phpCli = sv_get_php_cli($config);
+    $parts = [$phpCli, $script];
     if ($limit !== null && $limit > 0) {
         $parts[] = '--limit=' . (int)$limit;
     }
     if ($pathFilter !== null && trim($pathFilter) !== '') {
-        $parts[] = '--path=' . escapeshellarg($pathFilter);
+        $parts[] = '--path=' . $pathFilter;
     }
     if ($mediaId !== null && $mediaId > 0) {
         $parts[] = '--media-id=' . (int)$mediaId;
     }
-    $cmd = implode(' ', $parts);
+    $isWindows = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
+    if ($isWindows) {
+        $toWindowsPath = static function (string $path): string {
+            return '"' . str_replace('/', '\\', $path) . '"';
+        };
+        $toWindowsArg = static function (string $value): string {
+            $escaped = str_replace('"', '\"', $value);
+            return '"' . $escaped . '"';
+        };
+        $args = [];
+        foreach ($parts as $idx => $part) {
+            if ($idx < 2) {
+                $args[] = $toWindowsPath($part);
+            } elseif (str_starts_with($part, '--path=')) {
+                $pathValue = substr($part, strlen('--path='));
+                $args[] = '--path=' . $toWindowsArg($pathValue);
+            } else {
+                $args[] = $part;
+            }
+        }
+        $cmd = implode(' ', $args);
+    } else {
+        $args = [];
+        foreach ($parts as $part) {
+            if (str_starts_with($part, '--path=')) {
+                $pathValue = substr($part, strlen('--path='));
+                $args[] = '--path=' . escapeshellarg($pathValue);
+            } else {
+                $args[] = escapeshellarg($part);
+            }
+        }
+        $cmd = implode(' ', $args);
+    }
 
     $logger('Starte Scan-Worker: ' . $cmd);
 
-    if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
-        $winCmd = 'start /B "" ' . $cmd;
+    if ($isWindows) {
+        $winCmd = 'cmd.exe /C start "" /B ' . $cmd;
         $proc   = @popen($winCmd, 'r');
         if ($proc !== false) {
             pclose($proc);
@@ -3050,8 +3063,8 @@ function sv_get_or_create_tag(PDO $pdo, string $name, string $type): int
     $insert = $pdo->prepare('INSERT OR IGNORE INTO tags (name, type, locked) VALUES (?, ?, 0)');
     $insert->execute([$name, $type]);
 
-    $idStmt = $pdo->prepare('SELECT id FROM tags WHERE name = ?');
-    $idStmt->execute([$name]);
+    $idStmt = $pdo->prepare('SELECT id FROM tags WHERE name = ? AND type = ?');
+    $idStmt->execute([$name, $type]);
     $tagId = (int)$idStmt->fetchColumn();
     if ($tagId <= 0) {
         throw new RuntimeException('Tag konnte nicht geladen werden.');

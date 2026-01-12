@@ -52,3 +52,31 @@ function sv_load_config(?string $baseDir = null, bool $allowExampleFallback = tr
 
     return $config;
 }
+
+function sv_get_php_cli(array $config = []): string
+{
+    if (!empty($config['php_cli']) && is_string($config['php_cli'])) {
+        return (string)$config['php_cli'];
+    }
+
+    $baseDir = sv_base_dir();
+    $toolsPhp = $baseDir . '/TOOLS/php/php.exe';
+    if (is_file($toolsPhp)) {
+        return $toolsPhp;
+    }
+
+    $isWindows = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
+    if ($isWindows) {
+        $which = @shell_exec('where php 2>NUL');
+    } else {
+        $which = @shell_exec('command -v php 2>/dev/null');
+    }
+    if (is_string($which) && trim($which) !== '') {
+        $lines = preg_split('~\\R~u', trim($which));
+        if (!empty($lines[0])) {
+            return trim($lines[0]);
+        }
+    }
+
+    return 'php';
+}

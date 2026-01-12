@@ -111,6 +111,172 @@ function Write-JsonFile {
     Set-Content -Path $Path -Value $json -Encoding UTF8
 }
 
+function Write-StartLog {
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return
+    }
+    $stamp = (Get-Date).ToString('o')
+    $line = "[$stamp] $Message"
+    Write-Host $line
+    if (-not [string]::IsNullOrWhiteSpace($script:StartLogPath)) {
+        try {
+            Add-Content -Path $script:StartLogPath -Value $line -Encoding UTF8
+        } catch {
+            # Ignore logging failures.
+        }
+    }
+}
+
+function Test-ProcessAlive {
+    param([int]$Pid)
+    if ($Pid -le 0) {
+        return $false
+    }
+    try {
+        Get-Process -Id $Pid -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Acquire-Lock {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+    if (Test-Path -Path $Path) {
+        $info = $null
+        try {
+            $raw = Get-Content -Path $Path -Raw -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                $info = $raw | ConvertFrom-Json
+            }
+        } catch {
+            $info = $null
+        }
+        $existingPid = 0
+        if ($null -ne $info -and $null -ne $info.pid) {
+            $existingPid = [int]$info.pid
+        }
+        if ($existingPid -gt 0 -and (Test-ProcessAlive -Pid $existingPid)) {
+            Write-StartLog "Lock aktiv ($Label), PID $existingPid."
+            return $false
+        }
+        try {
+            Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+        } catch {
+            # Ignore stale lock cleanup errors.
+        }
+    }
+
+    $payload = [ordered]@{
+        pid        = $PID
+        action     = $Label
+        started_at = (Get-Date).ToString('o')
+    }
+    Write-JsonFile -Path $Path -Payload $payload
+    return $true
+}
+
+function Release-Lock {
+    param([string]$Path)
+    if (Test-Path -Path $Path) {
+        try {
+            Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+        } catch {
+            # Ignore cleanup errors.
+        }
+    }
+}
+
+function Test-PhpServerPid {
+    param([int]$Pid)
+    if ($Pid -le 0) {
+        return $false
+    }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$Pid" -ErrorAction SilentlyContinue
+    if ($null -eq $proc) {
+        return $false
+    }
+    if ($proc.Name -and $proc.Name -ne 'php.exe') {
+        return $false
+    }
+    if ($proc.ExecutablePath) {
+        $expectedExe = (Resolve-Path -Path $phpExe).Path
+        $procExe = $null
+        try {
+            $procExe = (Resolve-Path -Path $proc.ExecutablePath).Path
+        } catch {
+            $procExe = $proc.ExecutablePath
+        }
+        if ($procExe -and $expectedExe -and ($procExe -ne $expectedExe)) {
+            return $false
+        }
+    }
+    $cmd = $proc.CommandLine
+    if ([string]::IsNullOrWhiteSpace($cmd)) {
+        return $false
+    }
+    $webRoot = (Resolve-Path -Path (Join-Path $base 'WWW')).Path
+    $cmdNormalized = $cmd -replace '/', '\'
+    if ($cmdNormalized -notmatch [regex]::Escape($webRoot)) {
+        return $false
+    }
+    if ($cmdNormalized -notmatch '\-S\s+127\.0\.0\.1:8080') {
+        return $false
+    }
+    if ($cmdNormalized -notmatch '\-t\s+') {
+        return $false
+    }
+    return $true
+}
+
+function Invoke-HealthCheck {
+    param(
+        [string]$Url,
+        [int]$Attempts = 6,
+        [int]$DelaySeconds = 1
+    )
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        try {
+            $resp = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 4
+            if ($resp -and $resp.StatusCode -eq 200) {
+                return $true
+            }
+        } catch {
+            # ignore and retry
+        }
+        Start-Sleep -Seconds $DelaySeconds
+    }
+    return $false
+}
+
+function Get-DatabasePath {
+    $dsn = & $phpExe @phpArgs -r "require 'SCRIPTS/common.php'; \$cfg = sv_load_config(); echo (string)(\$cfg['db']['dsn'] ?? '');" 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dsn)) {
+        return $null
+    }
+    $dsn = $dsn.Trim()
+    if (-not $dsn.StartsWith('sqlite:')) {
+        return $null
+    }
+    $dbPath = $dsn.Substring(7)
+    if ([string]::IsNullOrWhiteSpace($dbPath)) {
+        return $null
+    }
+    $isAbsolute = $dbPath -match '^(?:[A-Za-z]:\\|\\\\|/)'
+    if (-not $isAbsolute) {
+        $dbPath = Join-Path $base $dbPath
+    }
+    $resolved = Resolve-Path -Path $dbPath -ErrorAction SilentlyContinue
+    if ($resolved) {
+        return $resolved.Path
+    }
+    return $dbPath
+}
+
 function Get-GitStatus {
     $branch = Get-CommandOutput (& git rev-parse --abbrev-ref HEAD 2>$null)
     $head = Get-CommandOutput (& git rev-parse HEAD 2>$null)
@@ -156,6 +322,7 @@ function Update-GitStatus {
     $fetchError = ''
     if (-not $fetchOk) {
         $fetchError = Sanitize-Message (Get-CommandOutput $fetchOutput)
+        Write-StartLog "Git fetch fehlgeschlagen: $fetchError"
     }
 
     $status = Get-GitStatus
@@ -207,29 +374,65 @@ function Rotate-Backups {
     }
 }
 
-function Restart-PhpServer {
+function Start-PhpServer {
+    param([string]$Reason)
     $logDir = Get-LogDir
     $pidPath = Join-Path $logDir 'php_server.pid'
-    if (Test-Path -Path $pidPath) {
-        $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($pidValue -match '^\d+$') {
-            try {
-                Stop-Process -Id ([int]$pidValue) -Force -ErrorAction SilentlyContinue
-            } catch {
-                # Ignore stop errors.
-            }
-        }
-    }
+    $outLog = Join-Path $logDir 'php_server.out.log'
+    $errLog = Join-Path $logDir 'php_server.err.log'
 
     $serverArgs = @()
     if ($phpArgs.Count -gt 0) {
         $serverArgs += $phpArgs
     }
     $serverArgs += @("-S", "127.0.0.1:8080", "-t", "WWW")
-    $proc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -PassThru
+    Write-StartLog "Starte PHP-Server ($Reason)."
+    $proc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
     if ($null -ne $proc) {
         Set-Content -Path $pidPath -Value $proc.Id -Encoding UTF8
     }
+    return $proc
+}
+
+function Restart-PhpServer {
+    param([string]$Reason)
+    $logDir = Get-LogDir
+    $pidPath = Join-Path $logDir 'php_server.pid'
+    if (Test-Path -Path $pidPath) {
+        $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pidValue -match '^\d+$') {
+            $pid = [int]$pidValue
+            if (Test-PhpServerPid -Pid $pid) {
+                try {
+                    Write-StartLog "Stoppe bestehenden PHP-Server (PID $pid)."
+                    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                } catch {
+                    # Ignore stop errors.
+                }
+            } else {
+                Write-StartLog "PID $pid ist kein gültiger PHP-Server, ignoriert."
+            }
+        }
+    }
+
+    $proc = Start-PhpServer -Reason $Reason
+    if ($null -eq $proc) {
+        return $false
+    }
+
+    $healthOk = Invoke-HealthCheck -Url 'http://127.0.0.1:8080/health.php'
+    if (-not $healthOk) {
+        Write-StartLog 'Healthcheck fehlgeschlagen, stoppe PHP-Server.'
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        } catch {
+            # Ignore stop errors.
+        }
+        return $false
+    }
+
+    Write-StartLog 'Healthcheck erfolgreich.'
+    return $true
 }
 
 $action = ''
@@ -239,14 +442,29 @@ if ($UpdateNow.IsPresent) {
     $action = $Action.Trim()
 }
 
+$logDir = Get-LogDir
+$script:StartLogPath = Join-Path $logDir 'start.log'
+$startLockPath = Join-Path $logDir 'start.lock'
+$updateLockPath = Join-Path $logDir 'update.lock'
+if (-not (Acquire-Lock -Path $startLockPath -Label 'start')) {
+    Write-Host "Start bereits aktiv (Lock: $startLockPath)."
+    exit 1
+}
+
 if ($action -ne '') {
-    $allowedActions = @('update_ff_restart', 'merge_restart')
-    if (-not ($allowedActions -contains $action)) {
-        Write-Host "Unbekannte Aktion: $action"
+    if (-not (Acquire-Lock -Path $updateLockPath -Label $action)) {
+        Release-Lock -Path $startLockPath
+        Write-Host "Update bereits aktiv (Lock: $updateLockPath)."
         exit 1
     }
 
-    $logDir = Get-LogDir
+    try {
+        $allowedActions = @('update_ff_restart', 'merge_restart')
+        if (-not ($allowedActions -contains $action)) {
+            Write-Host "Unbekannte Aktion: $action"
+            exit 1
+        }
+
     $lastPath = Join-Path $logDir 'git_update.last.json'
     $startedAt = (Get-Date).ToString('o')
     $beforeStatus = Update-GitStatus
@@ -303,6 +521,8 @@ if ($action -ne '') {
                 $result['short_error'] = Sanitize-Message (Get-CommandOutput $pullOutput)
                 $result['finished_at'] = (Get-Date).ToString('o')
                 Write-JsonFile -Path $lastPath -Payload $result
+                Write-StartLog "Git Pull fehlgeschlagen, rollback auf $($beforeStatus['head'])."
+                & git reset --hard $beforeStatus['head'] 2>$null
                 exit 1
             }
             $steps['pull'] = 'ff'
@@ -315,6 +535,8 @@ if ($action -ne '') {
             $result['short_error'] = Sanitize-Message (Get-CommandOutput $pullOutput)
             $result['finished_at'] = (Get-Date).ToString('o')
             Write-JsonFile -Path $lastPath -Payload $result
+            Write-StartLog "Git Pull fehlgeschlagen, rollback auf $($beforeStatus['head'])."
+            & git reset --hard $beforeStatus['head'] 2>$null
             exit 1
         }
         $conflicts = Get-CommandOutput (& git diff --name-only --diff-filter=U 2>$null)
@@ -323,6 +545,7 @@ if ($action -ne '') {
             $result['short_error'] = 'Merge-Konflikt erkannt, Abbruch.'
             $result['finished_at'] = (Get-Date).ToString('o')
             Write-JsonFile -Path $lastPath -Payload $result
+            & git reset --hard $beforeStatus['head'] 2>$null
             exit 1
         }
         $steps['pull'] = 'merge'
@@ -350,12 +573,34 @@ if ($action -ne '') {
         $steps['migrate'] = 'error'
         $result['steps'] = $steps
         Write-JsonFile -Path $lastPath -Payload $result
+        Write-StartLog "Migration fehlgeschlagen, starte Rollback."
+        $dbPath = Get-DatabasePath
+        if ($dbPath) {
+            $latestBackup = Get-ChildItem -Path $backupDir -File -Filter 'supervisor_*.sqlite' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($latestBackup) {
+                try {
+                    Copy-Item -Path $latestBackup.FullName -Destination $dbPath -Force
+                    Write-StartLog "DB-Backup wiederhergestellt: $($latestBackup.Name)"
+                } catch {
+                    Write-StartLog "DB-Restore fehlgeschlagen: $($_.Exception.Message)"
+                }
+            }
+        }
+        & git reset --hard $beforeStatus['head'] 2>$null
         exit 1
     }
     $steps['migrate'] = 'ok'
 
-    Restart-PhpServer
-    $steps['restart'] = 'php'
+    $restartOk = Restart-PhpServer -Reason 'update'
+    $steps['restart'] = $restartOk ? 'php' : 'php_failed'
+    if (-not $restartOk) {
+        $result['short_error'] = 'Healthcheck fehlgeschlagen.'
+        $result['finished_at'] = (Get-Date).ToString('o')
+        $result['steps'] = $steps
+        Write-JsonFile -Path $lastPath -Payload $result
+        exit 1
+    }
 
     $afterStatus = Update-GitStatus
     $result['after'] = [ordered]@{
@@ -370,30 +615,52 @@ if ($action -ne '') {
     $result['finished_at'] = (Get-Date).ToString('o')
     Write-JsonFile -Path $lastPath -Payload $result
     exit 0
-}
-
-Write-Host "Starte SuperVisOr (DB-Init + PHP-Server)..."
-
-& $phpExe @phpArgs "SCRIPTS\init_db.php"
-
-$logDir = Get-LogDir
-$pidPath = Join-Path $logDir 'php_server.pid'
-$serverArgs = @()
-if ($phpArgs.Count -gt 0) {
-    $serverArgs += $phpArgs
-}
-$serverArgs += @("-S", "127.0.0.1:8080", "-t", "WWW")
-$phpProc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -PassThru
-if ($null -ne $phpProc) {
-    Set-Content -Path $pidPath -Value $phpProc.Id -Encoding UTF8
-}
-
-$nextFetch = Get-Date
-while ($true) {
-    $now = Get-Date
-    if ($now -ge $nextFetch) {
-        Update-GitStatus | Out-Null
-        $nextFetch = $now.AddHours([double]$FetchIntervalHours)
+    } finally {
+        Release-Lock -Path $updateLockPath
+        Release-Lock -Path $startLockPath
     }
-    Start-Sleep -Seconds 10
+}
+
+try {
+    Write-StartLog 'Starte SuperVisOr (DB-Init + PHP-Server)...'
+
+    $initOutput = & $phpExe @phpArgs "SCRIPTS\init_db.php" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $initMessage = Sanitize-Message (Get-CommandOutput $initOutput)
+        Write-StartLog "DB-Init fehlgeschlagen: $initMessage"
+        exit 1
+    }
+
+    $serverOk = Restart-PhpServer -Reason 'startup'
+    if (-not $serverOk) {
+        Write-StartLog 'PHP-Server konnte nicht gestartet werden.'
+        exit 1
+    }
+
+    $pidPath = Join-Path $logDir 'php_server.pid'
+    $nextFetch = Get-Date
+    while ($true) {
+        $now = Get-Date
+        if ($now -ge $nextFetch) {
+            Update-GitStatus | Out-Null
+            $nextFetch = $now.AddHours([double]$FetchIntervalHours)
+        }
+
+        $currentPid = 0
+        if (Test-Path -Path $pidPath) {
+            $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($pidValue -match '^\d+$') {
+                $currentPid = [int]$pidValue
+            }
+        }
+
+        if ($currentPid -le 0 -or -not (Test-PhpServerPid -Pid $currentPid)) {
+            Write-StartLog 'PHP-Server nicht aktiv, Neustart durch Watchdog.'
+            Restart-PhpServer -Reason 'watchdog' | Out-Null
+        }
+
+        Start-Sleep -Seconds 5
+    }
+} finally {
+    Release-Lock -Path $startLockPath
 }

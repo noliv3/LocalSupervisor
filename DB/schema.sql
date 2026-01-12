@@ -55,10 +55,13 @@ CREATE INDEX IF NOT EXISTS idx_media_imported_at
 
 CREATE TABLE IF NOT EXISTS tags (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    name    TEXT NOT NULL UNIQUE,
+    name    TEXT NOT NULL,
     type    TEXT NOT NULL DEFAULT 'content', -- content, style, character, nsfw, technical, other
     locked  INTEGER NOT NULL DEFAULT 0       -- 0/1
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_type
+    ON tags(name, type);
 
 CREATE TABLE IF NOT EXISTS media_tags (
     media_id    INTEGER NOT NULL,
