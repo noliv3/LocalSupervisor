@@ -5,6 +5,13 @@ param(
     [int]$BackupKeep = 8
 )
 
+$action = ''
+if ($UpdateNow.IsPresent) {
+    $action = 'update_ff_restart'
+} elseif (-not [string]::IsNullOrWhiteSpace($Action)) {
+    $action = $Action.Trim()
+}
+
 $scriptRoot = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
     $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -435,36 +442,41 @@ function Restart-PhpServer {
     return $true
 }
 
-$action = ''
-if ($UpdateNow.IsPresent) {
-    $action = 'update_ff_restart'
-} elseif (-not [string]::IsNullOrWhiteSpace($Action)) {
-    $action = $Action.Trim()
-}
-
 $logDir = Get-LogDir
 $script:StartLogPath = Join-Path $logDir 'start.log'
 $startLockPath = Join-Path $logDir 'start.lock'
 $updateLockPath = Join-Path $logDir 'update.lock'
-if (-not (Acquire-Lock -Path $startLockPath -Label 'start')) {
-    Write-Host "Start bereits aktiv (Lock: $startLockPath)."
-    exit 1
+$allowedUpdateActions = @('update_ff_restart', 'merge_restart')
+$isUpdateAction = $action -ne '' -and ($allowedUpdateActions -contains $action)
+if (-not $isUpdateAction) {
+    if (-not (Acquire-Lock -Path $startLockPath -Label 'start')) {
+        Write-Host "Start bereits aktiv (Lock: $startLockPath)."
+        exit 1
+    }
 }
 
 if ($action -ne '') {
-    if (-not (Acquire-Lock -Path $updateLockPath -Label $action)) {
+    if (-not $isUpdateAction) {
         Release-Lock -Path $startLockPath
+        Write-Host "Unbekannte Aktion: $action"
+        exit 1
+    }
+
+    if (-not (Acquire-Lock -Path $updateLockPath -Label $action)) {
+        $lastPath = Join-Path $logDir 'git_update.last.json'
+        $payload = [ordered]@{
+            action = $action
+            started_at = (Get-Date).ToString('o')
+            result = 'error'
+            reason = 'update_lock_busy'
+            finished_at = (Get-Date).ToString('o')
+        }
+        Write-JsonFile -Path $lastPath -Payload $payload
         Write-Host "Update bereits aktiv (Lock: $updateLockPath)."
         exit 1
     }
 
     try {
-        $allowedActions = @('update_ff_restart', 'merge_restart')
-        if (-not ($allowedActions -contains $action)) {
-            Write-Host "Unbekannte Aktion: $action"
-            exit 1
-        }
-
     $lastPath = Join-Path $logDir 'git_update.last.json'
     $startedAt = (Get-Date).ToString('o')
     $beforeStatus = Update-GitStatus
@@ -617,7 +629,6 @@ if ($action -ne '') {
     exit 0
     } finally {
         Release-Lock -Path $updateLockPath
-        Release-Lock -Path $startLockPath
     }
 }
 

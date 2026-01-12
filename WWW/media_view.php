@@ -1020,6 +1020,11 @@ $latestScanRating      = $latestScan['rating'] ?? null;
 $latestScanHasNsfw     = $latestScan['has_nsfw'] ?? null;
 $latestScanTagsWritten = $latestScan['tags_written'] ?? null;
 $latestScanError       = $latestScan['error'] ?? null;
+$latestScanErrorCode   = $latestScan['error_code'] ?? null;
+$latestScanHttpStatus  = $latestScan['http_status'] ?? null;
+$latestScanEndpoint    = $latestScan['endpoint'] ?? null;
+$latestScanResponseType = $latestScan['response_type_detected'] ?? null;
+$latestScanBodySnippet = $latestScan['body_snippet'] ?? null;
 $latestScanMetaText    = $latestScan
     ? ('Scanner: ' . ($latestScanScanner !== '' ? $latestScanScanner : 'unknown')
         . ' · NSFW: ' . ($latestScanNsfw !== null ? $latestScanNsfw : '–')
@@ -1480,6 +1485,26 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                             <span>Tags</span>
                             <strong id="scan-tags"><?= htmlspecialchars($latestScanTagsText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
                             <em class="small">locked=1 bleibt geschützt</em>
+                        </div>
+                        <div class="meta-line" id="scan-error-code-line" style="<?= $latestScanErrorCode !== null ? '' : 'display:none;' ?>">
+                            <span>Error-Code</span>
+                            <strong id="scan-error-code"><?= htmlspecialchars((string)($latestScanErrorCode ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        </div>
+                        <div class="meta-line" id="scan-http-status-line" style="<?= $latestScanHttpStatus !== null ? '' : 'display:none;' ?>">
+                            <span>HTTP-Status</span>
+                            <strong id="scan-http-status"><?= htmlspecialchars((string)($latestScanHttpStatus ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        </div>
+                        <div class="meta-line" id="scan-endpoint-line" style="<?= $latestScanEndpoint !== null && $latestScanEndpoint !== '' ? '' : 'display:none;' ?>">
+                            <span>Endpoint</span>
+                            <strong id="scan-endpoint"><?= htmlspecialchars((string)($latestScanEndpoint ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        </div>
+                        <div class="meta-line" id="scan-response-type-line" style="<?= $latestScanResponseType !== null && $latestScanResponseType !== '' ? '' : 'display:none;' ?>">
+                            <span>Response</span>
+                            <strong id="scan-response-type"><?= htmlspecialchars((string)($latestScanResponseType ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        </div>
+                        <div class="meta-line" id="scan-body-snippet-line" style="<?= $latestScanBodySnippet !== null && $latestScanBodySnippet !== '' ? '' : 'display:none;' ?>">
+                            <span>Body-Snippet</span>
+                            <strong id="scan-body-snippet"><?= htmlspecialchars($latestScanBodySnippet !== null ? sv_meta_value((string)$latestScanBodySnippet, 300) : '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
                         </div>
                         <div class="job-error inline" id="scan-error" style="<?= $latestScanError ? '' : 'display:none;' ?>"><?= htmlspecialchars((string)($latestScanError ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                         <div class="hint small" id="scan-empty" style="<?= ($latestScanRunAt === '' && $latestScanError === null) ? '' : 'display:none;' ?>">Kein Scan-Ergebnis gespeichert.</div>
@@ -2111,6 +2136,16 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
     const scanTags = document.getElementById('scan-tags');
     const scanError = document.getElementById('scan-error');
     const scanEmpty = document.getElementById('scan-empty');
+    const scanErrorCodeLine = document.getElementById('scan-error-code-line');
+    const scanErrorCode = document.getElementById('scan-error-code');
+    const scanHttpStatusLine = document.getElementById('scan-http-status-line');
+    const scanHttpStatus = document.getElementById('scan-http-status');
+    const scanEndpointLine = document.getElementById('scan-endpoint-line');
+    const scanEndpoint = document.getElementById('scan-endpoint');
+    const scanResponseTypeLine = document.getElementById('scan-response-type-line');
+    const scanResponseType = document.getElementById('scan-response-type');
+    const scanBodySnippetLine = document.getElementById('scan-body-snippet-line');
+    const scanBodySnippet = document.getElementById('scan-body-snippet');
     const rescanErrorBox = document.getElementById('rescan-last-error');
     const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'rescan_jobs'])) ?>';
 
@@ -2152,6 +2187,46 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 scanError.textContent = err;
                 scanError.style.display = err ? '' : 'none';
             }
+            const errorCodeVal = latestScan.error_code || '';
+            if (scanErrorCodeLine) {
+                scanErrorCodeLine.style.display = errorCodeVal ? '' : 'none';
+            }
+            if (scanErrorCode) {
+                scanErrorCode.textContent = errorCodeVal;
+            }
+            const httpStatusVal = (typeof latestScan.http_status === 'undefined' || latestScan.http_status === null)
+                ? ''
+                : String(latestScan.http_status);
+            if (scanHttpStatusLine) {
+                scanHttpStatusLine.style.display = httpStatusVal ? '' : 'none';
+            }
+            if (scanHttpStatus) {
+                scanHttpStatus.textContent = httpStatusVal;
+            }
+            const endpointVal = latestScan.endpoint || '';
+            if (scanEndpointLine) {
+                scanEndpointLine.style.display = endpointVal ? '' : 'none';
+            }
+            if (scanEndpoint) {
+                scanEndpoint.textContent = endpointVal;
+            }
+            const responseTypeVal = latestScan.response_type_detected || '';
+            if (scanResponseTypeLine) {
+                scanResponseTypeLine.style.display = responseTypeVal ? '' : 'none';
+            }
+            if (scanResponseType) {
+                scanResponseType.textContent = responseTypeVal;
+            }
+            let snippetVal = latestScan.body_snippet || '';
+            if (snippetVal.length > 300) {
+                snippetVal = snippetVal.slice(0, 300);
+            }
+            if (scanBodySnippetLine) {
+                scanBodySnippetLine.style.display = snippetVal ? '' : 'none';
+            }
+            if (scanBodySnippet) {
+                scanBodySnippet.textContent = snippetVal;
+            }
         } else {
             if (scanRunAt) {
                 scanRunAt.textContent = '—';
@@ -2167,6 +2242,21 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
             }
             if (scanError) {
                 scanError.style.display = 'none';
+            }
+            if (scanErrorCodeLine) {
+                scanErrorCodeLine.style.display = 'none';
+            }
+            if (scanHttpStatusLine) {
+                scanHttpStatusLine.style.display = 'none';
+            }
+            if (scanEndpointLine) {
+                scanEndpointLine.style.display = 'none';
+            }
+            if (scanResponseTypeLine) {
+                scanResponseTypeLine.style.display = 'none';
+            }
+            if (scanBodySnippetLine) {
+                scanBodySnippetLine.style.display = 'none';
             }
         }
         if (first && jobLine) {
