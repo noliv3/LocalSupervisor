@@ -218,7 +218,7 @@ async function ensureAllAssets(manifest, stateDir) {
   return results;
 }
 
-async function listAssetStatuses(manifest, stateDir) {
+async function listAssetStatuses(manifest, stateDir = getStateDir()) {
   const results = [];
   const categories = [
     ['workflows', manifest.workflows || []],
