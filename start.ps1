@@ -5,9 +5,38 @@ param(
     [int]$BackupKeep = 8
 )
 
-$base   = "I:\SuperVisOr"
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+
+$base = $env:SV_BASE
+if ([string]::IsNullOrWhiteSpace($base)) {
+    $base = $scriptRoot
+}
+if (-not (Test-Path -Path $base)) {
+    Write-Host "Basisverzeichnis nicht gefunden: $base"
+    exit 1
+}
+$base = (Resolve-Path -Path $base).Path
+
 $phpExe = Join-Path $base "TOOLS\php\php.exe"
-$ini    = Join-Path $base "TOOLS\php\php.ini"
+if (-not (Test-Path -Path $phpExe)) {
+    $phpCmd = Get-Command php -ErrorAction SilentlyContinue
+    if ($null -ne $phpCmd) {
+        $phpExe = $phpCmd.Source
+    }
+}
+if (-not (Test-Path -Path $phpExe)) {
+    Write-Host "php.exe nicht gefunden (TOOLS\\php oder PATH)."
+    exit 1
+}
+
+$ini = Join-Path $base "TOOLS\php\php.ini"
+$phpArgs = @()
+if (Test-Path -Path $ini) {
+    $phpArgs += @('-c', $ini)
+}
 
 Set-Location $base
 
@@ -17,9 +46,9 @@ function Sanitize-Message {
         return ''
     }
     $value = $Message -replace '\s+', ' '
-    $value = $value -replace '(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s\'\"]+', '<dsn>'
-    $value = $value -replace '(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s\'\",;]+', '$1=<redacted>'
-    $value = $value -replace '(?:(?:[A-Za-z]:)?[\\/](?:[^\s\'"<>]+))+', '[path]'
+    $value = $value -replace "(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s'`\"]+", '<dsn>'
+    $value = $value -replace "(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s'`\",;]+", '$1=<redacted>'
+    $value = $value -replace "(?:(?:[A-Za-z]:)?[\\/](?:[^\s'`\"<>]+))+", '[path]'
     if ($value.Length -gt 200) {
         $value = $value.Substring(0, 200)
     }
@@ -43,7 +72,7 @@ function Get-ConfigPath {
         [string]$Fallback
     )
 
-    $value = & $phpExe -c $ini -r "require 'SCRIPTS/common.php'; \$cfg = sv_load_config(); \$val = {$Expr}; if (is_string(\$val) && \$val !== '') { echo \$val; }" 2>$null
+    $value = & $phpExe @phpArgs -r "require 'SCRIPTS/common.php'; \$cfg = sv_load_config(); \$val = {$Expr}; if (is_string(\$val) && \$val !== '') { echo \$val; }" 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
         return $Fallback
     }
@@ -192,7 +221,12 @@ function Restart-PhpServer {
         }
     }
 
-    $proc = Start-Process -FilePath $phpExe -ArgumentList "-c", $ini, "-S", "127.0.0.1:8080", "-t", "WWW" -PassThru
+    $serverArgs = @()
+    if ($phpArgs.Count -gt 0) {
+        $serverArgs += $phpArgs
+    }
+    $serverArgs += @("-S", "127.0.0.1:8080", "-t", "WWW")
+    $proc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -PassThru
     if ($null -ne $proc) {
         Set-Content -Path $pidPath -Value $proc.Id -Encoding UTF8
     }
@@ -294,7 +328,7 @@ if ($action -ne '') {
         $steps['pull'] = 'merge'
     }
 
-    $backupOutput = & $phpExe -c $ini "SCRIPTS\db_backup.php" 2>&1
+    $backupOutput = & $phpExe @phpArgs "SCRIPTS\db_backup.php" 2>&1
     if ($LASTEXITCODE -ne 0) {
         $result['short_error'] = Sanitize-Message (Get-CommandOutput $backupOutput)
         $result['finished_at'] = (Get-Date).ToString('o')
@@ -309,7 +343,7 @@ if ($action -ne '') {
     Rotate-Backups -BackupDir $backupDir -Keep $BackupKeep
     $steps['backup_rotate'] = "keep=$BackupKeep"
 
-    $migrateOutput = & $phpExe -c $ini "SCRIPTS\migrate.php" 2>&1
+    $migrateOutput = & $phpExe @phpArgs "SCRIPTS\migrate.php" 2>&1
     if ($LASTEXITCODE -ne 0) {
         $result['short_error'] = Sanitize-Message (Get-CommandOutput $migrateOutput)
         $result['finished_at'] = (Get-Date).ToString('o')
@@ -340,11 +374,16 @@ if ($action -ne '') {
 
 Write-Host "Starte SuperVisOr (DB-Init + PHP-Server)..."
 
-& $phpExe -c $ini "SCRIPTS\init_db.php"
+& $phpExe @phpArgs "SCRIPTS\init_db.php"
 
 $logDir = Get-LogDir
 $pidPath = Join-Path $logDir 'php_server.pid'
-$phpProc = Start-Process -FilePath $phpExe -ArgumentList "-c", $ini, "-S", "127.0.0.1:8080", "-t", "WWW" -PassThru
+$serverArgs = @()
+if ($phpArgs.Count -gt 0) {
+    $serverArgs += $phpArgs
+}
+$serverArgs += @("-S", "127.0.0.1:8080", "-t", "WWW")
+$phpProc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -PassThru
 if ($null -ne $phpProc) {
     Set-Content -Path $pidPath -Value $phpProc.Id -Encoding UTF8
 }

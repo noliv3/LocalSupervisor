@@ -43,6 +43,7 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 
 ## Update Center (Dashboard)
 - `start.ps1` schreibt alle 3 Stunden einen Git-Status (`git fetch` + ahead/behind/dirty) nach `LOGS/git_status.json`.
+- `start.ps1` nutzt standardmäßig das Skriptverzeichnis als Basis (optional `SV_BASE`) und verwendet `TOOLS/php` falls vorhanden, sonst `php` aus dem `PATH`.
 - Der Dashboard-Button (nur Internal-Key/IP-Whitelist) startet einen einmaligen Update-Run über `start.ps1 -Action update_ff_restart`.
 - Update-Run-Reihenfolge: FF-only Pull (nur wenn `behind>0`), `php SCRIPTS/db_backup.php`, Backup-Rotation (Default: 8 letzte Snapshots), `php SCRIPTS/migrate.php`, Dienst-Restart (mindestens PHP-Server).
 - Dirty Working Tree oder nicht mögliches FF (Divergenz) blockiert den Update-Run; kein Restart, klare Fehlerzeile in `LOGS/git_update.last.json`.

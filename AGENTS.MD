@@ -163,6 +163,7 @@
 
 ## Update Center Contract
 - `start.ps1` führt alle 3 Stunden `git fetch` aus, berechnet ahead/behind/dirty und schreibt den Status nach `LOGS/git_status.json` (Runtime-File).
+- `start.ps1` nutzt standardmäßig das Skriptverzeichnis als Basis (über `SV_BASE` überschreibbar) und bevorzugt den PHP-Interpreter unter `TOOLS/php` mit Fallback auf `php` im `PATH`.
 - Der Dashboard-Button (Internal-Key/IP-Whitelist) startet einen einmaligen Update-Run via `start.ps1 -Action update_ff_restart`.
 - Update-Run ist FF-only per Default (nur bei `behind>0`), läuft danach `db_backup.php` + Backup-Rotation, `migrate.php` und führt einen Dienst-Restart aus (mindestens PHP-Server).
 - Merge ist nur mit expliziter Action (`merge_restart`) erlaubt; Konflikte oder dirty working tree führen zum Abbruch ohne Restart.
