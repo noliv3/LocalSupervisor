@@ -46,9 +46,9 @@ function Sanitize-Message {
         return ''
     }
     $value = $Message -replace '\s+', ' '
-    $value = $value -replace '(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s\'\"]+', '<dsn>'
-    $value = $value -replace '(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s\'\",;]+', '$1=<redacted>'
-    $value = $value -replace '(?:(?:[A-Za-z]:)?[\\/](?:[^\s\'"<>]+))+', '[path]'
+    $value = $value -replace "(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s'`\"]+", '<dsn>'
+    $value = $value -replace "(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s'`\",;]+", '$1=<redacted>'
+    $value = $value -replace "(?:(?:[A-Za-z]:)?[\\/](?:[^\s'`\"<>]+))+", '[path]'
     if ($value.Length -gt 200) {
         $value = $value.Substring(0, 200)
     }
