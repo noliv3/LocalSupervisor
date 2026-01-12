@@ -53,9 +53,9 @@ function Sanitize-Message {
         return ''
     }
     $value = $Message -replace '\s+', ' '
-    $value = $value -replace "(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s'`\"]+", '<dsn>'
-    $value = $value -replace "(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s'`\",;]+", '$1=<redacted>'
-    $value = $value -replace "(?:(?:[A-Za-z]:)?[\\/](?:[^\s'`\"<>]+))+", '[path]'
+    $value = $value -replace '(?i)\b(?:mysql|pgsql|sqlite|sqlsrv):[^\s''`"]+', '<dsn>'
+    $value = $value -replace '(?i)\b(api[_-]?key|token|secret|password|pass)\s*[:=]\s*[^\s''`",;]+', '$1=<redacted>'
+    $value = $value -replace '(?:(?:[A-Za-z]:)?[\\/](?:[^\s''`"<>]+))+', '[path]'
     if ($value.Length -gt 200) {
         $value = $value.Substring(0, 200)
     }
@@ -136,12 +136,12 @@ function Write-StartLog {
 }
 
 function Test-ProcessAlive {
-    param([int]$Pid)
-    if ($Pid -le 0) {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) {
         return $false
     }
     try {
-        Get-Process -Id $Pid -ErrorAction Stop | Out-Null
+        Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null
         return $true
     } catch {
         return $false
@@ -163,12 +163,12 @@ function Acquire-Lock {
         } catch {
             $info = $null
         }
-        $existingPid = 0
+        $existingProcessId = 0
         if ($null -ne $info -and $null -ne $info.pid) {
-            $existingPid = [int]$info.pid
+            $existingProcessId = [int]$info.pid
         }
-        if ($existingPid -gt 0 -and (Test-ProcessAlive -Pid $existingPid)) {
-            Write-StartLog "Lock aktiv ($Label), PID $existingPid."
+        if ($existingProcessId -gt 0 -and (Test-ProcessAlive -ProcessId $existingProcessId)) {
+            Write-StartLog "Lock aktiv ($Label), PID $existingProcessId."
             return $false
         }
         try {
@@ -199,11 +199,11 @@ function Release-Lock {
 }
 
 function Test-PhpServerPid {
-    param([int]$Pid)
-    if ($Pid -le 0) {
+    param([int]$PhpPid)
+    if ($PhpPid -le 0) {
         return $false
     }
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$Pid" -ErrorAction SilentlyContinue
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$PhpPid" -ErrorAction SilentlyContinue
     if ($null -eq $proc) {
         return $false
     }
@@ -408,16 +408,16 @@ function Restart-PhpServer {
     if (Test-Path -Path $pidPath) {
         $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($pidValue -match '^\d+$') {
-            $pid = [int]$pidValue
-            if (Test-PhpServerPid -Pid $pid) {
+            $phpPid = [int]$pidValue
+            if (Test-PhpServerPid -PhpPid $phpPid) {
                 try {
-                    Write-StartLog "Stoppe bestehenden PHP-Server (PID $pid)."
-                    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                    Write-StartLog "Stoppe bestehenden PHP-Server (PID $phpPid)."
+                    Stop-Process -Id $phpPid -Force -ErrorAction SilentlyContinue
                 } catch {
                     # Ignore stop errors.
                 }
             } else {
-                Write-StartLog "PID $pid ist kein gültiger PHP-Server, ignoriert."
+                Write-StartLog "PID $phpPid ist kein gültiger PHP-Server, ignoriert."
             }
         }
     }
@@ -605,7 +605,11 @@ if ($action -ne '') {
     $steps['migrate'] = 'ok'
 
     $restartOk = Restart-PhpServer -Reason 'update'
-    $steps['restart'] = $restartOk ? 'php' : 'php_failed'
+    if ($restartOk) {
+        $steps['restart'] = 'php'
+    } else {
+        $steps['restart'] = 'php_failed'
+    }
     if (-not $restartOk) {
         $result['short_error'] = 'Healthcheck fehlgeschlagen.'
         $result['finished_at'] = (Get-Date).ToString('o')
@@ -657,15 +661,15 @@ try {
             $nextFetch = $now.AddHours([double]$FetchIntervalHours)
         }
 
-        $currentPid = 0
+        $currentProcessId = 0
         if (Test-Path -Path $pidPath) {
             $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($pidValue -match '^\d+$') {
-                $currentPid = [int]$pidValue
+                $currentProcessId = [int]$pidValue
             }
         }
 
-        if ($currentPid -le 0 -or -not (Test-PhpServerPid -Pid $currentPid)) {
+        if ($currentProcessId -le 0 -or -not (Test-PhpServerPid -PhpPid $currentProcessId)) {
             Write-StartLog 'PHP-Server nicht aktiv, Neustart durch Watchdog.'
             Restart-PhpServer -Reason 'watchdog' | Out-Null
         }
