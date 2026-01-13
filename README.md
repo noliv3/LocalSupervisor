@@ -8,6 +8,132 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 - **AGENTS.MD**: Verbindliche Anforderungen, Prozesse, Sicherheits- und Architekturregeln.
 - **Log.md**: Änderungs- und Revisionsprotokoll.
 
+## Prüflisten-Ziel (Betriebschecks in Modulen)
+Die Prüfliste zerlegt den Betrieb in Module mit **Sollzustand**, **Nachweis** und **Stop-Kriterium**. Die Reihenfolge ist verbindlich: **passiv → aktiv → destruktiv**. Die Nachweise sind als Read-Only-Checks definiert und dürfen die laufenden Prozesse nicht verändern. Stop-Kriterien sind strikt einzuhalten, sobald ein Risiko für Datenverlust oder Prozess-Stürme erkennbar ist.
+
+### 0. Regeln (passiv → aktiv → destruktiv)
+- **Sollzustand**: Prüfungen erfolgen stufenweise (passiv/aktiv/destruktiv) ohne Seiteneffekte.
+- **Nachweis**:
+  - Passiv: nur lesen, keine Prozesse ändern.
+  - Aktiv: Requests, Read-Only-Checks, keine Löschungen.
+  - Destruktiv: Stop, Kill, Restore, Reset.
+  - Stop-Kriterium: Datenverlust-Risiko oder Prozess-Sturm.
+- **Stop-Kriterium**: Datenverlust-Risiko oder Prozess-Sturm.
+
+### 1. Basisumgebung
+- **Sollzustand**: Basisverzeichnis eindeutig; Schreibrechte für LOGS, BACKUPS, DB-Datei, Medienordner.
+- **Nachweis**: `$env:SV_BASE` oder Scriptroot zeigt auf Projekt; Dateien lassen sich erstellen und wieder löschen.
+- **Stop-Kriterium**: Datenverlust-Risiko oder Prozess-Sturm.
+
+### 2. Git-Stand und Update-Kanal
+- **Sollzustand**: Working Tree sauber; Fetch funktioniert; Ahead/Behind plausibel; Update-Locks blockieren Parallel-Updates.
+- **Nachweis**:
+  - `git status --porcelain` ist leer.
+  - `LOGS/git_status.json` enthält `fetch_ok: true`.
+  - `git_status` enthält `ahead`/`behind` als Zahlen oder null.
+  - `LOGS/update.lock` blockiert zweite Update-Instanz.
+- **Stop-Kriterium**: Dirty Tree + automatischer Pull.
+
+### 3. Supervisor-Locks und Ein-Instanz-Garantie
+- **Sollzustand**: `start.lock` verhindert Doppelstart; Lock enthält PID des Supervisors.
+- **Nachweis**:
+  - Zweiter Start scheitert wegen Lock.
+  - JSON-PID entspricht laufendem PowerShell-Prozess.
+- **Stop-Kriterium**: Lock wird permanent neu geschrieben ohne Fortschritt.
+
+### 4. PHP-Server-Prozess und Watchdog
+- **Sollzustand**: Genau eine Instanz bindet 127.0.0.1:8080; `LOGS/php_server.pid` zeigt auf existierenden Prozess; Watchdog startet nicht permanent neu.
+- **Nachweis**:
+  - `netstat -ano | findstr :8080` zeigt eine LISTEN-PID.
+  - `Get-Process -Id (Get-Content LOGS\php_server.pid)` funktioniert.
+  - `start.log` zeigt keine 5-Sekunden-Restart-Schleife.
+  - Keine wiederholte Zeile „PID … ist kein gültiger PHP-Server“.
+- **Stop-Kriterium**: Wiederholte „Neustart durch Watchdog“ Einträge im 5-Sekunden-Takt.
+
+### 5. PHP-Runtime und ini/extensions
+- **Sollzustand**: `php.ini` wird geladen; keine doppelt geladenen Extensions.
+- **Nachweis**:
+  - `php -i` zeigt „Loaded Configuration File“.
+  - `php_server.err.log` enthält keine „already loaded“-Warnungen.
+- **Stop-Kriterium**: Fatal Errors im Errorlog.
+
+### 6. HTTP-Endpunkte
+- **Sollzustand**: Health und Root liefern 200; `/favicon.ico` antwortet schnell (200/404).
+- **Nachweis**:
+  - `GET /health.php` ergibt 200.
+  - `curl http://127.0.0.1:8080/` beendet sofort.
+  - Browser-Netzwerklog zeigt keinen Hänger bei `/favicon.ico`.
+- **Stop-Kriterium**: Requests hängen unbegrenzt.
+
+### 7. DB: Init, Schema, Migration
+- **Sollzustand**: Init und Migration laufen stabil; DB-Datei existiert am DSN-Pfad.
+- **Nachweis**:
+  - Startlog enthält keinen „DB-Init fehlgeschlagen“.
+  - DSN beginnt mit `sqlite:` und Datei existiert.
+  - `SCRIPTS/migrate.php` Exit 0, keine Wiederholungs-Änderungen bei erneutem Lauf.
+- **Stop-Kriterium**: Migration schlägt fehl und Rollback startet nicht.
+
+### 8. Backups und Rotation
+- **Sollzustand**: Backup erzeugt SQLite-Datei mit Timestamp; Rotation entfernt nur alte Backups.
+- **Nachweis**:
+  - `BACKUPS/supervisor_*.sqlite` wird erstellt.
+  - Anzahl Backups entspricht `BackupKeep`.
+- **Stop-Kriterium**: Backup wird überschrieben statt versioniert.
+
+### 9. Medienpfade, Thumbs, Stream
+- **Sollzustand**: Medienordner existieren; Thumb liefert Bilddaten; Stream liefert Partial Content.
+- **Nachweis**:
+  - Konfigpfade zeigen auf vorhandene Ordner.
+  - `WWW/thumb.php` antwortet mit Bild-Content-Type.
+  - `WWW/media_stream.php` akzeptiert `Range`.
+- **Stop-Kriterium**: Thumbs/Stream lösen PHP-Fatal aus.
+
+### 10. Scanner-Subsystem
+- **Sollzustand**: Scanner-API erreichbar; `/check` liefert Ergebnis; `/batch` liefert Ergebnis/sauberen Fehler; Rescan aktualisiert `run_at` und Tags.
+- **Nachweis**:
+  - Health/Ping liefert 200/JSON ohne Timeout.
+  - `/check` liefert Objekt mit `nsfw`/`tags`.
+  - `/batch` liefert Ergebnis oder klaren Fehler, kein „unknown response“ ohne Kontext.
+  - UI/DB zeigt neuen Scanzeitpunkt und aktualisierte unlocked Tags.
+- **Stop-Kriterium**: Video-Scan benötigt FFmpeg-Fallback, aber FFmpeg fehlt und es gibt keinen sauberen Abbruchpfad.
+
+### 11. Jobs/Operations-Flow
+- **Sollzustand**: Jobzustände sichtbar; Fehlerzustände enthalten Debug-Metadaten.
+- **Nachweis**:
+  - Status `running/done/error` und Timestamps sichtbar.
+  - Fehler-JSON enthält `http_status`, `response_snippet`, `error_saved`.
+- **Stop-Kriterium**: Jobs bleiben dauerhaft „running“.
+
+### 12. Logging und Encoding
+- **Sollzustand**: Logs wachsen kontrolliert und bleiben lesbar; keine Encoding-Probleme.
+- **Nachweis**:
+  - `start.log` bleibt lesbar, kein Flooding.
+  - `php_server.err.log` enthält nur relevante Fehler.
+  - Keine Umlaut-Zerlegung (z. B. `gÃ¼ltig`) im Startlog.
+- **Stop-Kriterium**: Logs unbrauchbar durch Encoding oder Flooding.
+
+### 13. Security-Grundannahmen
+- **Sollzustand**: Server bindet nur 127.0.0.1; interne APIs benötigen Token/API-Key; sensible Dateien nicht web-exponiert.
+- **Nachweis**:
+  - Startmeldung zeigt `http://127.0.0.1:8080`.
+  - Requests ohne Key scheitern erwartbar.
+  - `.env`, `.git`, `BACKUPS`, `LOGS` nicht direkt abrufbar.
+- **Stop-Kriterium**: Webroot enthält Backups oder Logs öffentlich.
+
+### 14. Recovery und Reset
+- **Sollzustand**: Safe-Stop ohne DB-Schaden; Restore vom Backup konsistent; Lock-Reset entfernt stale Locks.
+- **Nachweis**:
+  - Nächster Start funktioniert ohne Repair.
+  - Restore startet und Migration passt.
+  - Start blockiert nicht durch tote PID.
+- **Stop-Kriterium**: Datenverlust-Risiko oder Prozess-Sturm.
+
+## Offene Prüfpunkte (Status: offen)
+Die folgenden Nachweise sind im Betrieb noch zu erbringen und wurden in dieser Dokumentation nur als Soll-Checkliste festgehalten:
+- Module 0–14 vollständig offen; es liegen noch keine Nachweise für Passiv-/Aktiv-/Destruktiv-Stufen vor.
+- Stop-Kriterien wurden nicht ausgelöst; es existiert kein Run-Log mit erfolgreichem Abschluss der Prüfsequenz.
+- Hinweis: In dieser Änderung wurden keine Prüfungen ausgeführt (Anweisung: „Führe keine Tests durch“). Nachweise müssen später im Betrieb erhoben und hier ergänzt werden.
+
 ## Systemarchitektur
 - **Kernel-Logik (SCRIPTS/)**: Zentrale Funktionen in `scan_core` (Dateierkennung, Hashing, Pfadvalidierung, Logging, DB-Writes), `prompt_parser` (EXIF/PNG/JSON-Kandidaten sammeln, priorisieren, normalisieren), `operations` (einheitliche Einstiegspunkte für Scan/Rescan/Filesync/Prompt-Rebuild/Konsistenz), `logging` (kanalisiertes Logging mit Rotation), `security` (Internal-Key + IP-Whitelist), `paths` (Pfadkonfiguration und Validierung).
 - **Webschicht (WWW/)**: Dashboard `index.php` als Operator-Control-Center (Startpunkt, Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf), Hauptgalerie `mediadb.php`, Detail `media_view.php`, Streaming `media_stream.php`, Thumbnails `thumb.php`.
