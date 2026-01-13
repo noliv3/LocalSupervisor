@@ -5,6 +5,7 @@ require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
+require_once __DIR__ . '/_layout.php';
 
 try {
     $config = sv_load_config();
@@ -1034,17 +1035,16 @@ $latestScanMetaText    = $latestScan
         . ' · Flag: ' . ($latestScanHasNsfw === null ? '–' : ((int)$latestScanHasNsfw === 1 ? 'NSFW' : 'SFW')))
     : 'Kein Eintrag';
 $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTagsWritten . ' Tags') : '–';
+$downloadUrl = $activeStreamUrl !== '' ? $activeStreamUrl . (str_contains($activeStreamUrl, '?') ? '&' : '?') . 'dl=1' : '';
+$metaResolution = ($activeWidth && $activeHeight) ? ($activeWidth . '×' . $activeHeight) : '–';
+$metaSize = !empty($media['filesize']) ? (string)$media['filesize'] : '–';
+$metaDuration = !empty($media['duration']) ? number_format((float)$media['duration'], 1) . 's' : '–';
+$metaFps = !empty($media['fps']) ? (string)$media['fps'] : '–';
+$metaScanner = $latestScanScanner !== '' ? $latestScanScanner : '–';
+$metaScanAt = $latestScanRunAt !== '' ? $latestScanRunAt : '–';
 ?>
-<!doctype html>
-<html lang="de">
-<head>
-    <meta charset="utf-8">
-    <title>Media #<?= (int)$id ?></title>
-    <link rel="stylesheet" href="mediadb.css">
-</head>
-<body class="media-view-body" id="media-top">
-
-<div class="page-shell">
+<?php sv_ui_header('Medium #' . (int)$id, 'medien'); ?>
+<div class="media-view-shell" id="media-top">
     <div class="top-nav">
         <a class="nav-link" href="<?= htmlspecialchars($backLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">« Übersicht</a>
         <div class="nav-spacer"></div>
@@ -1057,7 +1057,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
     </div>
 
     <?php if (!empty($configWarning)): ?>
-        <div class="alert-warning" style="margin: 0.5rem 0; padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba;">
+        <div class="banner banner--warn">
             <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
         </div>
     <?php endif; ?>
@@ -1078,7 +1078,7 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                             <option value="1" <?= $nsfwFlag ? 'selected' : '' ?>>ja</option>
                         </select>
                     </label>
-                    <button class="btn secondary small" type="submit">Speichern</button>
+                    <button class="btn btn--secondary btn--sm" type="submit">Speichern</button>
                 </form>
             <?php else: ?>
                 <div class="nsfw-toggle-form">
@@ -1090,11 +1090,11 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                 <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Curation: <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <span class="<?= htmlspecialchars($promptQualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Prompt: <?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                <?php if ($hasStaleScan): ?><span class="pill pill-warn">Scan stale</span><?php endif; ?>
+                <?php if ($hasStaleScan): ?><span class="pill pill-warn">Scan veraltet</span><?php endif; ?>
                 <?php if (!empty($media['rating'])): ?><span class="pill">Rating <?= htmlspecialchars((string)$media['rating'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
                 <?php if ($hasInternalAccess): ?>
                     <span class="pill">Vote <?= $voteState ?></span>
-                    <span class="pill"><?= $checkedFlag ? 'Checked' : 'Unchecked' ?></span>
+                    <span class="pill"><?= $checkedFlag ? 'Geprüft' : 'Offen' ?></span>
                 <?php endif; ?>
             </div>
         </div>
@@ -1117,785 +1117,213 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
     $rebuildReason   = $showRebuildButton ? null : 'Prompt vollständig';
     $overrideDisabled = !$showForgeButton && !$promptExists;
     $overrideReason   = $overrideDisabled ? 'kein Bild/Prompt' : null;
+    $iconRescan = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 0 1 12.9-5.1l1.1-1.1V9.5h-3.7l1.4-1.4A6 6 0 1 0 18 12h1.5A7.5 7.5 0 0 1 4.5 12z" fill="currentColor"/></svg>';
+    $iconUp = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5l7 7h-4v7H9v-7H5l7-7z" fill="currentColor"/></svg>';
+    $iconDown = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19l-7-7h4V5h6v7h4l-7 7z" fill="currentColor"/></svg>';
+    $iconCheck = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 16.2L5.5 12.5l-1.5 1.5 5.2 5.2L20 8.4 18.5 7z" fill="currentColor"/></svg>';
     ?>
 
-    <div class="media-main-grid">
-        <div class="media-left">
-            <div class="panel media-visual" id="visual">
-                <div class="version-switch">
-                    <label>Version auswählen
-                        <select id="version-select">
-                            <?php foreach ($versions as $idx => $version): ?>
-                                <?php
-                                $versionAssetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
-                                $versionAssetLabel = sv_asset_label($versionAssetSet['primary_type'] ?? 'baseline');
-                                $versionJobLabel = !empty($version['job_id']) ? (' · Job #' . (int)$version['job_id']) : '';
-                                ?>
-                                <option value="<?= (int)$idx ?>" <?= $idx === $activeVersionIndex ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars('V' . (int)$version['version_index'] . ' · ' . ($version['status'] ?? '') . ' · ' . $versionAssetLabel . $versionJobLabel) ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <div class="version-meta">
-                        Aktiv: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                        <?= $activeAssetSelection['job_id'] ? ' · Job #' . (int)$activeAssetSelection['job_id'] : '' ?>
-                        <?= !empty($activeVersion['status']) ? ' · ' . htmlspecialchars((string)$activeVersion['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?>
-                    </div>
-                    <?php if ($activeAssetWarning): ?>
-                        <div class="version-meta hint"><?= htmlspecialchars($activeAssetWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                    <?php endif; ?>
-                    <?php if (count($activeAssetSelection['options']) > 1): ?>
-                        <div class="version-meta">
-                            <label>Asset
-                                <select id="asset-select">
-                                    <?php foreach ($activeAssetSelection['options'] as $option): ?>
-                                        <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $activeAssetSelection['type'] ? 'selected' : '' ?>>
-                                            <?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </label>
-                        </div>
-                    <?php endif; ?>
-                </div>
-                <?php if ($type === 'image'): ?>
-                    <div class="preview-grid">
-                        <div class="preview-card">
-                            <div class="preview-label original">AKTIV: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                            <div class="preview-frame">
-                                <?php if ($activeAssetExists): ?>
-                                    <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
-                                        'path'   => $activePathLabel,
-                                        'hash'   => $activeHash,
-                                        'width'  => $activeWidth,
-                                        'height' => $activeHeight,
-                                        'size'   => (int)($media['filesize'] ?? 0),
-                                    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                <?php else: ?>
-                                    <div class="preview-placeholder">
-                                        <div class="placeholder-title">Asset nicht gefunden</div>
-                                        <?php if (!empty($activeAssetSelection['path'])): ?>
-                                            <div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$activeAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                        <?php endif; ?>
-                                    </div>
-                                <?php endif; ?>
-                            </div>
-                            <div class="preview-meta">
-                                <span><?= htmlspecialchars($activePathLabel !== '' ? $activePathLabel : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                <span><?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                <?php if ($activeAssetSelection['job_id']): ?><span>Job #<?= (int)$activeAssetSelection['job_id'] ?></span><?php endif; ?>
-                                <?php if (!$activeAssetExists): ?><span class="pill pill-warn">Asset fehlt</span><?php endif; ?>
-                            </div>
-                        </div>
-                        <?php if ($secondaryAssetSelection !== null): ?>
-                            <?php $secondaryLabel = sv_asset_label((string)$secondaryAssetSelection['type']); ?>
-                            <div class="preview-card">
-                                <div class="preview-label preview"><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                <div class="preview-frame">
-                                    <?php if (!empty($secondaryAssetUrls['thumb'])): ?>
-                                        <img src="<?= htmlspecialchars((string)$secondaryAssetUrls['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="<?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                    <?php else: ?>
-                                        <div class="preview-placeholder">
-                                            <div class="placeholder-title">Kein Bild verfügbar</div>
-                                            <?php if (!empty($secondaryAssetSelection['path'])): ?>
-                                                <div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$secondaryAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php endif; ?>
-                                </div>
-                                <div class="preview-meta">
-                                    <span><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                    <?php if (!empty($secondaryAssetSelection['job_id'])): ?><span>Job #<?= (int)$secondaryAssetSelection['job_id'] ?></span><?php endif; ?>
-                                    <?php if (!empty($secondaryAssetSelection['path'])): ?><span class="pill pill-muted" title="<?= htmlspecialchars(sv_safe_path_label((string)$secondaryAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad</span><?php endif; ?>
-                                </div>
-                            </div>
-                        <?php elseif ($latestPreview !== null): ?>
-                            <div class="preview-card">
-                                <div class="preview-label preview">PREVIEW</div>
-                                <div class="preview-frame">
-                                    <?php if (!empty($latestPreview['urls']['thumb'])): ?>
-                                        <img src="<?= htmlspecialchars((string)$latestPreview['urls']['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Preview">
-                                    <?php else: ?>
-                                        <div class="preview-placeholder">
-                                            <div class="placeholder-title">Keine Inline-Vorschau</div>
-                                            <?php if ($latestPreview['path'] !== ''): ?>
-                                                <div class="placeholder-meta">Pfad: <?= htmlspecialchars(sv_safe_path_label((string)$latestPreview['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                            <?php endif; ?>
-                                            <?php if ($latestPreview['error']): ?>
-                                                <div class="placeholder-meta">Hinweis: <?= htmlspecialchars(sv_sanitize_error_message((string)$latestPreview['error']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                            <?php elseif (!$latestPreview['allowed']): ?>
-                                                <div class="placeholder-meta">Preview nicht streambar, Root nicht erlaubt.</div>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php endif; ?>
-                                </div>
-                                <div class="preview-meta">
-                                    <span><?= htmlspecialchars((string)($latestPreview['width'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($latestPreview['height'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                    <span>Hash: <?= htmlspecialchars((string)($latestPreview['hash'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                    <?php if ($latestPreview['filesize']): ?><span><?= htmlspecialchars((string)$latestPreview['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
-                                </div>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                <?php else: ?>
-                    <div class="preview-grid">
-                        <div class="preview-card">
-                            <div class="preview-label original">THUMB</div>
-                            <div class="preview-frame">
-                                <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Video-Thumbnail">
-                            </div>
-                        </div>
-                        <div class="preview-card">
-                            <div class="preview-label preview">PLAYER</div>
-                            <div class="preview-frame">
-                                <video controls preload="metadata" width="100%" src="<?= htmlspecialchars($activeStreamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></video>
-                            </div>
-                        </div>
-                    </div>
-                <?php endif; ?>
-                <div class="media-infobar">
-                    <span class="pill">Ansicht: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $activeAssetSelection['job_id'] ? ' #' . (int)$activeAssetSelection['job_id'] : '' ?></span>
-                    <?php if ($latestJobRow): ?><span class="pill">Letzter Job: #<?= (int)$latestJobRow['id'] ?> <?= htmlspecialchars((string)($latestJobRow['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                    <?php if (!$activeAssetExists): ?><span class="pill pill-warn">Asset fehlt</span><?php endif; ?>
-                    <span class="pill">ID: <?= (int)$media['id'] ?></span>
-                    <span class="pill">Typ: <?= htmlspecialchars((string)$media['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="pill">Auflösung: <?= htmlspecialchars((string)($activeWidth ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($activeHeight ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <?php if (!empty($media['duration'])): ?><span class="pill">Dauer: <?= htmlspecialchars(number_format((float)$media['duration'], 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span><?php endif; ?>
-                    <?php if (!empty($media['fps'])): ?><span class="pill">FPS: <?= htmlspecialchars((string)$media['fps'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                    <?php if (!empty($media['filesize'])): ?><span class="pill">Size: <?= htmlspecialchars((string)$media['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
-                    <?php if ($activeHash !== ''): ?><span class="pill">Hash: <?= htmlspecialchars($activeHash, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                    <?php if ($activePathLabel !== ''): ?><span class="pill pill-muted" title="<?= htmlspecialchars($activePathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad gesetzt</span><?php endif; ?>
-                    <span class="pill">Status: <?= htmlspecialchars((string)($media['status'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="pill">Lifecycle: <?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="<?= htmlspecialchars($qualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Curation: <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="<?= htmlspecialchars($promptQualityBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Prompt: <?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <?php if ($hasInternalAccess): ?>
-                        <span class="pill">Clicks: <?= $activityClicks ?></span>
-                        <span class="pill">Score: <?= $activityScore ?></span>
-                    <?php endif; ?>
-                </div>
-            </div>
-        </div>
+    
+    <div class="tab-bar" data-tab-group="media" data-tab-persist="hash">
+        <button class="tab-button" data-tab="tab-preview" data-tab-default="true">Vorschau</button>
+        <?php if ($type === 'video'): ?>
+            <button class="tab-button" data-tab="tab-video">Video</button>
+        <?php endif; ?>
+        <button class="tab-button" data-tab="tab-tags">Tags</button>
+        <button class="tab-button" data-tab="tab-prompt">Prompt</button>
+        <button class="tab-button" data-tab="tab-jobs">Scan/Jobs</button>
+        <button class="tab-button" data-tab="tab-versions">Versionen</button>
+    </div>
 
-        <div class="media-right">
-            <?php if ($hasInternalAccess): ?>
-            <div class="panel action-panel">
-                <div class="panel-header">Aktionen</div>
-                <?php if ($actionMessage !== null): ?>
-                    <div class="action-feedback <?= $actionSuccess ? 'success' : 'error' ?>">
-                        <div class="action-feedback-title"><?= $actionSuccess ? 'OK' : 'Fehler' ?></div>
-                        <div><?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                        <?php if ($actionLogFile): ?>
-                            <div class="action-logfile">Logdatei: <?= htmlspecialchars(sv_safe_path_label((string)$actionLogFile), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                        <?php endif; ?>
-                        <?php if ($actionLogsSafe !== []): ?>
-                            <details class="action-logdetails">
-                                <summary>Details</summary>
-                                <pre><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
-                            </details>
-                        <?php endif; ?>
-                    </div>
-                <?php endif; ?>
-                <?php if ($hasStaleScan): ?>
-                    <div class="action-feedback error">
-                        <div class="action-feedback-title">Scan veraltet</div>
-                        <div>Scanner war beim letzten Forge-Lauf nicht erreichbar. Tags/Rating sind möglicherweise veraltet.</div>
-                    </div>
-                <?php endif; ?>
-
-                <?php if ($hasInternalAccess): ?>
-                    <div class="action-feedback">
-                        <div class="action-feedback-title">Operator Quick Actions</div>
-                        <div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:center;">
-                            <form method="post">
-                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                                <input type="hidden" name="action" value="rescan_job">
-                                <button class="btn secondary small" type="submit">Tag-Rescan</button>
-                            </form>
-                            <form method="post">
-                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                                <input type="hidden" name="action" value="vote_up">
-                                <button class="btn <?= $voteState === 1 ? 'primary' : 'secondary' ?> small" type="submit">👍</button>
-                            </form>
-                            <form method="post">
-                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                                <input type="hidden" name="action" value="vote_down">
-                                <button class="btn <?= $voteState === -1 ? 'primary' : 'secondary' ?> small" type="submit">👎</button>
-                            </form>
-                            <form method="post">
-                                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                                <input type="hidden" name="action" value="checked_toggle">
-                                <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
-                                <button class="btn <?= $checkedFlag ? 'primary' : 'secondary' ?> small" type="submit"><?= $checkedFlag ? 'Checked ✓' : 'Checked ✗' ?></button>
-                            </form>
-                        </div>
-                    </div>
-                <?php endif; ?>
-
-                <form id="forge-form" class="forge-control" method="post">
-                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                    <input type="hidden" name="action" value="forge_regen">
-                    <div class="forge-grid">
-                        <div class="form-block">
-                            <div class="label-row">Verfahren (Schritt 1)</div>
-                            <div class="radio-row vertical">
-                                <label><input type="radio" name="_sv_recreate_strategy" value="img2img" checked> Img2img (aktuelle Version als Input)</label>
-                                <label><input type="radio" name="_sv_recreate_strategy" value="prompt_only"> Prompt-only (txt2img)</label>
-                                <label><input type="radio" name="_sv_recreate_strategy" value="tags" <?= $tags === [] ? 'disabled' : '' ?>> Tags-to-Prompt<?= $tags === [] ? ' (keine Tags)' : '' ?></label>
-                                <label><input type="radio" name="_sv_recreate_strategy" value="hybrid"> Hybrid (Prompt + Tags gedrosselt)</label>
-                            </div>
-                            <div class="hint">Strategie steuert Prompt-Quelle und Mode-Entscheidung.</div>
-                        </div>
-                        <div class="form-block">
-                            <div class="label-row">Mode (Schritt 2)</div>
-                            <div class="radio-row">
-                                <label><input type="radio" name="_sv_mode" value="preview" checked> Preview (Standard)</label>
-                                <label><input type="radio" name="_sv_mode" value="replace"> Replace sofort</label>
-                            </div>
-                            <div class="hint">Replace schreibt sofort zurück, Preview bleibt isoliert.</div>
-                        </div>
-                        <div class="form-block">
-                            <div class="label-row">Prompt Quelle</div>
-                            <div class="prompt-chip">Effektiv: <?= htmlspecialchars($displayPromptText !== '' ? sv_meta_value($displayPromptText, 160) : 'Kein Prompt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                            <?php if ($manualOverrideActive): ?>
-                                <div class="action-note highlight">Manual override aktiv (zuletzt genutzter Prompt).</div>
-                            <?php endif; ?>
-                            <textarea class="prompt-input compact" name="_sv_manual_prompt" maxlength="2000" placeholder="Optionaler manueller Prompt"></textarea>
-                        </div>
-                        <div class="form-block">
-                            <div class="label-row">Negativer Prompt</div>
-                            <textarea class="prompt-input compact" name="_sv_manual_negative" maxlength="2000" placeholder="Optionaler negativer Prompt"></textarea>
-                            <label class="checkbox-inline"><input type="checkbox" name="_sv_negative_allow_empty" value="1"> Leeren negativen Prompt erlauben</label>
-                        </div>
-                        <div class="form-block two-col">
-                            <label>Seed (optional)<input type="number" name="_sv_seed" min="0" step="1" placeholder="Auto" value="<?= htmlspecialchars((string)$activeSeed, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
-                            <label>Steps<input type="number" name="_sv_steps" min="1" max="150" step="1" placeholder="auto" value="<?= htmlspecialchars((string)$activeSteps, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
-                        </div>
-                        <div class="form-block two-col">
-                            <label>Denoise<input type="number" name="_sv_denoise" min="0" max="1" step="0.01" placeholder="auto"></label>
-                            <label>Sampler
-                                <select name="_sv_sampler">
-                                    <option value="">Auto</option>
-                                    <option value="DPM++ 2M Karras" <?= $activeSampler === 'DPM++ 2M Karras' ? 'selected' : '' ?>>DPM++ 2M Karras</option>
-                                    <option value="Euler a" <?= $activeSampler === 'Euler a' ? 'selected' : '' ?>>Euler a</option>
-                                    <option value="DPM++ SDE Karras" <?= $activeSampler === 'DPM++ SDE Karras' ? 'selected' : '' ?>>DPM++ SDE Karras</option>
-                                </select>
-                            </label>
-                        </div>
-                        <div class="form-block two-col">
-                            <label>Scheduler
-                                <select name="_sv_scheduler">
-                                    <option value="">Auto</option>
-                                    <option value="Karras" <?= $activeScheduler === 'Karras' ? 'selected' : '' ?>>Karras</option>
-                                    <option value="Normal" <?= $activeScheduler === 'Normal' ? 'selected' : '' ?>>Normal</option>
-                                    <option value="Exponential" <?= $activeScheduler === 'Exponential' ? 'selected' : '' ?>>Exponential</option>
-                                </select>
-                            </label>
-                            <label>Model Override
-                                <select name="_sv_model" <?= $hasInternalAccess ? '' : 'disabled' ?>>
-                                    <option value="">Auto (Healthcheck / Fallback)</option>
-                                    <?php foreach ($forgeModels as $model): ?>
-                                        <?php $name = (string)($model['name'] ?? ''); if ($name === '') { continue; } ?>
-                                        <option value="<?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $name === $modelDropdownValue ? 'selected' : '' ?>>
-                                            <?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                            <?php if (!empty($model['title'])): ?> (<?= htmlspecialchars((string)$model['title'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                    <?php if ($modelDropdownValue !== '' && !array_filter($forgeModels, fn($m) => isset($m['name']) && $m['name'] === $modelDropdownValue)): ?>
-                                        <option value="<?= htmlspecialchars((string)$modelDropdownValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" selected>Manuell: <?= htmlspecialchars((string)$modelDropdownValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
-                                    <?php endif; ?>
-                                </select>
-                            </label>
-                            <div class="hint">Auto/Resolved: <?= htmlspecialchars($resolvedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $forgeFallbackModel ? ' · Fallback: ' . htmlspecialchars($forgeFallbackModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
-                            <?php if ($forgeModelError !== null): ?>
-                                <div class="action-note error">Modelliste nicht geladen: <?= htmlspecialchars($forgeModelError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                            <?php endif; ?>
-                        </div>
-                        <div class="form-block">
-                            <label class="checkbox-inline"><input type="checkbox" name="_sv_use_hybrid" value="1"> Hybrid (Prompt + Tags)</label>
-                        </div>
-                    </div>
-                    <div class="panel-subsection compact">
-                        <div class="meta-line"><span>Forge</span><strong><?= $forgeEnabled ? 'aktiv' : 'deaktiviert' ?></strong><em class="small"><?= $forgeDispatchEnabled ? 'Dispatch an' : 'Dispatch aus' ?></em></div>
-                        <div class="meta-line"><span>Quelle</span><strong><?= htmlspecialchars($forgeModelSourceLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small">Status: <?= htmlspecialchars($forgeModelStatusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div>
-                        <div class="meta-line"><span>Gewählt</span><strong><?= htmlspecialchars($selectedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
-                        <div class="meta-line"><span>Resolved</span><strong><?= htmlspecialchars($resolvedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if (!empty($latestModelStatus)): ?><em class="small">Job: <?= htmlspecialchars((string)$latestModelStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em><?php endif; ?></div>
-                        <?php if (!empty($latestModelSource)): ?><div class="hint small">Letzte Quelle: <?= htmlspecialchars((string)$latestModelSource, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                        <?php if (!empty($latestModelError)): ?><div class="action-note error">Job-Model-Hinweis: <?= htmlspecialchars((string)$latestModelError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                        <?php if ($latestJobError): ?><div class="action-note error">Letzter Forge-Fehler<?= $latestJobUpdated ? ' (' . htmlspecialchars($latestJobUpdated, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>: <?= htmlspecialchars($latestJobError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                    </div>
-                    <div class="button-stack inline">
-                        <button class="btn primary" type="submit" name="_sv_mode" value="preview" <?= $forgeDisabled ? 'disabled' : '' ?>>Preview starten</button>
-                        <button class="btn danger" type="submit" name="_sv_mode" value="replace" <?= $forgeDisabled ? 'disabled' : '' ?>>Replace sofort</button>
-                    </div>
-                </form>
-
-                <div class="button-stack">
-                    <button class="btn secondary" type="button" <?= $overrideDisabled ? 'disabled' : '' ?> onclick="document.getElementById('prompt-panel')?.scrollIntoView({ behavior: 'smooth' });">Prompt bearbeiten</button>
-                    <?php if ($overrideReason): ?><div class="btn-reason"><?= htmlspecialchars($overrideReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-
-                    <button class="btn muted" type="submit" form="rebuild-form" <?= $rebuildDisabled ? 'disabled' : '' ?>>Prompt neu aufbauen</button>
-                    <?php if ($rebuildReason): ?><div class="btn-reason"><?= htmlspecialchars($rebuildReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-
-                    <button class="btn danger" type="submit" form="missing-form">Missing markieren</button>
-                    <div class="btn-reason">Status wird nur auf missing gesetzt.</div>
-                </div>
-                <div class="panel-subsection">
-                    <div class="subheader">Curation (Quality-Status)</div>
-                    <div class="hint">Quality-Status (unknown/ok/review/blocked) bewertet die operative Freigabe. Prompt-Qualität (A/B/C) bleibt separat.</div>
-                    <form method="post" class="stacked">
-                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                        <input type="hidden" name="action" value="quality_flag">
-                        <label>Status
-                            <select name="quality_status">
-                                <?php foreach ($qualityStatusLabels as $statusValue => $statusLabel): ?>
-                                    <option value="<?= htmlspecialchars($statusValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $qualityStatus === $statusValue ? 'selected' : '' ?>>
-                                        <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+    <div class="tab-content" id="tab-preview" data-tab-panel="media">
+        <div class="media-main-grid">
+            <div class="media-left">
+                <div class="panel media-visual" id="visual">
+                    <div class="version-switch">
+                        <label>Version auswählen
+                            <select id="version-select">
+                                <?php foreach ($versions as $idx => $version): ?>
+                                    <?php
+                                    $versionAssetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
+                                    $versionAssetLabel = sv_asset_label($versionAssetSet['primary_type'] ?? 'baseline');
+                                    $versionJobLabel = !empty($version['job_id']) ? (' · Job #' . (int)$version['job_id']) : '';
+                                    ?>
+                                    <option value="<?= (int)$idx ?>" <?= $idx === $activeVersionIndex ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars('V' . (int)$version['version_index'] . ' · ' . ($version['status'] ?? '') . ' · ' . $versionAssetLabel . $versionJobLabel) ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
                         </label>
-                        <label>Score (optional)<input type="number" step="0.01" name="quality_score" value="<?= htmlspecialchars((string)($qualityScore ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
-                        <label>Regel/Quelle<input type="text" name="quality_rule" maxlength="120" placeholder="Policy/Regel"></label>
-                        <label>Notiz<textarea name="quality_notes" maxlength="500" placeholder="Begründung/Review-Hinweis"><?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
-                        <button class="btn secondary" type="submit">Curation speichern</button>
-                    </form>
-                    <?php if ($curationUpdatedAt !== null): ?>
-                        <div class="hint">Letzte Änderung: <?= htmlspecialchars($curationUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                    <?php endif; ?>
-                </div>
-
-                <div class="panel-subsection">
-                    <div class="subheader">Delete/Review</div>
-                    <form method="post" class="stacked">
-                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                        <input type="hidden" name="action" value="request_delete">
-                        <label>Grund<textarea name="delete_reason" maxlength="240" placeholder="Warum pending_delete?"><?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
-                        <button class="btn danger" type="submit">Lifecycle auf pending_delete setzen</button>
-                    </form>
-                </div>
-                <div class="panel-subsection">
-                    <div class="subheader">Tags &amp; Rescan</div>
-                    <div class="rescan-summary" id="rescan-summary">
-                        <div class="meta-line">
-                            <span>Letzter Scan</span>
-                            <strong id="scan-run-at"><?= $latestScanRunAt !== '' ? htmlspecialchars($latestScanRunAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></strong>
-                            <em class="small" id="scan-meta"><?= htmlspecialchars($latestScanMetaText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em>
+                        <div class="version-meta">
+                            Aktiv: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                            <?= $activeAssetSelection['job_id'] ? ' · Job #' . (int)$activeAssetSelection['job_id'] : '' ?>
+                            <?= !empty($activeVersion['status']) ? ' · ' . htmlspecialchars((string)$activeVersion['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?>
                         </div>
-                        <div class="meta-line">
-                            <span>Tags</span>
-                            <strong id="scan-tags"><?= htmlspecialchars($latestScanTagsText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                            <em class="small">locked=1 bleibt geschützt</em>
-                        </div>
-                        <div class="meta-line" id="scan-error-code-line" style="<?= $latestScanErrorCode !== null ? '' : 'display:none;' ?>">
-                            <span>Error-Code</span>
-                            <strong id="scan-error-code"><?= htmlspecialchars((string)($latestScanErrorCode ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        </div>
-                        <div class="meta-line" id="scan-http-status-line" style="<?= $latestScanHttpStatus !== null ? '' : 'display:none;' ?>">
-                            <span>HTTP-Status</span>
-                            <strong id="scan-http-status"><?= htmlspecialchars((string)($latestScanHttpStatus ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        </div>
-                        <div class="meta-line" id="scan-endpoint-line" style="<?= $latestScanEndpoint !== null && $latestScanEndpoint !== '' ? '' : 'display:none;' ?>">
-                            <span>Endpoint</span>
-                            <strong id="scan-endpoint"><?= htmlspecialchars((string)($latestScanEndpoint ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        </div>
-                        <div class="meta-line" id="scan-response-type-line" style="<?= $latestScanResponseType !== null && $latestScanResponseType !== '' ? '' : 'display:none;' ?>">
-                            <span>Response</span>
-                            <strong id="scan-response-type"><?= htmlspecialchars((string)($latestScanResponseType ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        </div>
-                        <div class="meta-line" id="scan-body-snippet-line" style="<?= $latestScanBodySnippet !== null && $latestScanBodySnippet !== '' ? '' : 'display:none;' ?>">
-                            <span>Body-Snippet</span>
-                            <strong id="scan-body-snippet"><?= htmlspecialchars($latestScanBodySnippet !== null ? sv_meta_value((string)$latestScanBodySnippet, 300) : '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        </div>
-                        <div class="job-error inline" id="scan-error" style="<?= $latestScanError ? '' : 'display:none;' ?>"><?= htmlspecialchars((string)($latestScanError ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                        <div class="hint small" id="scan-empty" style="<?= ($latestScanRunAt === '' && $latestScanError === null) ? '' : 'display:none;' ?>">Kein Scan-Ergebnis gespeichert.</div>
-                        <div class="meta-line" id="rescan-job-line">
-                            <?php if ($activeRescanJob): ?>
-                                <?php
-                                $status = strtolower((string)$activeRescanJob['status']);
-                                $jobStart = (string)($activeRescanJob['started_at'] ?? $activeRescanJob['created_at'] ?? '');
-                                $jobFinish = (string)($activeRescanJob['finished_at'] ?? $activeRescanJob['completed_at'] ?? '');
-                                $jobAge = (string)($activeRescanJob['age_label'] ?? '');
-                                $jobStuck = !empty($activeRescanJob['stuck']);
-                                ?>
-                                <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars($jobStart, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $jobFinish !== '' ? ' → ' . htmlspecialchars($jobFinish, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?><?= $jobAge !== '' ? ' · Age ' . htmlspecialchars($jobAge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></em>
-                                <?php if ($jobStuck): ?><span class="status-badge status-error">stuck</span><?php endif; ?>
-                                <?php if (!empty($activeRescanJob['error'])): ?><div class="job-error inline"><?= htmlspecialchars((string)$activeRescanJob['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                            <?php else: ?>
-                                <span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>
-                            <?php endif; ?>
-                        </div>
-                        <div class="job-error inline" id="rescan-last-error" style="<?= $rescanLastError !== null ? '' : 'display:none;' ?>"><?= $rescanLastError !== null ? 'Letzter Fehler: ' . htmlspecialchars($rescanLastError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
-                        <div class="hint small" id="rescan-poll-meta">Polling aktiv.</div>
-                    </div>
-                    <form method="post" class="stacked tag-form">
-                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                        <input type="hidden" name="action" value="tag_add" id="tag-action-field">
-                        <label>Tag-Name<input type="text" name="tag_name" maxlength="120" required></label>
-                        <label>Typ (optional)<input type="text" name="tag_type" maxlength="64" placeholder="content/style/meta"></label>
-                        <label>Confidence<input type="number" step="0.01" min="0" max="1" name="tag_confidence" placeholder="1.0"></label>
-                        <label class="checkbox-inline"><input type="checkbox" name="tag_lock_flag" value="1"> sofort sperren</label>
-                        <div class="button-stack inline">
-                            <button class="btn secondary tag-action" type="submit" data-action="tag_add" <?= $hasInternalAccess ? '' : 'disabled' ?>>Tag hinzufügen/aktualisieren</button>
-                            <button class="btn muted tag-action" type="submit" data-action="tag_lock" <?= $hasInternalAccess ? '' : 'disabled' ?>>Lock</button>
-                            <button class="btn muted tag-action" type="submit" data-action="tag_unlock" <?= $hasInternalAccess ? '' : 'disabled' ?>>Unlock</button>
-                            <button class="btn danger tag-action" type="submit" data-action="tag_remove" <?= $hasInternalAccess ? '' : 'disabled' ?>>Entfernen</button>
-                        </div>
-                    </form>
-                    <form method="post" class="stacked">
-                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-                        <input type="hidden" name="action" value="rescan_job">
-                        <button class="btn primary" id="rescan-button" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Tag-Rescan (Job)</button>
-                        <div class="hint">Stellt einen Rescan als Job in die Queue (locked=1 bleibt geschützt).</div>
-                    </form>
-                </div>
-                <?php if ($forgeInfoNotes !== []): ?>
-                    <div class="action-note">Hinweise: <?= htmlspecialchars(implode(' ', $forgeInfoNotes), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php endif; ?>
-                <div class="action-note">Alle Aktionen nutzen die bestehende Internal-Key/IP-Prüfung.</div>
-            </div>
-            <?php endif; ?>
-
-            <div class="panel status-panel">
-                <div class="panel-header">Status</div>
-                <div class="status-badges">
-                    <span class="status-pill <?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($promptLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="status-pill <?= htmlspecialchars($tagBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($tagLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                    <span class="status-pill <?= htmlspecialchars($metaBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($metaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                </div>
-                <div class="quality-row">
-                    <span class="quality-pill">Prompt-Qualität: <strong><?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></span>
-                    <span class="quality-score">Score <?= (int)$promptQuality['score'] ?></span>
-                    <?php if ($promptUpdatedAt !== null): ?><span class="quality-score">Letzte Änderung <?= htmlspecialchars($promptUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
-                </div>
-                <div class="lifecycle-row">
-                    <div>Lifecycle: <strong><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
-                    <?php if ($lifecycleReason !== ''): ?><div class="hint">Grund: <?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                </div>
-                <div class="lifecycle-row">
-                    <div>Curation (Quality-Status): <strong><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if ($qualityScore !== null): ?> (Score <?= htmlspecialchars((string)$qualityScore, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?></div>
-                    <?php if ($qualityNotes !== ''): ?><div class="hint">Notiz: <?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                    <?php if ($curationUpdatedAt !== null): ?><div class="hint">Letzte Änderung: <?= htmlspecialchars($curationUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
-                    <div class="hint">Curation ≠ Prompt-Qualität; beide werden separat bewertet.</div>
-                </div>
-                <?php if ($mediaIssues !== []): ?>
-                    <div class="issues-list">
-                        <div class="issues-title">Issues (<?= count($mediaIssues) ?>)</div>
-                        <ul>
-                            <?php foreach (array_slice($mediaIssues, 0, 3) as $issue): ?>
-                                <li><span class="issue-type"><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span> <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                            <?php endforeach; ?>
-                        </ul>
-                        <?php if (count($mediaIssues) > 3): ?>
-                            <details>
-                                <summary>Mehr anzeigen</summary>
-                                <ul>
-                                    <?php foreach ($mediaIssues as $issue): ?>
-                                        <li><span class="issue-type"><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span> <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
-                                    <?php endforeach; ?>
-                                </ul>
-                            </details>
+                        <?php if ($activeAssetWarning): ?>
+                            <div class="version-meta hint"><?= htmlspecialchars($activeAssetWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php endif; ?>
+                        <?php if (count($activeAssetSelection['options']) > 1): ?>
+                            <div class="version-meta">
+                                <label>Asset
+                                    <select id="asset-select">
+                                        <?php foreach ($activeAssetSelection['options'] as $option): ?>
+                                            <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $activeAssetSelection['type'] ? 'selected' : '' ?>>
+                                                <?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </label>
+                            </div>
                         <?php endif; ?>
                     </div>
-                <?php endif; ?>
-            </div>
-
-            <?php if ($hasInternalAccess): ?>
-            <div class="panel rescan-panel">
-                <div class="panel-header">Rescan-Jobs</div>
-                <?php if ($rescanJobs === []): ?>
-                    <div class="job-hint">Keine Rescan-Jobs vorhanden.</div>
-                <?php else: ?>
-                    <div class="timeline">
-                        <?php foreach ($rescanJobs as $job):
-                            $status = strtolower((string)($job['status'] ?? 'queued'));
-                            $statusClass = 'status-' . (in_array($status, ['queued', 'running', 'done', 'error'], true) ? $status : 'queued');
-                            ?>
-                            <div class="timeline-item">
-                                <div class="timeline-header">
-                                    <div class="timeline-title">Job #<?= (int)$job['id'] ?></div>
-                                    <span class="status-badge <?= htmlspecialchars($statusClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                </div>
-                                <div class="timeline-meta"><?= htmlspecialchars((string)($job['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($job['updated_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                <div class="timeline-body">
-                                    <div class="meta-line"><span>Pfad</span><strong><?= htmlspecialchars($job['path'] ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
-                                    <?php if (!empty($job['started_at'])): ?><div class="meta-line"><span>Gestartet</span><strong><?= htmlspecialchars((string)$job['started_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
-                                    <?php if (!empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['completed_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
-                                    <?php if (!empty($job['finished_at']) && empty($job['completed_at'])): ?><div class="meta-line"><span>Fertig</span><strong><?= htmlspecialchars((string)$job['finished_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div><?php endif; ?>
-                                    <?php if (!empty($job['age_label'])): ?>
-                                        <div class="meta-line"><span>Age</span><strong><?= htmlspecialchars((string)$job['age_label'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if (!empty($job['stuck'])): ?><span class="status-badge status-error">stuck</span><?php endif; ?></div>
-                                    <?php elseif (!empty($job['stuck'])): ?>
-                                        <div class="meta-line"><span>Age</span><strong>—</strong><span class="status-badge status-error">stuck</span></div>
+                    <?php if ($type === 'image'): ?>
+                        <div class="preview-grid">
+                            <div class="preview-card">
+                                <div class="preview-label original">AKTIV: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                <div class="preview-frame">
+                                    <?php if ($activeAssetExists): ?>
+                                        <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
+                                            'path'   => $activePathLabel,
+                                            'hash'   => $activeHash,
+                                            'width'  => $activeWidth,
+                                            'height' => $activeHeight,
+                                            'size'   => (int)($media['filesize'] ?? 0),
+                                        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                    <?php else: ?>
+                                        <div class="preview-placeholder">
+                                            <div class="placeholder-title">Asset nicht gefunden</div>
+                                            <?php if (!empty($activeAssetSelection['path'])): ?>
+                                                <div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$activeAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                            <?php endif; ?>
+                                        </div>
                                     <?php endif; ?>
-                                    <?php if (!empty($job['run_at'])): ?><div class="meta-line"><span>Scan</span><strong><?= htmlspecialchars((string)$job['run_at'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars((string)($job['scanner'] ?? 'pixai_sensible'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> · NSFW <?= htmlspecialchars((string)($job['nsfw_score'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
-                                    <?php if ($job['tags_written'] !== null): ?><div class="meta-line"><span>Tags</span><strong><?= (int)$job['tags_written'] ?></strong><em class="small">unlocked ersetzt</em></div><?php endif; ?>
-                                    <?php if ($job['has_nsfw'] !== null): ?><div class="meta-line"><span>Flag</span><strong><?= (int)$job['has_nsfw'] === 1 ? 'NSFW' : 'SFW' ?></strong><em class="small">Rating <?= htmlspecialchars((string)($job['rating'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div><?php endif; ?>
-                                    <?php if (!empty($job['error'])): ?><div class="job-error"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                </div>
+                                <div class="preview-meta">
+                                    <span><?= htmlspecialchars($activePathLabel !== '' ? $activePathLabel : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                    <span><?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                    <?php if ($activeAssetSelection['job_id']): ?><span>Job #<?= (int)$activeAssetSelection['job_id'] ?></span><?php endif; ?>
+                                    <?php if (!$activeAssetExists): ?><span class="pill pill-warn">Asset fehlt</span><?php endif; ?>
                                 </div>
                             </div>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-            </div>
-            <?php endif; ?>
-
-            <div class="panel forge-panel">
-                <div class="panel-header">Forge-Jobs</div>
-                <div id="forge-jobs" class="timeline">
-                    <div class="job-hint">Jobs werden geladen …</div>
-                </div>
-                <div class="job-hint">Automatische Aktualisierung aktiv.</div>
-                <div class="hint small" id="forge-poll-meta">Polling aktiv.</div>
-            </div>
-
-            <div class="panel versions-panel">
-                <div class="panel-header">Versionen</div>
-                <?php if ($versions === []): ?>
-                    <div class="job-hint">Keine Versionsdaten verfügbar.</div>
-                <?php else: ?>
-                    <div class="version-grid">
-                        <?php foreach ($versions as $idx => $version):
-                            $assetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
-                            $primarySelection = sv_select_asset_from_set($assetSet, $assetSet['primary_type'] ?? null);
-                            $primaryUrls = sv_build_asset_urls($id, $showAdult, $primarySelection);
-                            $versionLinkParams = array_merge($filteredParams, ['id' => (int)$id, 'version' => (int)$idx, 'asset' => $primarySelection['type']]);
-                            $versionLink = 'media_view.php?' . http_build_query($versionLinkParams) . '#visual';
-                            $versionAssetLabel = sv_asset_label((string)$primarySelection['type']);
-                            ?>
-                            <a class="version-tile<?= !empty($version['is_current']) ? ' current' : '' ?>" href="<?= htmlspecialchars($versionLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                <div class="version-thumb">
-                                    <img src="<?= htmlspecialchars((string)$primaryUrls['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Version <?= (int)$version['version_index'] ?>">
+                            <?php if ($secondaryAssetSelection !== null): ?>
+                                <?php $secondaryLabel = sv_asset_label((string)$secondaryAssetSelection['type']); ?>
+                                <div class="preview-card">
+                                    <div class="preview-label preview"><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                    <div class="preview-frame">
+                                        <?php if (!empty($secondaryAssetUrls['thumb'])): ?>
+                                            <img src="<?= htmlspecialchars((string)$secondaryAssetUrls['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="<?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                        <?php else: ?>
+                                            <div class="preview-placeholder">
+                                                <div class="placeholder-title">Kein Bild verfügbar</div>
+                                                <?php if (!empty($secondaryAssetSelection['path'])): ?>
+                                                    <div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$secondaryAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                                <?php endif; ?>
+                                            </div>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="preview-meta">
+                                        <span><?= htmlspecialchars($secondaryLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <?php if (!empty($secondaryAssetSelection['job_id'])): ?><span>Job #<?= (int)$secondaryAssetSelection['job_id'] ?></span><?php endif; ?>
+                                        <?php if (!empty($secondaryAssetSelection['path'])): ?><span class="pill pill-muted" title="<?= htmlspecialchars(sv_safe_path_label((string)$secondaryAssetSelection['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Pfad</span><?php endif; ?>
+                                    </div>
                                 </div>
-                                <div class="version-label">V<?= (int)$version['version_index'] ?> <?= !empty($version['is_current']) ? '· aktuell' : '' ?> · <?= htmlspecialchars($versionAssetLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                                <div class="version-meta-small">Modell: <?= htmlspecialchars((string)($version['model_used'] ?? $version['model_requested'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                            </a>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-            </div>
-            <div class="panel compare-panel">
-                <div class="panel-header">Compare Versionen</div>
-                <form method="get" class="compare-form">
-                    <input type="hidden" name="id" value="<?= (int)$id ?>">
-                    <?php foreach ($filteredParams as $k => $v): ?>
-                        <input type="hidden" name="<?= htmlspecialchars((string)$k, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                    <?php endforeach; ?>
-                    <label>Version A
-                        <select name="compare_a">
-                            <?php foreach ($versions as $idx => $version): ?>
-                                <option value="<?= (int)$idx ?>" <?= $idx === $versionCompareA ? 'selected' : '' ?>>V<?= (int)$version['version_index'] ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <?php if ($compareAssetSelectionA): ?>
-                        <label>Asset A
-                            <select name="compare_asset_a">
-                                <?php foreach ($compareAssetSelectionA['options'] as $option): ?>
-                                    <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $compareAssetSelectionA['type'] ? 'selected' : '' ?>><?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </label>
-                    <?php endif; ?>
-                    <label>Version B
-                        <select name="compare_b">
-                            <?php foreach ($versions as $idx => $version): ?>
-                                <option value="<?= (int)$idx ?>" <?= $idx === $versionCompareB ? 'selected' : '' ?>>V<?= (int)$version['version_index'] ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <?php if ($compareAssetSelectionB): ?>
-                        <label>Asset B
-                            <select name="compare_asset_b">
-                                <?php foreach ($compareAssetSelectionB['options'] as $option): ?>
-                                    <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $compareAssetSelectionB['type'] ? 'selected' : '' ?>><?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </label>
-                    <?php endif; ?>
-                    <button class="btn secondary" type="submit">Vergleichen</button>
-                </form>
-                <?php if ($compareVersionA && $compareVersionB): ?>
-                    <div class="compare-summary">V<?= (int)$compareVersionA['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>) ⇄ V<?= (int)$compareVersionB['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</div>
-                    <?php if ($compareIdenticalSources): ?>
-                        <div class="action-note highlight">Identische Quelle gewählt – Vergleiche können identisch aussehen.</div>
-                    <?php endif; ?>
-                    <div class="preview-grid compare-visuals">
-                        <div class="preview-card">
-                            <div class="preview-label original">Quelle A</div>
-                            <div class="preview-frame">
-                                <?php if (!empty($compareAssetUrlsA['thumb'])): ?>
-                                    <img src="<?= htmlspecialchars((string)$compareAssetUrlsA['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Compare A">
-                                <?php else: ?>
-                                    <div class="preview-placeholder">
-                                        <div class="placeholder-title">Kein Bild verfügbar</div>
-                                        <?php if (!empty($compareAssetSelectionA['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$compareAssetSelectionA['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                            <?php elseif ($latestPreview !== null): ?>
+                                <div class="preview-card">
+                                    <div class="preview-label preview">PREVIEW</div>
+                                    <div class="preview-frame">
+                                        <?php if (!empty($latestPreview['urls']['thumb'])): ?>
+                                            <img src="<?= htmlspecialchars((string)$latestPreview['urls']['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Preview">
+                                        <?php else: ?>
+                                            <div class="preview-placeholder">
+                                                <div class="placeholder-title">Keine Inline-Vorschau</div>
+                                                <?php if ($latestPreview['path'] !== ''): ?>
+                                                    <div class="placeholder-meta">Pfad: <?= htmlspecialchars(sv_safe_path_label((string)$latestPreview['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                                <?php endif; ?>
+                                                <?php if ($latestPreview['error']): ?>
+                                                    <div class="placeholder-meta">Hinweis: <?= htmlspecialchars(sv_sanitize_error_message((string)$latestPreview['error']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                                                <?php elseif (!$latestPreview['allowed']): ?>
+                                                    <div class="placeholder-meta">Preview nicht streambar, Root nicht erlaubt.</div>
+                                                <?php endif; ?>
+                                            </div>
+                                        <?php endif; ?>
                                     </div>
-                                <?php endif; ?>
-                            </div>
-                            <div class="preview-meta">
-                                <span><?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                <?php if (!empty($compareAssetSelectionA['job_id'] ?? null)): ?><span>Job #<?= (int)$compareAssetSelectionA['job_id'] ?></span><?php endif; ?>
-                            </div>
-                        </div>
-                        <div class="preview-card">
-                            <div class="preview-label preview">Quelle B</div>
-                            <div class="preview-frame">
-                                <?php if (!empty($compareAssetUrlsB['thumb'])): ?>
-                                    <img src="<?= htmlspecialchars((string)$compareAssetUrlsB['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Compare B">
-                                <?php else: ?>
-                                    <div class="preview-placeholder">
-                                        <div class="placeholder-title">Kein Bild verfügbar</div>
-                                        <?php if (!empty($compareAssetSelectionB['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$compareAssetSelectionB['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                    <div class="preview-meta">
+                                        <span><?= htmlspecialchars((string)($latestPreview['width'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> × <?= htmlspecialchars((string)($latestPreview['height'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <span>Hash: <?= htmlspecialchars((string)($latestPreview['hash'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <?php if ($latestPreview['filesize']): ?><span><?= htmlspecialchars((string)$latestPreview['filesize'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> bytes</span><?php endif; ?>
                                     </div>
-                                <?php endif; ?>
-                            </div>
-                            <div class="preview-meta">
-                                <span><?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
-                                <?php if (!empty($compareAssetSelectionB['job_id'] ?? null)): ?><span>Job #<?= (int)$compareAssetSelectionB['job_id'] ?></span><?php endif; ?>
-                            </div>
+                                </div>
+                            <?php endif; ?>
                         </div>
-                    </div>
-                    <?php if ($versionDiff === []): ?>
-                        <div class="job-hint">Keine Unterschiede in Kernparametern.</div>
                     <?php else: ?>
-                        <table class="compare-table">
-                            <thead><tr><th>Feld</th><th>Version A</th><th>Version B</th></tr></thead>
-                            <tbody>
-                                <?php foreach ($versionDiff as [$field, $aVal, $bVal]): ?>
-                                    <tr>
-                                        <td><?= htmlspecialchars($field, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                        <td><?= htmlspecialchars((string)($aVal ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                        <td><?= htmlspecialchars((string)($bVal ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    <?php endif; ?>
-                <?php else: ?>
-                    <div class="job-hint">Bitte Versionen auswählen.</div>
-                <?php endif; ?>
-            </div>
-
-            <div class="panel history-panel">
-                <div class="panel-header">Prompt-Historie</div>
-                <?php if ($promptHistoryErr === null && $latestPromptHistory !== null): ?>
-                    <?php
-                    $latestHasLink = !empty($latestPromptHistory['prompt_id']) && !empty($latestPromptHistory['prompt_exists']);
-                    $latestTimestamp = (string)($latestPromptHistory['created_at'] ?? '');
-                    $latestSource = (string)($latestPromptHistory['source'] ?? '');
-                    ?>
-                    <div class="job-hint">
-                        Letzte Historie: <strong><?= htmlspecialchars($latestTimestamp !== '' ? $latestTimestamp : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        • Quelle: <strong><?= htmlspecialchars($latestSource !== '' ? $latestSource : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
-                        • Version-Link: <strong><?= $latestHasLink ? 'ja' : 'nein' ?></strong>
-                        <?php if ($promptHistoryHasIssues): ?>
-                            <span class="status-badge status-error">Inkonsistenz</span>
-                        <?php endif; ?>
-                    </div>
-                <?php endif; ?>
-                <?php if ($promptHistoryErr !== null): ?>
-                    <div class="action-note">Historie nicht verfügbar: <?= htmlspecialchars($promptHistoryErr, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                <?php elseif ($promptHistory === []): ?>
-                    <div class="job-hint">Keine Historie gefunden.</div>
-                <?php else: ?>
-                    <div class="history-table">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Version</th>
-                                    <th>Quelle</th>
-                                    <th>Zeit</th>
-                                    <th>Modell</th>
-                                    <th>Sampler</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($promptHistory as $entry): ?>
-                                    <tr>
-                                        <td>#<?= (int)($entry['version'] ?? 0) ?></td>
-                                        <td><?= htmlspecialchars((string)($entry['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                        <td><?= htmlspecialchars((string)($entry['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                        <td><?= htmlspecialchars((string)($entry['model'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                        <td><?= htmlspecialchars((string)($entry['sampler'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                        <td class="history-actions">
-                                            <a class="btn tiny" href="#history-<?= (int)$entry['id'] ?>">anzeigen</a>
-                                            <a class="btn tiny secondary" href="<?= htmlspecialchars('media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => $id, 'compare_from' => (int)$entry['id'], 'compare_to' => $compareToId > 0 ? $compareToId : $entry['id']])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">als A vergleichen</a>
-                                            <a class="btn tiny secondary" href="<?= htmlspecialchars('media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => $id, 'compare_from' => $compareFromId > 0 ? $compareFromId : $entry['id'], 'compare_to' => (int)$entry['id']])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">als B vergleichen</a>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                    <?php if ($compareResult): ?>
-                        <div class="panel-subsection">
-                            <div class="subheader">Vergleich</div>
-                            <div class="hint">Von #<?= (int)($compareResult['from']['version'] ?? 0) ?> nach #<?= (int)($compareResult['to']['version'] ?? 0) ?></div>
-                            <pre class="diff-view"><?php foreach ($compareResult['diff'] as $line):
-                                $prefix = $line['type'] === 'add' ? '+' : ($line['type'] === 'remove' ? '-' : ' ');
-                                ?>
-<?= htmlspecialchars($prefix . ' ' . $line['value'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n" ?>
-<?php endforeach; ?></pre>
+                        <div class="preview-grid">
+                            <div class="preview-card">
+                                <div class="preview-label original">THUMB</div>
+                                <div class="preview-frame">
+                                    <img id="media-preview-thumb" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Video-Thumbnail">
+                                </div>
+                            </div>
                         </div>
                     <?php endif; ?>
-                    <?php foreach ($promptHistory as $entry): ?>
-                        <details class="history-entry" id="history-<?= (int)$entry['id'] ?>">
-                            <summary>Version #<?= (int)($entry['version'] ?? 0) ?> • <?= htmlspecialchars((string)($entry['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($entry['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></summary>
-                            <div class="history-meta">Modell: <?= htmlspecialchars((string)($entry['model'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Sampler: <?= htmlspecialchars((string)($entry['sampler'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Steps: <?= htmlspecialchars((string)($entry['steps'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                            <div class="history-meta">Seed: <?= htmlspecialchars((string)($entry['seed'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Size: <?= htmlspecialchars((string)($entry['width'] ?? '-') . '×' . (string)($entry['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                            <?php if (!empty($entry['negative_prompt'])): ?>
-                                <div class="history-negative"><strong>Negative</strong><br><?= nl2br(htmlspecialchars((string)$entry['negative_prompt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?></div>
-                            <?php endif; ?>
-                            <div class="history-positive"><strong>Prompt</strong><br><?= nl2br(htmlspecialchars((string)($entry['prompt'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?></div>
-                            <?php if (!empty($entry['raw_text'])): ?>
-                                <details><summary>Raw</summary><pre><?= htmlspecialchars((string)$entry['raw_text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre></details>
-                            <?php endif; ?>
-                            <?php if (!empty($entry['source_metadata'])): ?>
-                                <details><summary>Source Metadata</summary><pre><?= htmlspecialchars((string)$entry['source_metadata'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre></details>
-                            <?php endif; ?>
-                        </details>
-                    <?php endforeach; ?>
-                <?php endif; ?>
+                </div>
+            </div>
+            <div class="media-right">
+                <div class="panel meta-panel">
+                    <div class="panel-header">Meta</div>
+                    <div class="media-meta-grid">
+                        <div class="media-meta-item"><span>Pfad</span><strong><?= htmlspecialchars($activePathLabel !== '' ? $activePathLabel : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>Hash</span><strong><?= htmlspecialchars($activeHash !== '' ? $activeHash : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>Auflösung</span><strong><?= htmlspecialchars($metaResolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>Size</span><strong><?= htmlspecialchars($metaSize, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>Dauer</span><strong><?= htmlspecialchars($metaDuration, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>FPS</span><strong><?= htmlspecialchars($metaFps, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>Scanner</span><strong><?= htmlspecialchars($metaScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <div class="media-meta-item"><span>Letzter Scan</span><strong><?= htmlspecialchars($metaScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
-    <details class="panel collapsible" open id="prompt-panel">
-        <summary>Prompt &amp; Negative Prompt</summary>
-        <div class="tab-bar" role="tablist">
-            <button class="tab-button active" data-tab="tab-effective">Effektiv</button>
-            <button class="tab-button" data-tab="tab-manual" <?= $overrideDisabled ? 'disabled' : '' ?>>Manuell</button>
-            <button class="tab-button" data-tab="tab-tags">Tags</button>
-        </div>
-        <div class="tab-content active" id="tab-effective">
-            <div class="label-row">Effektiver Prompt</div>
-            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($displayPromptText ?: 'Kein Prompt gespeichert.', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
-            <div class="label-row">Negativer Prompt</div>
-            <textarea readonly class="prompt-viewer"><?= htmlspecialchars($displayNegativePrompt ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
-            <?php if ($promptParams !== []): ?>
-                <div class="prompt-params">
-                    <?php foreach ($promptParams as $label => $value): ?>
-                        <div class="param-row"><span><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><strong><?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
-                    <?php endforeach; ?>
+    <?php if ($type === 'video'): ?>
+        <div class="tab-content" id="tab-video" data-tab-panel="media">
+            <div class="panel">
+                <div class="panel-header">Video</div>
+                <div class="video-tool" data-video-tool>
+                    <div class="video-player">
+                        <video id="media-video" controls preload="metadata" poster="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" src="<?= htmlspecialchars($activeStreamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></video>
+                    </div>
+                    <div class="video-controls">
+                        <label>Speed
+                            <select data-video-speed>
+                                <option value="0.5">0.5×</option>
+                                <option value="1" selected>1×</option>
+                                <option value="1.25">1.25×</option>
+                                <option value="1.5">1.5×</option>
+                                <option value="2">2×</option>
+                            </select>
+                        </label>
+                        <button type="button" class="btn btn--ghost btn--sm" data-video-loop aria-pressed="false">Loop</button>
+                        <label>Jump (Sek.)
+                            <input type="number" min="0" step="1" value="0" data-video-jump>
+                        </label>
+                        <button type="button" class="btn btn--secondary btn--sm" data-video-jump-btn>Springen</button>
+                        <button type="button" class="btn btn--secondary btn--sm" data-video-snapshot>Frame Screenshot</button>
+                        <?php if ($downloadUrl !== ''): ?>
+                            <a class="btn btn--primary btn--sm" href="<?= htmlspecialchars($downloadUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Download</a>
+                        <?php endif; ?>
+                    </div>
+                    <canvas class="is-hidden"></canvas>
                 </div>
-            <?php endif; ?>
-        </div>
-        <div class="tab-content" id="tab-manual">
-            <div class="label-row">Manueller Prompt (optional)</div>
-            <textarea class="prompt-input" name="_sv_manual_prompt" form="forge-form" maxlength="2000" placeholder="Manueller Prompt eintragen"></textarea>
-            <div class="label-row">Negativer Prompt (optional)</div>
-            <textarea class="prompt-input" name="_sv_manual_negative" form="forge-form" maxlength="2000" placeholder="Negativer Prompt oder leer lassen"></textarea>
-            <div class="checkbox-row">
-                <label><input type="checkbox" name="_sv_use_hybrid" value="1" form="forge-form"> Hybrid (Prompt + Tags)</label>
-                <label><input type="checkbox" name="_sv_negative_allow_empty" value="1" form="forge-form"> Leeren negativen Prompt erlauben</label>
             </div>
-            <div class="tab-hint">Absenden über „Forge Regen“.</div>
         </div>
-        <div class="tab-content" id="tab-tags">
+    <?php endif; ?>
+
+    <div class="tab-content" id="tab-tags" data-tab-panel="media">
+        <div class="panel">
+            <div class="panel-header">Tags</div>
             <?php if ($tags === []): ?>
-                <div class="tab-hint">Keine Tags vorhanden.</div>
+                <div class="tab-hint">Keine Tags gespeichert.</div>
             <?php else: ?>
                 <div class="chip-list">
                     <?php foreach ($tags as $tag):
@@ -1904,73 +1332,667 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
                         $locked = (int)($tag['locked'] ?? 0) === 1;
                         ?>
                         <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                            <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?><?= $locked ? ' 🔒' : '' ?>
+                            <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?><?= $locked ? ' · locked' : '' ?>
                         </span>
+                    <?php endforeach; ?>
+                </div>
+                <?php if (count($tags) > 30): ?><div class="tab-hint">Weitere Tags per „Mehr anzeigen“ sichtbar.</div><?php endif; ?>
+            <?php endif; ?>
+            <?php if ($hasInternalAccess): ?>
+                <form method="post" class="stacked tag-form">
+                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                    <input type="hidden" name="action" value="tag_add" id="tag-action-field">
+                    <label>Tag-Name<input type="text" name="tag_name" maxlength="120" required></label>
+                    <label>Typ (optional)<input type="text" name="tag_type" maxlength="64" placeholder="content/style/meta"></label>
+                    <label>Confidence<input type="number" step="0.01" min="0" max="1" name="tag_confidence" placeholder="1.0"></label>
+                    <label class="checkbox-inline"><input type="checkbox" name="tag_lock_flag" value="1"> sofort sperren</label>
+                    <div class="button-stack inline">
+                        <button class="btn btn--secondary btn--sm tag-action" type="submit" data-action="tag_add">Tag hinzufügen/aktualisieren</button>
+                        <button class="btn btn--ghost btn--sm tag-action" type="submit" data-action="tag_lock">Lock</button>
+                        <button class="btn btn--ghost btn--sm tag-action" type="submit" data-action="tag_unlock">Unlock</button>
+                        <button class="btn btn--danger btn--sm tag-action" type="submit" data-action="tag_remove">Entfernen</button>
+                    </div>
+                </form>
+            <?php else: ?>
+                <div class="tab-hint">Tags bearbeiten ist im Public-Modus deaktiviert.</div>
+            <?php endif; ?>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">Meta</div>
+            <?php if ($groupedMeta === []): ?>
+                <div class="tab-hint">Keine Einträge vorhanden.</div>
+            <?php else: ?>
+                <?php foreach ($groupedMeta as $source => $entries): ?>
+                    <div class="meta-section">
+                        <div class="meta-title">[<?= htmlspecialchars((string)$source, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>]</div>
+                        <div class="meta-grid">
+                            <?php foreach ($entries as $entry): ?>
+                                <div class="meta-row"><span><?= htmlspecialchars((string)$entry['key'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><strong><?= htmlspecialchars(sv_meta_value($entry['value']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-prompt" data-tab-panel="media">
+        <div class="panel" id="prompt-panel">
+            <div class="panel-header">Prompt &amp; Negative Prompt</div>
+            <div class="tab-bar" data-tab-group="prompt">
+                <button class="tab-button" data-tab="prompt-effective" data-tab-default="true">Effektiv</button>
+                <button class="tab-button" data-tab="prompt-manual" <?= $overrideDisabled ? 'disabled' : '' ?>>Manuell</button>
+                <button class="tab-button" data-tab="prompt-tags">Tags</button>
+            </div>
+            <div class="tab-content" id="prompt-effective" data-tab-panel="prompt">
+                <div class="label-row">Effektiver Prompt</div>
+                <textarea readonly class="prompt-viewer"><?= htmlspecialchars($displayPromptText ?: 'Kein Prompt gespeichert.', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+                <div class="label-row">Negativer Prompt</div>
+                <textarea readonly class="prompt-viewer"><?= htmlspecialchars($displayNegativePrompt ?: '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea>
+                <?php if ($promptParams !== []): ?>
+                    <div class="prompt-params">
+                        <?php foreach ($promptParams as $label => $value): ?>
+                            <div class="param-row"><span><?= htmlspecialchars($label, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><strong><?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+            <div class="tab-content" id="prompt-manual" data-tab-panel="prompt">
+                <div class="label-row">Manueller Prompt (optional)</div>
+                <textarea class="prompt-input" name="_sv_manual_prompt" form="forge-form" maxlength="2000" placeholder="Manueller Prompt eintragen"></textarea>
+                <div class="label-row">Negativer Prompt (optional)</div>
+                <textarea class="prompt-input" name="_sv_manual_negative" form="forge-form" maxlength="2000" placeholder="Negativer Prompt oder leer lassen"></textarea>
+                <div class="checkbox-row">
+                    <label><input type="checkbox" name="_sv_use_hybrid" value="1" form="forge-form"> Hybrid (Prompt + Tags)</label>
+                    <label><input type="checkbox" name="_sv_negative_allow_empty" value="1" form="forge-form"> Leeren negativen Prompt erlauben</label>
+                </div>
+                <div class="tab-hint">Absenden über „Forge Regen“.</div>
+            </div>
+            <div class="tab-content" id="prompt-tags" data-tab-panel="prompt">
+                <?php if ($tags === []): ?>
+                    <div class="tab-hint">Keine Tags vorhanden.</div>
+                <?php else: ?>
+                    <div class="chip-list">
+                        <?php foreach ($tags as $tag):
+                            $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
+                            $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
+                            $locked = (int)($tag['locked'] ?? 0) === 1;
+                            ?>
+                            <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?><?= $locked ? ' · locked' : '' ?>
+                            </span>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-jobs" data-tab-panel="media">
+        <?php if ($hasInternalAccess): ?>
+        <div class="panel action-panel">
+            <div class="panel-header">Aktionen</div>
+            <?php if ($actionMessage !== null): ?>
+                <div class="action-feedback <?= $actionSuccess ? 'success' : 'error' ?>">
+                    <div class="action-feedback-title"><?= $actionSuccess ? 'OK' : 'Fehler' ?></div>
+                    <div><?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <?php if ($actionLogFile): ?>
+                        <div class="action-logfile">Logdatei: <?= htmlspecialchars(sv_safe_path_label((string)$actionLogFile), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <?php endif; ?>
+                    <?php if ($actionLogsSafe !== []): ?>
+                        <details class="action-logdetails">
+                            <summary>Details</summary>
+                            <pre><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                        </details>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+            <?php if ($hasStaleScan): ?>
+                <div class="action-feedback error">
+                    <div class="action-feedback-title">Scan veraltet</div>
+                    <div>Scanner war beim letzten Forge-Lauf nicht erreichbar. Tags/Rating sind möglicherweise veraltet.</div>
+                </div>
+            <?php endif; ?>
+
+            <div class="action-feedback">
+                <div class="action-feedback-title">Operator Quick Actions</div>
+                <div class="button-stack inline">
+                    <form method="post">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="rescan_job">
+                        <button class="btn btn--secondary btn--sm" type="submit">Tag-Rescan</button>
+                    </form>
+                    <form method="post">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="vote_up">
+                        <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
+                    </form>
+                    <form method="post">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="vote_down">
+                        <button class="btn btn--icon <?= $voteState === -1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote runter" title="Vote runter"><?= $iconDown ?></button>
+                    </form>
+                    <form method="post">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <input type="hidden" name="action" value="checked_toggle">
+                        <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
+                        <button class="btn btn--icon <?= $checkedFlag ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="<?= $checkedFlag ? 'Checked entfernen' : 'Checked setzen' ?>" title="<?= $checkedFlag ? 'Checked entfernen' : 'Checked setzen' ?>"><?= $iconCheck ?></button>
+                    </form>
+                </div>
+            </div>
+
+            <form id="forge-form" class="forge-control" method="post">
+                <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                <input type="hidden" name="action" value="forge_regen">
+                <div class="forge-grid">
+                    <div class="form-block">
+                        <div class="label-row">Verfahren (Schritt 1)</div>
+                        <div class="radio-row vertical">
+                            <label><input type="radio" name="_sv_recreate_strategy" value="img2img" checked> Img2img (aktuelle Version als Input)</label>
+                            <label><input type="radio" name="_sv_recreate_strategy" value="prompt_only"> Prompt-only (txt2img)</label>
+                            <label><input type="radio" name="_sv_recreate_strategy" value="tags" <?= $tags === [] ? 'disabled' : '' ?>> Tags-to-Prompt<?= $tags === [] ? ' (keine Tags)' : '' ?></label>
+                            <label><input type="radio" name="_sv_recreate_strategy" value="hybrid"> Hybrid (Prompt + Tags gedrosselt)</label>
+                        </div>
+                        <div class="hint">Strategie steuert Prompt-Quelle und Mode-Entscheidung.</div>
+                    </div>
+                    <div class="form-block">
+                        <div class="label-row">Mode (Schritt 2)</div>
+                        <div class="radio-row">
+                            <label><input type="radio" name="_sv_mode" value="preview" checked> Preview (Standard)</label>
+                            <label><input type="radio" name="_sv_mode" value="replace"> Replace sofort</label>
+                        </div>
+                        <div class="hint">Replace schreibt sofort zurück, Preview bleibt isoliert.</div>
+                    </div>
+                    <div class="form-block">
+                        <div class="label-row">Prompt Quelle</div>
+                        <div class="prompt-chip">Effektiv: <?= htmlspecialchars($displayPromptText !== '' ? sv_meta_value($displayPromptText, 160) : 'Kein Prompt', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php if ($manualOverrideActive): ?>
+                            <div class="action-note highlight">Manual override aktiv (zuletzt genutzter Prompt).</div>
+                        <?php endif; ?>
+                        <textarea class="prompt-input compact" name="_sv_manual_prompt" maxlength="2000" placeholder="Optionaler manueller Prompt"></textarea>
+                    </div>
+                    <div class="form-block">
+                        <div class="label-row">Negativer Prompt</div>
+                        <textarea class="prompt-input compact" name="_sv_manual_negative" maxlength="2000" placeholder="Optionaler negativer Prompt"></textarea>
+                        <label class="checkbox-inline"><input type="checkbox" name="_sv_negative_allow_empty" value="1"> Leeren negativen Prompt erlauben</label>
+                    </div>
+                    <div class="form-block two-col">
+                        <label>Seed (optional)<input type="number" name="_sv_seed" min="0" step="1" placeholder="Auto" value="<?= htmlspecialchars((string)$activeSeed, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
+                        <label>Steps<input type="number" name="_sv_steps" min="1" max="150" step="1" placeholder="auto" value="<?= htmlspecialchars((string)$activeSteps, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
+                    </div>
+                    <div class="form-block two-col">
+                        <label>Denoise<input type="number" name="_sv_denoise" min="0" max="1" step="0.01" placeholder="auto"></label>
+                        <label>Sampler
+                            <select name="_sv_sampler">
+                                <option value="">Auto</option>
+                                <option value="DPM++ 2M Karras" <?= $activeSampler === 'DPM++ 2M Karras' ? 'selected' : '' ?>>DPM++ 2M Karras</option>
+                                <option value="Euler a" <?= $activeSampler === 'Euler a' ? 'selected' : '' ?>>Euler a</option>
+                                <option value="DPM++ SDE Karras" <?= $activeSampler === 'DPM++ SDE Karras' ? 'selected' : '' ?>>DPM++ SDE Karras</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="form-block two-col">
+                        <label>Scheduler
+                            <select name="_sv_scheduler">
+                                <option value="">Auto</option>
+                                <option value="Karras" <?= $activeScheduler === 'Karras' ? 'selected' : '' ?>>Karras</option>
+                                <option value="Normal" <?= $activeScheduler === 'Normal' ? 'selected' : '' ?>>Normal</option>
+                                <option value="Exponential" <?= $activeScheduler === 'Exponential' ? 'selected' : '' ?>>Exponential</option>
+                            </select>
+                        </label>
+                        <label>Model Override
+                            <select name="_sv_model" <?= $hasInternalAccess ? '' : 'disabled' ?>>
+                                <option value="">Auto (Healthcheck / Fallback)</option>
+                                <?php foreach ($forgeModels as $model): ?>
+                                    <?php $name = (string)($model['name'] ?? ''); if ($name === '') { continue; } ?>
+                                    <option value="<?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $name === $modelDropdownValue ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                        <?php if (!empty($model['title'])): ?> (<?= htmlspecialchars((string)$model['title'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?>
+                                    </option>
+                                <?php endforeach; ?>
+                                <?php if ($modelDropdownValue !== '' && !array_filter($forgeModels, fn($m) => isset($m['name']) && $m['name'] === $modelDropdownValue)): ?>
+                                    <option value="<?= htmlspecialchars((string)$modelDropdownValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" selected>Manuell: <?= htmlspecialchars((string)$modelDropdownValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                                <?php endif; ?>
+                            </select>
+                        </label>
+                        <div class="hint">Auto/Resolved: <?= htmlspecialchars($resolvedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $forgeFallbackModel ? ' · Fallback: ' . htmlspecialchars($forgeFallbackModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
+                        <?php if ($forgeModelError !== null): ?>
+                            <div class="action-note error">Modelliste nicht geladen: <?= htmlspecialchars($forgeModelError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php endif; ?>
+                    </div>
+                    <div class="form-block">
+                        <label class="checkbox-inline"><input type="checkbox" name="_sv_use_hybrid" value="1"> Hybrid (Prompt + Tags)</label>
+                    </div>
+                </div>
+                <div class="panel-subsection compact">
+                    <div class="meta-line"><span>Forge</span><strong><?= $forgeEnabled ? 'aktiv' : 'deaktiviert' ?></strong><em class="small"><?= $forgeDispatchEnabled ? 'Dispatch an' : 'Dispatch aus' ?></em></div>
+                    <div class="meta-line"><span>Quelle</span><strong><?= htmlspecialchars($forgeModelSourceLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small">Status: <?= htmlspecialchars($forgeModelStatusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em></div>
+                    <div class="meta-line"><span>Gewählt</span><strong><?= htmlspecialchars($selectedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <div class="meta-line"><span>Resolved</span><strong><?= htmlspecialchars($resolvedModelLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if (!empty($latestModelStatus)): ?><em class="small">Job: <?= htmlspecialchars((string)$latestModelStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em><?php endif; ?></div>
+                    <?php if (!empty($latestModelSource)): ?><div class="hint small">Letzte Quelle: <?= htmlspecialchars((string)$latestModelSource, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                    <?php if (!empty($latestModelError)): ?><div class="action-note error">Job-Model-Hinweis: <?= htmlspecialchars((string)$latestModelError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                    <?php if ($latestJobError): ?><div class="action-note error">Letzter Forge-Fehler<?= $latestJobUpdated ? ' (' . htmlspecialchars($latestJobUpdated, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?>: <?= htmlspecialchars($latestJobError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                </div>
+                <div class="button-stack inline">
+                    <button class="btn btn--primary" type="submit" name="_sv_mode" value="preview" <?= $forgeDisabled ? 'disabled' : '' ?>>Preview starten</button>
+                    <button class="btn btn--danger" type="submit" name="_sv_mode" value="replace" <?= $forgeDisabled ? 'disabled' : '' ?>>Replace sofort</button>
+                </div>
+            </form>
+
+            <div class="button-stack">
+                <button class="btn btn--secondary" type="button" <?= $overrideDisabled ? 'disabled' : '' ?> onclick="document.getElementById('prompt-panel')?.scrollIntoView({ behavior: 'smooth' });">Prompt bearbeiten</button>
+                <?php if ($overrideReason): ?><div class="btn-reason"><?= htmlspecialchars($overrideReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+
+                <button class="btn btn--ghost" type="submit" form="rebuild-form" <?= $rebuildDisabled ? 'disabled' : '' ?>>Prompt neu aufbauen</button>
+                <?php if ($rebuildReason): ?><div class="btn-reason"><?= htmlspecialchars($rebuildReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+
+                <button class="btn btn--danger" type="submit" form="missing-form">Missing markieren</button>
+                <div class="btn-reason">Status wird nur auf missing gesetzt.</div>
+            </div>
+            <div class="panel-subsection">
+                <div class="subheader">Curation (Quality-Status)</div>
+                <div class="hint">Quality-Status (unknown/ok/review/blocked) bewertet die operative Freigabe. Prompt-Qualität (A/B/C) bleibt separat.</div>
+                <form method="post" class="stacked">
+                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                    <input type="hidden" name="action" value="quality_flag">
+                    <label>Status
+                        <select name="quality_status">
+                            <?php foreach ($qualityStatusLabels as $statusValue => $statusLabel): ?>
+                                <option value="<?= htmlspecialchars($statusValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $qualityStatus === $statusValue ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Score (optional)<input type="number" step="0.01" name="quality_score" value="<?= htmlspecialchars((string)($qualityScore ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"></label>
+                    <label>Regel/Quelle<input type="text" name="quality_rule" maxlength="120" placeholder="Policy/Regel"></label>
+                    <label>Notiz<textarea name="quality_notes" maxlength="500" placeholder="Begründung/Review-Hinweis"><?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
+                    <button class="btn btn--secondary" type="submit">Curation speichern</button>
+                </form>
+                <?php if ($curationUpdatedAt !== null): ?>
+                    <div class="hint">Letzte Änderung: <?= htmlspecialchars($curationUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                <?php endif; ?>
+            </div>
+
+            <div class="panel-subsection">
+                <div class="subheader">Delete/Review</div>
+                <form method="post" class="stacked">
+                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                    <input type="hidden" name="action" value="request_delete">
+                    <label>Grund<textarea name="delete_reason" maxlength="240" placeholder="Warum pending_delete?"><?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></textarea></label>
+                    <button class="btn btn--danger" type="submit">Lifecycle auf pending_delete setzen</button>
+                </form>
+            </div>
+            <div class="panel-subsection">
+                <div class="subheader">Tags &amp; Rescan</div>
+                <div class="rescan-summary" id="rescan-summary" data-rescan-summary data-endpoint="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'rescan_jobs'])) ?>" data-internal="<?= $hasInternalAccess ? 'true' : 'false' ?>">
+                    <div class="meta-line">
+                        <span>Letzter Scan</span>
+                        <strong id="scan-run-at"><?= $latestScanRunAt !== '' ? htmlspecialchars($latestScanRunAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></strong>
+                        <em class="small" id="scan-meta"><?= htmlspecialchars($latestScanMetaText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></em>
+                    </div>
+                    <div class="meta-line">
+                        <span>Tags</span>
+                        <strong id="scan-tags"><?= htmlspecialchars($latestScanTagsText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                        <em class="small">locked=1 bleibt geschützt</em>
+                    </div>
+                    <div class="meta-line <?= $latestScanErrorCode !== null ? '' : 'is-hidden' ?>" id="scan-error-code-line">
+                        <span>Error-Code</span>
+                        <strong id="scan-error-code"><?= htmlspecialchars((string)($latestScanErrorCode ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    </div>
+                    <div class="meta-line <?= $latestScanHttpStatus !== null ? '' : 'is-hidden' ?>" id="scan-http-status-line">
+                        <span>HTTP-Status</span>
+                        <strong id="scan-http-status"><?= htmlspecialchars((string)($latestScanHttpStatus ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    </div>
+                    <div class="meta-line <?= $latestScanEndpoint !== null && $latestScanEndpoint !== '' ? '' : 'is-hidden' ?>" id="scan-endpoint-line">
+                        <span>Endpoint</span>
+                        <strong id="scan-endpoint"><?= htmlspecialchars((string)($latestScanEndpoint ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    </div>
+                    <div class="meta-line <?= $latestScanResponseType !== null && $latestScanResponseType !== '' ? '' : 'is-hidden' ?>" id="scan-response-type-line">
+                        <span>Response</span>
+                        <strong id="scan-response-type"><?= htmlspecialchars((string)($latestScanResponseType ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    </div>
+                    <div class="meta-line <?= $latestScanBodySnippet !== null && $latestScanBodySnippet !== '' ? '' : 'is-hidden' ?>" id="scan-body-snippet-line">
+                        <span>Body-Snippet</span>
+                        <strong id="scan-body-snippet"><?= htmlspecialchars($latestScanBodySnippet !== null ? sv_meta_value((string)$latestScanBodySnippet, 300) : '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    </div>
+                    <div class="job-error inline <?= $latestScanError ? '' : 'is-hidden' ?>" id="scan-error"><?= htmlspecialchars((string)($latestScanError ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                    <div class="hint small <?= ($latestScanRunAt === '' && $latestScanError === null) ? '' : 'is-hidden' ?>" id="scan-empty">Kein Scan-Ergebnis gespeichert.</div>
+                    <div class="meta-line" id="rescan-job-line">
+                        <?php if ($activeRescanJob): ?>
+                            <?php
+                            $status = strtolower((string)$activeRescanJob['status']);
+                            $jobStart = (string)($activeRescanJob['started_at'] ?? $activeRescanJob['created_at'] ?? '');
+                            $jobFinish = (string)($activeRescanJob['finished_at'] ?? $activeRescanJob['completed_at'] ?? '');
+                            $jobAge = (string)($activeRescanJob['age_label'] ?? '');
+                            $jobStuck = !empty($activeRescanJob['stuck']);
+                            ?>
+                            <span>Rescan Job</span><strong><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><em class="small"><?= htmlspecialchars($jobStart, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $jobFinish !== '' ? ' → ' . htmlspecialchars($jobFinish, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?><?= $jobAge !== '' ? ' · Age ' . htmlspecialchars($jobAge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></em>
+                            <?php if ($jobStuck): ?><span class="status-badge status-error">stuck</span><?php endif; ?>
+                            <?php if (!empty($activeRescanJob['error'])): ?><div class="job-error inline"><?= htmlspecialchars((string)$activeRescanJob['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                        <?php else: ?>
+                            <span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>
+                        <?php endif; ?>
+                    </div>
+                    <div class="job-error inline <?= $rescanLastError !== null ? '' : 'is-hidden' ?>" id="rescan-last-error"><?= $rescanLastError !== null ? 'Letzter Fehler: ' . htmlspecialchars($rescanLastError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '' ?></div>
+                    <div class="hint small" id="rescan-poll-meta">Polling aktiv.</div>
+                </div>
+                <form method="post" class="stacked">
+                    <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                    <input type="hidden" name="action" value="rescan_job">
+                    <button class="btn btn--primary" id="rescan-button" type="submit" <?= $hasInternalAccess ? '' : 'disabled' ?>>Tag-Rescan (Job)</button>
+                    <div class="hint">Stellt einen Rescan als Job in die Queue (locked=1 bleibt geschützt).</div>
+                </form>
+            </div>
+            <?php if ($forgeInfoNotes !== []): ?>
+                <div class="action-note">Hinweise: <?= htmlspecialchars(implode(' ', $forgeInfoNotes), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <?php endif; ?>
+            <div class="action-note">Alle Aktionen nutzen die bestehende Internal-Key/IP-Prüfung.</div>
+        </div>
+        <?php endif; ?>
+
+        <div class="panel status-panel">
+            <div class="panel-header">Status</div>
+            <div class="status-badges">
+                <span class="status-pill <?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($promptLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="status-pill <?= htmlspecialchars($tagBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($tagLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <span class="status-pill <?= htmlspecialchars($metaBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($metaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+            </div>
+            <div class="quality-row">
+                <span class="quality-pill">Prompt-Qualität: <strong><?= htmlspecialchars($promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></span>
+                <span class="quality-score">Score <?= (int)$promptQuality['score'] ?></span>
+                <?php if ($promptUpdatedAt !== null): ?><span class="quality-score">Letzte Änderung <?= htmlspecialchars($promptUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><?php endif; ?>
+            </div>
+            <div class="lifecycle-row">
+                <div>Lifecycle: <strong><?= htmlspecialchars($lifecycleStatus, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                <?php if ($lifecycleReason !== ''): ?><div class="hint">Grund: <?= htmlspecialchars($lifecycleReason, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+            </div>
+            <div class="lifecycle-row">
+                <div>Curation (Quality-Status): <strong><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong><?php if ($qualityScore !== null): ?> (Score <?= htmlspecialchars((string)$qualityScore, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?></div>
+                <?php if ($qualityNotes !== ''): ?><div class="hint">Notiz: <?= htmlspecialchars($qualityNotes, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                <?php if ($curationUpdatedAt !== null): ?><div class="hint">Letzte Änderung: <?= htmlspecialchars($curationUpdatedAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                <div class="hint">Curation ≠ Prompt-Qualität; beide werden separat bewertet.</div>
+            </div>
+            <?php if ($mediaIssues !== []): ?>
+                <div class="issues-list">
+                    <div class="issues-title">Issues (<?= count($mediaIssues) ?>)</div>
+                    <ul>
+                        <?php foreach (array_slice($mediaIssues, 0, 3) as $issue): ?>
+                            <li><span class="issue-type"><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span> <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php if (count($mediaIssues) > 3): ?>
+                        <details>
+                            <summary>Mehr anzeigen</summary>
+                            <ul>
+                                <?php foreach (array_slice($mediaIssues, 3) as $issue): ?>
+                                    <li><span class="issue-type"><?= htmlspecialchars(ucfirst((string)$issue['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span> <?= htmlspecialchars((string)$issue['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></li>
+                                <?php endforeach; ?>
+                            </ul>
+                        </details>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+        <div class="panel rescan-panel">
+            <div class="panel-header">Rescan-Jobs</div>
+            <?php if ($rescanJobs === []): ?>
+                <div class="job-hint">Keine Rescan-Jobs gefunden.</div>
+            <?php else: ?>
+                <div class="timeline">
+                    <?php foreach ($rescanJobs as $job): ?>
+                        <div class="timeline-item">
+                            <div class="timeline-header">
+                                <div class="timeline-title">Rescan #<?= (int)$job['id'] ?></div>
+                                <span class="status-badge status-<?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <?php if (!empty($job['stuck'])): ?>
+                                    <span class="status-badge status-error">stuck</span>
+                                <?php endif; ?>
+                            </div>
+                            <div class="timeline-meta"><?= htmlspecialchars((string)($job['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($job['updated_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php if (!empty($job['error'])): ?>
+                                <div class="job-error"><?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <?php endif; ?>
+                            <?php if ($job['tags_written'] !== null): ?><div class="meta-line"><span>Tags</span><strong><?= (int)$job['tags_written'] ?></strong><em class="small">unlocked ersetzt</em></div><?php endif; ?>
+                        </div>
                     <?php endforeach; ?>
                 </div>
             <?php endif; ?>
         </div>
-    </details>
-
-    <details class="panel collapsible" id="tags-panel">
-        <summary>Tags</summary>
-        <?php if ($tags === []): ?>
-            <div class="tab-hint">Keine Tags gespeichert.</div>
-        <?php else: ?>
-            <div class="chip-list limited" data-limit="30">
-                <?php foreach ($tags as $tag):
-                    $tagType = preg_replace('~[^a-z0-9_-]+~i', '', (string)($tag['type'] ?? 'other')) ?: 'other';
-                    $conf = isset($tag['confidence']) ? number_format((float)$tag['confidence'], 2) : null;
-                    $locked = (int)($tag['locked'] ?? 0) === 1;
-                    ?>
-                    <span class="chip tag-type-<?= htmlspecialchars($tagType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?= htmlspecialchars((string)$tag['name'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $conf !== null ? ' (' . htmlspecialchars($conf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?><?= $locked ? ' 🔒' : '' ?>
-                    </span>
-                <?php endforeach; ?>
+        <div class="panel forge-panel">
+            <div class="panel-header">Forge-Jobs</div>
+            <div id="forge-jobs" class="timeline" data-forge-jobs data-endpoint="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'forge_jobs'])) ?>" data-thumb="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                <div class="job-hint">Forge-Jobs laden...</div>
             </div>
-            <?php if (count($tags) > 30): ?><div class="tab-hint">Weitere Tags per „Mehr anzeigen“ sichtbar.</div><?php endif; ?>
+            <div class="hint small" id="forge-poll-meta">Polling aktiv.</div>
+        </div>
+        <?php if ($hasInternalAccess): ?>
+            <div class="panel">
+                <div class="panel-header">Logs</div>
+                <?php if ($actionLogsSafe === []): ?>
+                    <div class="tab-hint">Keine aktuellen Logeinträge.</div>
+                <?php else: ?>
+                    <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                <?php endif; ?>
+            </div>
         <?php endif; ?>
-    </details>
+    </div>
 
-    <details class="panel collapsible" id="meta-panel">
-        <summary>Meta</summary>
-        <?php if ($groupedMeta === []): ?>
-            <div class="tab-hint">Keine Einträge vorhanden.</div>
-        <?php else: ?>
-            <?php foreach ($groupedMeta as $source => $entries): ?>
-                <div class="meta-section">
-                    <div class="meta-title">[<?= htmlspecialchars((string)$source, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>]</div>
-                    <div class="meta-grid">
-                        <?php foreach ($entries as $entry): ?>
-                            <div class="meta-row"><span><?= htmlspecialchars((string)$entry['key'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span><strong><?= htmlspecialchars(sv_meta_value($entry['value']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+    <div class="tab-content" id="tab-versions" data-tab-panel="media">
+        <div class="panel versions-panel">
+            <div class="panel-header">Versionen</div>
+            <?php if ($versions === []): ?>
+                <div class="job-hint">Keine Versionen gefunden.</div>
+            <?php else: ?>
+                <div class="version-grid">
+                    <?php foreach ($versions as $idx => $version): ?>
+                        <?php
+                        $assetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
+                        $primarySelection = sv_select_asset_from_set($assetSet, $assetSet['primary_type'] ?? null);
+                        $primaryUrls = sv_build_asset_urls($id, $showAdult, $primarySelection);
+                        $versionLinkParams = array_merge($filteredParams, ['id' => (int)$id, 'version' => (int)$idx, 'asset' => $primarySelection['type']]);
+                        $versionLink = 'media_view.php?' . http_build_query($versionLinkParams) . '#visual';
+                        $versionAssetLabel = sv_asset_label((string)$primarySelection['type']);
+                        ?>
+                        <a class="version-tile<?= !empty($version['is_current']) ? ' current' : '' ?>" href="<?= htmlspecialchars($versionLink, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                            <div class="version-thumb">
+                                <img src="<?= htmlspecialchars((string)$primaryUrls['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Version <?= (int)$version['version_index'] ?>">
+                            </div>
+                            <div class="version-label">V<?= (int)$version['version_index'] ?> <?= !empty($version['is_current']) ? '· aktuell' : '' ?> · <?= htmlspecialchars($versionAssetLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                            <div class="version-meta-small">Modell: <?= htmlspecialchars((string)($version['model_used'] ?? $version['model_requested'] ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        </a>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+        <div class="panel compare-panel">
+            <div class="panel-header">Compare Versionen</div>
+            <form method="get" class="compare-form">
+                <input type="hidden" name="id" value="<?= (int)$id ?>">
+                <?php foreach ($filteredParams as $k => $v): ?>
+                    <input type="hidden" name="<?= htmlspecialchars((string)$k, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                <?php endforeach; ?>
+                <label>Version A
+                    <select name="compare_a">
+                        <?php foreach ($versions as $idx => $version): ?>
+                            <option value="<?= (int)$idx ?>" <?= $idx === $versionCompareA ? 'selected' : '' ?>>V<?= (int)$version['version_index'] ?></option>
                         <?php endforeach; ?>
+                    </select>
+                </label>
+                <?php if ($compareAssetSelectionA): ?>
+                    <label>Asset A
+                        <select name="compare_asset_a">
+                            <?php foreach ($compareAssetSelectionA['options'] as $option): ?>
+                                <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $compareAssetSelectionA['type'] ? 'selected' : '' ?>><?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                <?php endif; ?>
+                <label>Version B
+                    <select name="compare_b">
+                        <?php foreach ($versions as $idx => $version): ?>
+                            <option value="<?= (int)$idx ?>" <?= $idx === $versionCompareB ? 'selected' : '' ?>>V<?= (int)$version['version_index'] ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <?php if ($compareAssetSelectionB): ?>
+                    <label>Asset B
+                        <select name="compare_asset_b">
+                            <?php foreach ($compareAssetSelectionB['options'] as $option): ?>
+                                <option value="<?= htmlspecialchars((string)$option, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $option === $compareAssetSelectionB['type'] ? 'selected' : '' ?>><?= htmlspecialchars(sv_asset_label((string)$option), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                <?php endif; ?>
+                <button class="btn btn--secondary" type="submit">Vergleichen</button>
+            </form>
+            <?php if ($compareVersionA && $compareVersionB): ?>
+                <div class="compare-summary">V<?= (int)$compareVersionA['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>) ⇄ V<?= (int)$compareVersionB['version_index'] ?> (<?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</div>
+                <?php if ($compareIdenticalSources): ?>
+                    <div class="action-note highlight">Identische Quelle gewählt – Vergleiche können identisch aussehen.</div>
+                <?php endif; ?>
+                <div class="preview-grid compare-visuals">
+                    <div class="preview-card">
+                        <div class="preview-label original">Quelle A</div>
+                        <div class="preview-frame">
+                            <?php if (!empty($compareAssetUrlsA['thumb'])): ?>
+                                <img src="<?= htmlspecialchars((string)$compareAssetUrlsA['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Compare A">
+                            <?php else: ?>
+                                <div class="preview-placeholder">
+                                    <div class="placeholder-title">Kein Bild verfügbar</div>
+                                    <?php if (!empty($compareAssetSelectionA['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$compareAssetSelectionA['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                        <div class="preview-meta">
+                            <span><?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionA['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <?php if (!empty($compareAssetSelectionA['job_id'] ?? null)): ?><span>Job #<?= (int)$compareAssetSelectionA['job_id'] ?></span><?php endif; ?>
+                        </div>
+                    </div>
+                    <div class="preview-card">
+                        <div class="preview-label preview">Quelle B</div>
+                        <div class="preview-frame">
+                            <?php if (!empty($compareAssetUrlsB['thumb'])): ?>
+                                <img src="<?= htmlspecialchars((string)$compareAssetUrlsB['thumb'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Compare B">
+                            <?php else: ?>
+                                <div class="preview-placeholder">
+                                    <div class="placeholder-title">Kein Bild verfügbar</div>
+                                    <?php if (!empty($compareAssetSelectionB['path'] ?? '')): ?><div class="placeholder-meta"><?= htmlspecialchars(sv_safe_path_label((string)$compareAssetSelectionB['path']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div><?php endif; ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                        <div class="preview-meta">
+                            <span><?= htmlspecialchars(sv_asset_label((string)($compareAssetSelectionB['type'] ?? 'baseline')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                            <?php if (!empty($compareAssetSelectionB['job_id'] ?? null)): ?><span>Job #<?= (int)$compareAssetSelectionB['job_id'] ?></span><?php endif; ?>
+                        </div>
                     </div>
                 </div>
-            <?php endforeach; ?>
-        <?php endif; ?>
-    </details>
-
-    <?php if ($hasInternalAccess): ?>
-        <details class="panel collapsible" id="logs-panel">
-            <summary>Logs</summary>
-            <?php if ($actionLogsSafe === []): ?>
-                <div class="tab-hint">Keine aktuellen Logeinträge.</div>
+                <?php if ($versionDiff === []): ?>
+                    <div class="job-hint">Keine Unterschiede in Kernparametern.</div>
+                <?php else: ?>
+                    <table class="compare-table">
+                        <thead><tr><th>Feld</th><th>Version A</th><th>Version B</th></tr></thead>
+                        <tbody>
+                            <?php foreach ($versionDiff as [$field, $aVal, $bVal]): ?>
+                                <tr>
+                                    <td><?= htmlspecialchars($field, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars((string)($aVal ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars((string)($bVal ?? '–'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
             <?php else: ?>
-                <pre class="log-viewer"><?= htmlspecialchars(implode("\n", $actionLogsSafe), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre>
+                <div class="job-hint">Bitte Versionen auswählen.</div>
             <?php endif; ?>
-        </details>
+        </div>
 
-        <form id="rebuild-form" method="post">
-            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-            <input type="hidden" name="action" value="rebuild_prompt">
-        </form>
-        <form id="missing-form" method="post" onsubmit="return confirm('Medium als missing markieren? Dateien bleiben erhalten.');">
-            <input type="hidden" name="media_id" value="<?= (int)$id ?>">
-            <input type="hidden" name="action" value="logical_delete">
-        </form>
-    <?php endif; ?>
-
-    <div id="fullscreen-viewer" class="lightbox hidden">
+        <div class="panel history-panel">
+            <div class="panel-header">Prompt-Historie</div>
+            <?php if ($promptHistoryErr === null && $latestPromptHistory !== null): ?>
+                <?php
+                $latestHasLink = !empty($latestPromptHistory['prompt_id']) && !empty($latestPromptHistory['prompt_exists']);
+                $latestTimestamp = (string)($latestPromptHistory['created_at'] ?? '');
+                $latestSource = (string)($latestPromptHistory['source'] ?? '');
+                ?>
+                <div class="job-hint">
+                    Letzte Historie: <strong><?= htmlspecialchars($latestTimestamp !== '' ? $latestTimestamp : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    • Quelle: <strong><?= htmlspecialchars($latestSource !== '' ? $latestSource : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong>
+                    • Version-Link: <strong><?= $latestHasLink ? 'ja' : 'nein' ?></strong>
+                    <?php if ($promptHistoryHasIssues): ?>
+                        <span class="status-badge status-error">Inkonsistenz</span>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+            <?php if ($promptHistoryErr !== null): ?>
+                <div class="action-note">Historie nicht verfügbar: <?= htmlspecialchars($promptHistoryErr, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+            <?php elseif ($promptHistory === []): ?>
+                <div class="job-hint">Keine Historie gefunden.</div>
+            <?php else: ?>
+                <div class="history-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Version</th>
+                                <th>Quelle</th>
+                                <th>Zeit</th>
+                                <th>Modell</th>
+                                <th>Sampler</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($promptHistory as $entry): ?>
+                                <tr>
+                                    <td>#<?= (int)($entry['version'] ?? 0) ?></td>
+                                    <td><?= htmlspecialchars((string)($entry['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars((string)($entry['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars((string)($entry['model'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars((string)($entry['sampler'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                    <td class="history-actions">
+                                        <a class="btn btn--xs btn--secondary" href="#history-<?= (int)$entry['id'] ?>">anzeigen</a>
+                                        <a class="btn btn--xs btn--ghost" href="<?= htmlspecialchars('media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => $id, 'compare_from' => (int)$entry['id'], 'compare_to' => $compareToId > 0 ? $compareToId : $entry['id']])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">als A vergleichen</a>
+                                        <a class="btn btn--xs btn--ghost" href="<?= htmlspecialchars('media_view.php?' . http_build_query(array_merge($filteredParams, ['id' => $id, 'compare_from' => $compareFromId > 0 ? $compareFromId : $entry['id'], 'compare_to' => (int)$entry['id']])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">als B vergleichen</a>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if ($compareResult): ?>
+                    <div class="panel-subsection">
+                        <div class="subheader">Vergleich</div>
+                        <div class="hint">Von #<?= (int)($compareResult['from']['version'] ?? 0) ?> nach #<?= (int)($compareResult['to']['version'] ?? 0) ?></div>
+                        <pre class="diff-view"><?php foreach ($compareResult['diff'] as $line):
+                            $prefix = $line['type'] === 'add' ? '+' : ($line['type'] === 'remove' ? '-' : ' ');
+                            ?>
+<?= htmlspecialchars($prefix . ' ' . $line['value'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "\n" ?>
+<?php endforeach; ?></pre>
+                    </div>
+                <?php endif; ?>
+                <?php foreach ($promptHistory as $entry): ?>
+                    <details class="history-entry" id="history-<?= (int)$entry['id'] ?>">
+                        <summary>Version #<?= (int)($entry['version'] ?? 0) ?> • <?= htmlspecialchars((string)($entry['source'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> • <?= htmlspecialchars((string)($entry['created_at'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></summary>
+                        <div class="history-meta">Modell: <?= htmlspecialchars((string)($entry['model'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Sampler: <?= htmlspecialchars((string)($entry['sampler'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Steps: <?= htmlspecialchars((string)($entry['steps'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <div class="history-meta">Seed: <?= htmlspecialchars((string)($entry['seed'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | Size: <?= htmlspecialchars((string)($entry['width'] ?? '-') . '×' . (string)($entry['height'] ?? '-'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                        <?php if (!empty($entry['negative_prompt'])): ?>
+                            <div class="history-negative"><strong>Negative</strong><br><?= nl2br(htmlspecialchars((string)$entry['negative_prompt'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?></div>
+                        <?php endif; ?>
+                        <div class="history-positive"><strong>Prompt</strong><br><?= nl2br(htmlspecialchars((string)($entry['prompt'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?></div>
+                        <?php if (!empty($entry['raw_text'])): ?>
+                            <details><summary>Raw</summary><pre><?= htmlspecialchars((string)$entry['raw_text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre></details>
+                        <?php endif; ?>
+                        <?php if (!empty($entry['source_metadata'])): ?>
+                            <details><summary>Source Metadata</summary><pre><?= htmlspecialchars((string)$entry['source_metadata'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></pre></details>
+                        <?php endif; ?>
+                    </details>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+    </div>
+<div id="fullscreen-viewer" class="lightbox is-hidden">
         <div class="lightbox-inner">
             <button class="lightbox-close" type="button" aria-label="Schließen">×</button>
             <img src="<?= htmlspecialchars($activeStreamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Fullscreen">
@@ -1984,426 +2006,4 @@ $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTags
     </div>
 </div>
 
-<script>
-(function() {
-    const container = document.getElementById('forge-jobs');
-    if (!container) return;
-    const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'forge_jobs'])) ?>';
-    const thumbUrl = <?= json_encode($thumbUrl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
-    const pollMeta = document.getElementById('forge-poll-meta');
-
-    function statusClass(status) {
-        if (!status) return 'status-queued';
-        const normalized = status.toLowerCase();
-        if (['queued', 'running', 'done', 'error'].includes(normalized)) {
-            return 'status-' + normalized;
-        }
-        return 'status-queued';
-    }
-
-    function renderJobs(jobs) {
-        if (!jobs || jobs.length === 0) {
-            container.innerHTML = '<div class="job-hint">Keine Forge-Jobs vorhanden.</div>';
-            return;
-        }
-        container.innerHTML = '';
-        jobs.forEach((job) => {
-            const item = document.createElement('div');
-            item.className = 'timeline-item';
-            const cacheBust = job.version_token || job.updated_at || job.id;
-            const thumbSrc = job.replaced ? (thumbUrl + (thumbUrl.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(cacheBust)) : thumbUrl;
-            const samplerLabel = (job.used_sampler || '–') + ' / ' + (job.used_scheduler || '–');
-            const decidedMode = job.decided_mode || job.generation_mode || job.mode || 'txt2img';
-            const decidedReason = job.decided_reason || '–';
-            const promptSource = job.used_prompt_source || job.prompt_source || '–';
-            const negativeSource = job.used_negative_source || job.negative_mode || '–';
-            const usedSeed = job.used_seed || job.seed || '–';
-            const startTs = job.started_at || job.created_at || '–';
-            const finishTs = job.finished_at || '';
-            const ageLabel = job.age_label ? (' · Age ' + job.age_label) : '';
-            const stuckBadge = job.stuck ? '<span class="status-badge status-error">stuck</span>' : '';
-            const denoise = (job.decided_denoise !== null && job.decided_denoise !== undefined)
-                ? job.decided_denoise
-                : (job.denoise !== undefined ? job.denoise : '–');
-            const modelLine = (job.model || '–') + (job.fallback_model ? ' (Fallback)' : '');
-            const formatLine = (job.orig_w || '–') + '×' + (job.orig_h || '–') + ' ' + (job.orig_ext || '–') + ' → ' + (job.out_w || '–') + '×' + (job.out_h || '–') + ' ' + (job.out_ext || '–');
-            const attemptLine = job.attempt_index ? ('Attempt ' + job.attempt_index + '/' + (job.attempt_chain ? job.attempt_chain.length : 3)) : 'Attempt –';
-            const errorBlock = job.error ? '<div class="job-error">' + job.error + '</div>' : '';
-            const detailsId = 'job-details-' + job.id;
-
-            item.innerHTML = '
-                <div class="timeline-header">
-                    <div class="timeline-title">Job #' + job.id + '</div>
-                    <span class="status-badge ' + statusClass(job.status) + '">' + (job.status || 'queued') + '</span>
-                    ' + stuckBadge + '
-                </div>
-                <div class="timeline-meta">' + (job.created_at || '–') + ' • ' + (job.updated_at || '–') + ' • ' + startTs + (finishTs ? ' → ' + finishTs : '') + ageLabel + '</div>
-                <div class="timeline-body">
-                    <div class="meta-line"><span>Mode</span><strong>' + decidedMode + ' (' + (job.mode || 'preview') + ')</strong><em class="small">' + decidedReason + '</em></div>
-                    <div class="meta-line"><span>Seed/Denoise</span><strong>' + usedSeed + ' / ' + ((denoise === undefined || denoise === null) ? '–' : denoise) + '</strong></div>
-                    <div class="meta-line"><span>Model</span><strong>' + modelLine + '</strong></div>
-                    <div class="meta-line"><span>Sampler/Scheduler</span><strong>' + samplerLabel + ' · ' + attemptLine + '</strong></div>
-                    <div class="meta-line"><span>Format</span><strong>' + formatLine + ' [' + ((job.format_preserved === null) ? '–' : (job.format_preserved ? '1:1' : 'konvertiert')) + ']</strong></div>
-                    <div class="meta-line"><span>Prompt</span><strong>' + promptSource + '</strong></div>
-                    <div class="meta-line"><span>Negativ</span><strong>' + negativeSource + '</strong></div>
-                    <div class="meta-line"><span>Output</span><strong>' + (job.output_path || '–') + '</strong></div>
-                    <div class="meta-line"><span>Version</span><strong>' + (job.version_token || cacheBust || '–') + '</strong></div>
-                    ' + errorBlock + '
-                </div>
-                <details class="timeline-details" id="' + detailsId + '">
-                    <summary>Details</summary>
-                    <div class="meta-line"><span>Hash</span><strong>' + (job.old_hash || '–') + ' → ' + (job.new_hash || '–') + '</strong></div>
-                    <div class="meta-line"><span>Request</span><strong>' + (job.request_snippet || '–') + '</strong></div>
-                    <div class="meta-line"><span>Response</span><strong>' + (job.response_snippet || '–') + '</strong></div>
-                </details>
-            ';
-
-            if (job.replaced) {
-                const preview = document.getElementById('media-preview-thumb');
-                if (preview) {
-                    preview.src = thumbSrc;
-                }
-            }
-            container.appendChild(item);
-        });
-    }
-
-    const activeStatuses = ['queued', 'pending', 'created', 'running'];
-    let pollTimer = null;
-    let lastStatusLabel = '';
-
-    function updatePollMeta(timeLabel, active) {
-        if (!pollMeta) return;
-        const suffix = active ? 'laufend' : 'inaktiv';
-        pollMeta.textContent = 'Letzter Poll: ' + (timeLabel || new Date().toISOString()) + ' · ' + suffix + (lastStatusLabel ? ' · ' + lastStatusLabel : '');
-    }
-
-    function renderError(message) {
-        container.innerHTML = '<div class="job-hint error">' + message + '</div>';
-        updatePollMeta(null, true);
-    }
-
-    function scheduleNext(active) {
-        if (pollTimer) {
-            clearTimeout(pollTimer);
-        }
-        if (active) {
-            pollTimer = setTimeout(loadJobs, 2000);
-        }
-        updatePollMeta(new Date().toISOString(), active);
-    }
-
-    function loadJobs() {
-        fetch(endpoint, { headers: { 'Accept': 'application/json' } })
-            .then((resp) => {
-                if (!resp.ok) {
-                    throw new Error('HTTP ' + resp.status);
-                }
-                return resp.json();
-            })
-            .then((data) => {
-                const jobs = data.jobs || [];
-                lastStatusLabel = jobs.length ? ('Status: ' + jobs.map((j) => j.status || 'queued').join(', ')) : 'Keine Jobs';
-                renderJobs(jobs);
-                const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
-                scheduleNext(active);
-            })
-            .catch((err) => {
-                renderError('Job-Status konnte nicht geladen werden (' + err.message + ').');
-                scheduleNext(true);
-            });
-    }
-
-    const forgeForm = document.getElementById('forge-form');
-    if (forgeForm) {
-        forgeForm.addEventListener('submit', () => {
-            if (pollTimer) {
-                clearTimeout(pollTimer);
-            }
-            pollTimer = setTimeout(loadJobs, 2000);
-        });
-    }
-
-    loadJobs();
-})();
-
-(function() {
-    const summary = document.getElementById('rescan-summary');
-    if (!summary) return;
-    const jobLine = document.getElementById('rescan-job-line');
-    const pollMeta = document.getElementById('rescan-poll-meta');
-    const rescanButton = document.getElementById('rescan-button');
-    const scanRunAt = document.getElementById('scan-run-at');
-    const scanMeta = document.getElementById('scan-meta');
-    const scanTags = document.getElementById('scan-tags');
-    const scanError = document.getElementById('scan-error');
-    const scanEmpty = document.getElementById('scan-empty');
-    const scanErrorCodeLine = document.getElementById('scan-error-code-line');
-    const scanErrorCode = document.getElementById('scan-error-code');
-    const scanHttpStatusLine = document.getElementById('scan-http-status-line');
-    const scanHttpStatus = document.getElementById('scan-http-status');
-    const scanEndpointLine = document.getElementById('scan-endpoint-line');
-    const scanEndpoint = document.getElementById('scan-endpoint');
-    const scanResponseTypeLine = document.getElementById('scan-response-type-line');
-    const scanResponseType = document.getElementById('scan-response-type');
-    const scanBodySnippetLine = document.getElementById('scan-body-snippet-line');
-    const scanBodySnippet = document.getElementById('scan-body-snippet');
-    const rescanErrorBox = document.getElementById('rescan-last-error');
-    const endpoint = 'media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'rescan_jobs'])) ?>';
-
-    const activeStatuses = ['queued', 'running'];
-    let pollTimer = null;
-
-    function renderState(payload) {
-        const jobs = payload.jobs || [];
-        const latestScan = payload.latest_scan || null;
-        const first = jobs[0] || null;
-        if (latestScan) {
-            if (scanRunAt) {
-                scanRunAt.textContent = latestScan.run_at || '—';
-            }
-            if (scanMeta) {
-                const hasNsfwVal = (latestScan.has_nsfw === null || typeof latestScan.has_nsfw === 'undefined')
-                    ? null
-                    : Number(latestScan.has_nsfw);
-                const flagText = hasNsfwVal === null ? '–' : (hasNsfwVal === 1 ? 'NSFW' : 'SFW');
-                const metaParts = [
-                    'Scanner: ' + (latestScan.scanner || 'unknown'),
-                    'NSFW: ' + (latestScan.nsfw_score ?? '–'),
-                    'Rating: ' + ((latestScan.rating ?? '–')),
-                    'Flag: ' + flagText,
-                ];
-                scanMeta.textContent = metaParts.join(' · ');
-            }
-            if (scanTags) {
-                const tagsVal = (typeof latestScan.tags_written === 'undefined' || latestScan.tags_written === null)
-                    ? null
-                    : Number(latestScan.tags_written);
-                scanTags.textContent = tagsVal === null ? '–' : (tagsVal + ' Tags');
-            }
-            if (scanEmpty) {
-                scanEmpty.style.display = latestScan.run_at ? 'none' : '';
-            }
-            if (scanError) {
-                const err = latestScan.error || '';
-                scanError.textContent = err;
-                scanError.style.display = err ? '' : 'none';
-            }
-            const errorCodeVal = latestScan.error_code || '';
-            if (scanErrorCodeLine) {
-                scanErrorCodeLine.style.display = errorCodeVal ? '' : 'none';
-            }
-            if (scanErrorCode) {
-                scanErrorCode.textContent = errorCodeVal;
-            }
-            const httpStatusVal = (typeof latestScan.http_status === 'undefined' || latestScan.http_status === null)
-                ? ''
-                : String(latestScan.http_status);
-            if (scanHttpStatusLine) {
-                scanHttpStatusLine.style.display = httpStatusVal ? '' : 'none';
-            }
-            if (scanHttpStatus) {
-                scanHttpStatus.textContent = httpStatusVal;
-            }
-            const endpointVal = latestScan.endpoint || '';
-            if (scanEndpointLine) {
-                scanEndpointLine.style.display = endpointVal ? '' : 'none';
-            }
-            if (scanEndpoint) {
-                scanEndpoint.textContent = endpointVal;
-            }
-            const responseTypeVal = latestScan.response_type_detected || '';
-            if (scanResponseTypeLine) {
-                scanResponseTypeLine.style.display = responseTypeVal ? '' : 'none';
-            }
-            if (scanResponseType) {
-                scanResponseType.textContent = responseTypeVal;
-            }
-            let snippetVal = latestScan.body_snippet || '';
-            if (snippetVal.length > 300) {
-                snippetVal = snippetVal.slice(0, 300);
-            }
-            if (scanBodySnippetLine) {
-                scanBodySnippetLine.style.display = snippetVal ? '' : 'none';
-            }
-            if (scanBodySnippet) {
-                scanBodySnippet.textContent = snippetVal;
-            }
-        } else {
-            if (scanRunAt) {
-                scanRunAt.textContent = '—';
-            }
-            if (scanMeta) {
-                scanMeta.textContent = 'Kein Eintrag';
-            }
-            if (scanTags) {
-                scanTags.textContent = '–';
-            }
-            if (scanEmpty) {
-                scanEmpty.style.display = '';
-            }
-            if (scanError) {
-                scanError.style.display = 'none';
-            }
-            if (scanErrorCodeLine) {
-                scanErrorCodeLine.style.display = 'none';
-            }
-            if (scanHttpStatusLine) {
-                scanHttpStatusLine.style.display = 'none';
-            }
-            if (scanEndpointLine) {
-                scanEndpointLine.style.display = 'none';
-            }
-            if (scanResponseTypeLine) {
-                scanResponseTypeLine.style.display = 'none';
-            }
-            if (scanBodySnippetLine) {
-                scanBodySnippetLine.style.display = 'none';
-            }
-        }
-        if (first && jobLine) {
-            const status = (first.status || 'queued').toLowerCase();
-            const startTs = first.started_at || first.created_at || '';
-            const finishTs = first.finished_at || first.completed_at || '';
-            const ageLabel = first.age_label ? (' · Age ' + first.age_label) : '';
-            const stuckBadge = first.stuck ? '<span class="status-badge status-error">stuck</span>' : '';
-            jobLine.innerHTML = '<span>Rescan Job</span><strong>' + status + '</strong><em class="small">' + (startTs || '') + (finishTs ? ' → ' + finishTs : '') + ageLabel + '</em>' + stuckBadge + (first.error ? '<div class="job-error inline">' + first.error + '</div>' : '');
-        } else if (jobLine) {
-            jobLine.innerHTML = '<span>Rescan Job</span><strong>none</strong><em class="small">Kein Eintrag</em>';
-        }
-        if (rescanErrorBox) {
-            const jobError = jobs.find((job) => (job.error));
-            if (jobError && jobError.error) {
-                rescanErrorBox.textContent = 'Letzter Fehler: ' + jobError.error;
-                rescanErrorBox.style.display = '';
-            } else {
-                rescanErrorBox.textContent = '';
-                rescanErrorBox.style.display = 'none';
-            }
-        }
-        if (rescanButton) {
-            const activeJob = activeStatuses.includes((first?.status || '').toLowerCase());
-            rescanButton.disabled = activeJob || !<?= $hasInternalAccess ? 'true' : 'false' ?>;
-            rescanButton.classList.toggle('muted', rescanButton.disabled);
-        }
-        const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
-        if (pollMeta) {
-            pollMeta.textContent = 'Letzter Poll: ' + (payload.server_time || new Date().toISOString()) + ' · ' + (active ? 'laufend' : 'inaktiv');
-        }
-        return active;
-    }
-
-    function scheduleNext(active) {
-        if (pollTimer) {
-            clearTimeout(pollTimer);
-        }
-        if (active) {
-            pollTimer = setTimeout(loadState, 2000);
-        }
-    }
-
-    function loadState() {
-        fetch(endpoint, { headers: { 'Accept': 'application/json' } })
-            .then((resp) => resp.json())
-            .then((data) => {
-                const active = renderState(data);
-                scheduleNext(active);
-            })
-            .catch(() => {
-                scheduleNext(true);
-            });
-    }
-
-    loadState();
-})();
-
-(function() {
-    const inputs = document.querySelectorAll('textarea[name="_sv_manual_prompt"]');
-    inputs.forEach((el) => {
-        const indicator = document.createElement('div');
-        indicator.className = 'action-note highlight manual-indicator';
-        indicator.textContent = 'Manual override aktiv';
-        indicator.style.display = el.value.trim() ? 'block' : 'none';
-        if (el.parentElement) {
-            el.parentElement.appendChild(indicator);
-        }
-        const update = () => {
-            indicator.style.display = el.value.trim() ? 'block' : 'none';
-        };
-        el.addEventListener('input', update);
-    });
-})();
-
-(function() {
-    const tabs = document.querySelectorAll('.tab-button');
-    const contents = document.querySelectorAll('.tab-content');
-    if (!tabs.length || !contents.length) return;
-
-    tabs.forEach((tab) => {
-        tab.addEventListener('click', () => {
-            if (tab.disabled) return;
-            tabs.forEach((t) => t.classList.remove('active'));
-            contents.forEach((c) => c.classList.remove('active'));
-            tab.classList.add('active');
-            const target = document.getElementById(tab.dataset.tab || '');
-            if (target) {
-                target.classList.add('active');
-            }
-        });
-    });
-})();
-
-(function() {
-    const versionSelect = document.getElementById('version-select');
-    if (versionSelect) {
-        versionSelect.addEventListener('change', () => {
-            const url = new URL(window.location.href);
-            url.searchParams.set('version', versionSelect.value);
-            url.searchParams.delete('asset');
-            history.replaceState({}, '', url.toString());
-            window.location.reload();
-        });
-    }
-    const assetSelect = document.getElementById('asset-select');
-    if (assetSelect) {
-        assetSelect.addEventListener('change', () => {
-            const url = new URL(window.location.href);
-            url.searchParams.set('asset', assetSelect.value);
-            history.replaceState({}, '', url.toString());
-            window.location.reload();
-        });
-    }
-
-    const tagButtons = document.querySelectorAll('.tag-action');
-    const actionField = document.getElementById('tag-action-field');
-    tagButtons.forEach((btn) => {
-        btn.addEventListener('click', () => {
-            if (actionField) {
-                actionField.value = btn.dataset.action || 'tag_add';
-            }
-        });
-    });
-
-    const lightbox = document.getElementById('fullscreen-viewer');
-    const preview = document.querySelector('.full-preview');
-    if (preview && lightbox) {
-        preview.addEventListener('click', () => {
-            lightbox.classList.remove('hidden');
-        });
-        const close = lightbox.querySelector('.lightbox-close');
-        if (close) {
-            close.addEventListener('click', () => {
-                lightbox.classList.add('hidden');
-            });
-        }
-        lightbox.addEventListener('click', (ev) => {
-            if (ev.target === lightbox) {
-                lightbox.classList.add('hidden');
-            }
-        });
-    }
-})();
-</script>
-
-</body>
-</html>
+<?php sv_ui_footer(); ?>

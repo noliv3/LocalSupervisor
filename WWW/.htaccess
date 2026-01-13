@@ -2,8 +2,10 @@
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
+    RewriteRule ^media\.php$ mediadb.php [R=302,L]
+
     # Allow canonical web entrypoints
-    RewriteCond %{REQUEST_URI} ^/(index|mediadb|media_view|media|media_stream|thumb)\.php$ [NC]
+    RewriteCond %{REQUEST_URI} ^/(index|mediadb|media_view|media_stream|thumb)\.php$ [NC]
     RewriteRule ^ - [L]
 
     # Allow static assets (styles, scripts, images, fonts)
