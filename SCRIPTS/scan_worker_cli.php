@@ -16,6 +16,62 @@ try {
     exit(1);
 }
 
+$baseDir = sv_base_dir();
+$lockPath = $baseDir . '/LOGS/scan_worker.lock.json';
+$errLogPath = $baseDir . '/LOGS/scan_worker.err.log';
+
+$isPidAlive = static function (int $pid): bool {
+    if ($pid <= 0) {
+        return false;
+    }
+    if (function_exists('posix_kill')) {
+        return @posix_kill($pid, 0);
+    }
+    $isWindows = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
+    if ($isWindows) {
+        $cmd = 'tasklist /FI ' . escapeshellarg('PID eq ' . $pid);
+        $output = @shell_exec($cmd);
+        if (!is_string($output)) {
+            return false;
+        }
+        return stripos($output, (string)$pid) !== false;
+    }
+    $cmd = 'ps -p ' . (int)$pid . ' -o pid=';
+    $output = @shell_exec($cmd);
+    if (!is_string($output)) {
+        return false;
+    }
+    return trim($output) !== '';
+};
+
+$writeErrLog = static function (string $message) use ($errLogPath): void {
+    $line = '[' . date('c') . '] ' . $message . PHP_EOL;
+    @file_put_contents($errLogPath, $line, FILE_APPEND);
+};
+
+$pid = getmypid();
+$cmdline = implode(' ', $argv);
+$host = function_exists('gethostname') ? (string)gethostname() : 'unknown';
+
+if (is_file($lockPath)) {
+    $raw = @file_get_contents($lockPath);
+    $data = is_string($raw) ? json_decode($raw, true) : null;
+    $existingPid = isset($data['pid']) ? (int)$data['pid'] : 0;
+    if ($existingPid > 0 && $isPidAlive($existingPid)) {
+        $writeErrLog('Scan-Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
+        exit(0);
+    }
+    @unlink($lockPath);
+}
+
+$lockPayload = [
+    'pid'        => $pid,
+    'started_at' => date('c'),
+    'host'       => $host,
+    'cmdline'    => $cmdline,
+];
+@file_put_contents($lockPath, json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
 $limit      = null;
 $pathFilter = null;
 $mediaId    = null;
@@ -48,4 +104,8 @@ try {
 } catch (Throwable $e) {
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
+} finally {
+    if (is_file($lockPath)) {
+        @unlink($lockPath);
+    }
 }

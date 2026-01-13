@@ -2068,7 +2068,7 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
     sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_job_enqueue');
 
     $existing = $pdo->prepare(
-        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued","running") LIMIT 1'
+        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued","running") ORDER BY id DESC LIMIT 1'
     );
     $existing->execute([
         ':media_id' => $mediaId,
@@ -2076,11 +2076,10 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
     ]);
     $presentId = $existing->fetchColumn();
     if ($presentId) {
-        $logger('Rescan-Job existiert bereits (#' . (int)$presentId . ').');
+        $logger('Rescan-Job existiert bereits (#' . (int)$presentId . ', queued/running).');
         return [
-            'job_id'          => (int)$presentId,
-            'status'          => 'queued',
-            'already_present' => true,
+            'job_id'  => (int)$presentId,
+            'deduped' => true,
         ];
     }
 
@@ -2112,9 +2111,9 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
     ]);
 
     return [
-        'job_id' => $jobId,
-        'status' => 'queued',
-        'path'   => $payload['path'],
+        'job_id'  => $jobId,
+        'deduped' => false,
+        'path'    => $payload['path'],
     ];
 }
 
@@ -2276,11 +2275,47 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         throw new RuntimeException('Internal-Key erforderlich, um Scan-Worker zu starten.');
     }
 
-    $baseDir   = sv_base_dir();
-    $script    = $baseDir . '/SCRIPTS/scan_worker_cli.php';
-    $startedAt = date('c');
-    $pid       = null;
-    $unknown   = false;
+    $baseDir         = sv_base_dir();
+    $script          = $baseDir . '/SCRIPTS/scan_worker_cli.php';
+    $spawnLockPath   = $baseDir . '/LOGS/scan_worker_spawn.lock';
+    $spawnLastPath   = $baseDir . '/LOGS/scan_worker_spawn.last.json';
+    $spawnOutLog     = $baseDir . '/LOGS/scan_worker.out.log';
+    $spawnErrLog     = $baseDir . '/LOGS/scan_worker.err.log';
+    $cooldownSeconds = 10;
+    $logPaths        = [
+        'stdout' => $spawnOutLog,
+        'stderr' => $spawnErrLog,
+    ];
+
+    $lockHandle = @fopen($spawnLockPath, 'c+');
+    if ($lockHandle === false) {
+        return [
+            'pid'     => null,
+            'running' => true,
+            'unknown' => true,
+            'skipped' => true,
+            'reason'  => 'spawn_lock_or_cooldown',
+        ];
+    }
+    $hasLock = @flock($lockHandle, LOCK_EX | LOCK_NB);
+
+    $now            = time();
+    $lastSpawnAt    = is_file($spawnLockPath) ? (int)@file_get_contents($spawnLockPath) : null;
+    $cooldownActive = $lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds;
+
+    if (!$hasLock || $cooldownActive) {
+        if ($hasLock) {
+            @flock($lockHandle, LOCK_UN);
+        }
+        @fclose($lockHandle);
+        return [
+            'pid'     => null,
+            'running' => true,
+            'unknown' => true,
+            'skipped' => true,
+            'reason'  => 'spawn_lock_or_cooldown',
+        ];
+    }
 
     $phpCli = sv_get_php_cli($config);
     $parts = [$phpCli, $script];
@@ -2327,18 +2362,37 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         $cmd = implode(' ', $args);
     }
 
+    $startedAt = date('c');
+    $pid       = null;
+    $unknown   = false;
+    $spawnCmd  = null;
+    $spawned   = false;
+    $spawnErr  = null;
+
+    @ftruncate($lockHandle, 0);
+    @fwrite($lockHandle, (string)$now);
+    @fflush($lockHandle);
+
     $logger('Starte Scan-Worker: ' . $cmd);
 
     if ($isWindows) {
-        $winCmd = 'cmd.exe /C start "" /B ' . $cmd;
-        $proc   = @popen($winCmd, 'r');
+        $toWindowsPath = static function (string $path): string {
+            return '"' . str_replace('/', '\\', $path) . '"';
+        };
+        $spawnCmd = 'cmd.exe /C start "" /B ' . $cmd
+            . ' >> ' . $toWindowsPath($spawnOutLog) . ' 2>> ' . $toWindowsPath($spawnErrLog);
+        $proc = @popen($spawnCmd, 'r');
         if ($proc !== false) {
             pclose($proc);
+            $spawned = true;
+        } else {
+            $spawnErr = 'popen failed';
         }
         $unknown = true;
     } else {
-        $fullCmd = $cmd . ' > /dev/null 2>&1 & echo $!';
-        $output  = @shell_exec($fullCmd);
+        $spawnCmd = 'nohup ' . $cmd
+            . ' >> ' . escapeshellarg($spawnOutLog) . ' 2>> ' . escapeshellarg($spawnErrLog) . ' & echo $!';
+        $output = @shell_exec($spawnCmd);
         if ($output !== null && trim($output) !== '') {
             $pid = (int)trim($output);
             if ($pid <= 0) {
@@ -2346,13 +2400,37 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             }
         } else {
             $unknown = true;
+            $spawnErr = 'Kein PID aus shell_exec';
+        }
+        if ($pid !== null) {
+            $spawned = true;
         }
     }
+
+    $lastPayload = [
+        'started_at' => $startedAt,
+        'command'    => $spawnCmd ?? $cmd,
+        'logs'       => $logPaths,
+        'dedupeInfo' => [
+            'path_filter' => $pathFilter,
+            'limit'       => $limit,
+            'media_id'    => $mediaId,
+        ],
+    ];
+    @file_put_contents(
+        $spawnLastPath,
+        json_encode($lastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+    );
+
+    @flock($lockHandle, LOCK_UN);
+    @fclose($lockHandle);
 
     return [
         'pid'     => $pid,
         'started' => $startedAt,
         'unknown' => $unknown,
+        'skipped' => !$spawned,
+        'reason'  => $spawnErr,
     ];
 }
 
