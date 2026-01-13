@@ -36,6 +36,13 @@ function sv_render_video_thumbnail(
         return false;
     }
 
+    if (!function_exists('shell_exec')) {
+        if ($logger) {
+            $logger('Video-Thumb: shell_exec deaktiviert');
+        }
+        return false;
+    }
+
     $seek = 1.0;
     if ($durationSeconds !== null && $durationSeconds < 1.0) {
         $seek = 0.0;
@@ -51,6 +58,12 @@ function sv_render_video_thumbnail(
         . ' 2>&1';
 
     $output = @shell_exec($cmd);
+    if ($output === null || trim((string)$output) === '') {
+        if ($logger) {
+            $logger('Video-Thumb: ffmpeg ohne Ausgabe');
+        }
+        return false;
+    }
 
     if (!is_file($cachePath) || (int)@filesize($cachePath) <= 0) {
         if ($logger) {
@@ -61,4 +74,3 @@ function sv_render_video_thumbnail(
 
     return true;
 }
-

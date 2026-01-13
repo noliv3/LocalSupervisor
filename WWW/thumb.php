@@ -61,6 +61,21 @@ function sv_normalize_adult_flag(array $input): bool
     return false;
 }
 
+function sv_emit_video_placeholder(): void
+{
+    $svg = '<?xml version="1.0" encoding="UTF-8"?>'
+        . '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200" role="img" aria-label="Video">'
+        . '<rect width="320" height="200" fill="#1c1c1c"/>'
+        . '<rect x="20" y="20" width="280" height="160" fill="#2a2a2a" rx="8"/>'
+        . '<polygon points="140,90 140,110 170,100" fill="#eaeaea"/>'
+        . '<rect x="20" y="20" width="280" height="160" fill="none" stroke="#3a3a3a" rx="8"/>'
+        . '</svg>';
+    header('Content-Type: image/svg+xml');
+    header('Content-Length: ' . (string)strlen($svg));
+    echo $svg;
+    exit;
+}
+
 $allowedJobTypes = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
 
 $showAdult = sv_normalize_adult_flag($_GET);
@@ -147,8 +162,7 @@ if ($type === 'video') {
     $baseDir   = realpath(__DIR__ . '/..');
     $cachePath = $baseDir ? $baseDir . '/CACHE/thumbs/video/' . $id . '.jpg' : null;
     if ($cachePath === null) {
-        http_response_code(500);
-        exit;
+        sv_emit_video_placeholder();
     }
     $ffmpeg = sv_resolve_ffmpeg_path($config['tools'] ?? []);
     $cacheOk = is_file($cachePath);
@@ -162,8 +176,7 @@ if ($type === 'video') {
     }
 
     if (!$cacheOk || !is_file($cachePath)) {
-        http_response_code(500);
-        exit;
+        sv_emit_video_placeholder();
     }
 
     header('Content-Type: image/jpeg');

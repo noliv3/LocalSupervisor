@@ -488,7 +488,7 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 - **Asset-Manifest-Suche**: Reihenfolge `VIDAX_ASSETS_CONFIG` → `<VA_STATE_DIR>/state/config/assets.json` → `config/assets.json`; dieselbe Reihenfolge gilt für `vidax.json` (umgebungsvariable `VIDAX_CONFIG` zuerst).
 - **Asset-Schema**: Einträge mit `id`, `url`, `sha256`, `dest` (relativ zu `<VA_STATE_DIR>/state/`), optional `unpack`/`strip_root`; `policy.on_missing` und `policy.on_hash_mismatch` steuern Download/Abbruch.
 - **CLI-Fluss**: `npx va doctor` prüft node/ffmpeg/ffprobe/python (optional) plus VIDAX-Config/Asset-Manifest und vorhandene Assets; `npx va install` erzeugt das State-Layout, kopiert Beispielconfigs und lädt/verifiziert Assets gemäß Manifest.
-- **VIDAX-Serverstart**: `VIDAX_CONFIG=<pfad> node src/vidax/server.js`; ComfyUI-Pfade werden aus dem State-Verzeichnis abgeleitet. Install-Endpunkte (`/install`, `/install/status`) verlangen ein gültiges Manifest; `/jobs/:id/start` blockt bei fehlenden Assets.
+- **VIDAX-Serverstart**: `VIDAX_CONFIG=<pfad> node src/vidax/server.js`; ComfyUI-Pfade werden aus dem State-Verzeichnis abgeleitet. Install-Endpunkte (`/install`, `/install/status`) verlangen ein gültiges Manifest; `/jobs/:id/start` blockt bei fehlenden Assets und startet den ComfyUI-Prozess mit PID- und Log-Status unter `state/vidax/`.
 
 ### Quickstart (VA/VIDAX)
 - `npm install`

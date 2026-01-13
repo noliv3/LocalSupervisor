@@ -34,7 +34,7 @@ function mapError(error) {
 
 async function createApp() {
   const vidaxConfig = await loadVidaxConfig();
-  const processManager = new ProcessManager(vidaxConfig.stateDir);
+  const processManager = new ProcessManager(vidaxConfig);
   const app = express();
 
   app.use(express.json());
@@ -52,8 +52,15 @@ async function createApp() {
 
   app.get('/install/status', async (req, res) => {
     try {
-      const assets = await processManager.status();
-      return res.status(200).json({ assets });
+      const status = await processManager.status();
+      return res.status(200).json({
+        assets: status.assets,
+        comfyui: {
+          running: status.running,
+          pid: status.pid,
+          logs: status.logs,
+        },
+      });
     } catch (error) {
       const mapped = mapError(error);
       return res.status(mapped.status).json(mapped.body);
@@ -63,7 +70,13 @@ async function createApp() {
   app.post('/jobs/:id/start', async (req, res) => {
     try {
       const ensured = await processManager.startComfyUI();
-      return res.status(202).json({ status: 'queued', assets: ensured.assets, message: ensured.status });
+      return res.status(202).json({
+        status: 'queued',
+        assets: ensured.assets,
+        message: ensured.status,
+        pid: ensured.pid || null,
+        logs: ensured.logs || null,
+      });
     } catch (error) {
       const mapped = mapError(error);
       return res.status(mapped.status).json(mapped.body);

@@ -302,12 +302,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $id, $logger);
             $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $id);
             $jobId   = (int)($enqueue['job_id'] ?? 0);
+            $deduped = (bool)($enqueue['deduped'] ?? false);
             $actionSuccess = $jobId > 0;
             $actionMessage = $actionSuccess
                 ? 'Rescan-Job #' . $jobId . ' eingereiht.'
                 : 'Rescan-Job konnte nicht angelegt werden.';
-            if (!empty($enqueue['already_present'])) {
-                $actionMessage .= ' Bereits vorhandener Job wird genutzt.';
+            if ($deduped) {
+                $actionMessage = 'Rescan-Job #' . $jobId . ' existiert bereits (queued/running).';
             }
             if (!empty($worker['pid'])) {
                 $actionMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
@@ -318,6 +319,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 sv_audit_log($pdo, 'rescan_start', 'media', $id, [
                     'job_id'     => $jobId,
                     'worker_pid' => $worker['pid'] ?? null,
+                    'deduped'    => $deduped,
                 ]);
             }
         } elseif ($action === 'vote_up' || $action === 'vote_down') {
