@@ -191,3 +191,8 @@
 - **Pipeline-Snapshot**: Scan/Rescan/Filesync laufen über `operations.php` + Worker (`scan_worker_cli.php`), Import nutzt `sv_import_file` und schreibt `media`/`scan_results`/`tags`/`media_meta`/`prompts`. Tagging ersetzt nur `locked=0`; Cleanup Missing und einfache Konsistenz-Reparaturen lassen `locked=1` unangetastet. Video-Pfad liefert ffmpeg-Thumbnails, HTTP-Range-Streaming und Grid-/Detailanzeigen.
 - **Gaps/Prioritäten**: (1) `media_tags.locked` bleibt Pflichtfeld im Schema/Migration; (2) Weitere Skripte auf Config-Fallback (`sv_load_config`) und Lock-Respekt prüfen; (3) UI-Modernisierung und Prompt-Historie bleiben offen.
 - **Detailseite (Stand jetzt)**: `media_view.php` bietet einen Version-Switch (inkl. Strategy/Mode-Auswahl über `_sv_recreate_strategy`), NSFW-Schalter via `sv_set_media_nsfw_status` (verschiebt Pfade in passende Roots), Tag-Editor/Rescan (locked=1 bleibt geschützt) sowie Compare A/B für Versionen. Forge/Rescan/NSFW/Tag-Aktionen laufen weiter über Internal-Key/IP-Whitelist und Audit-Log.
+
+## Prüflisten-Status (Offen)
+- Die modulare Prüfliste (passiv → aktiv → destruktiv) ist in `README.md` dokumentiert und dient als Soll-Checkliste.
+- Offene Punkte: Sämtliche Module 0–14 sind noch ohne Nachweis, es existiert kein abgeschlossener Prüf-Run.
+- Hinweis: In dieser Änderung wurden keine Prüfungen ausgeführt (Anweisung: „Führe keine Tests durch“).
