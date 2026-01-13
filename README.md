@@ -6,7 +6,230 @@ SuperVisOr ist ein PHP-basiertes Werkzeug für das lokale Management großer Bil
 ## Dokumentationsstruktur
 - **README.md** (dieses Dokument): Projektbeschreibung, Architektur, Setup und Betriebsabläufe. Ehemalige Inhalte aus `docs/SETUP.md` und `docs/ASSETS.md` sind hier integriert; es existieren keine separaten Dateien mehr.
 - **AGENTS.MD**: Verbindliche Anforderungen, Prozesse, Sicherheits- und Architekturregeln.
-- **Log.md**: Änderungs- und Revisionsprotokoll.
+- **LOG.MD**: Änderungs- und Revisionsprotokoll.
+
+> Hinweis: Aufgrund der Vorgabe „maximal 3 MD-Dateien“ sind die geforderten Outputs **REPORT_SYSTEM_MAP**, **CHECKLIST_SYSTEM**, **CHECKLIST_SMOKE** und **CHANGELOG_NOTES** **in dieses README bzw. LOG.MD integriert** (keine zusätzlichen Markdown-Dateien).
+
+## REPORT_SYSTEM_MAP (inline)
+**Entry-Points (Repository-Scan, passiv):**
+- **WWW/\*.php**: HTTP-Routen (Dashboard, Gallery, Detail, Stream/Thumb, Health).
+- **SCRIPTS/\*.php**: CLI-/Kernel-Flows (Scan/Rescan, Jobs, DB, Backups, Konsistenz).
+- **start.ps1**: Supervisor/Start/Update-Flow.
+
+**Module → Dateien → Hauptfunktionen → Inputs/Outputs (Dateien/DB/Routen):**
+1. **Umgebung & Pfade**
+   - Dateien: `start.ps1`, `SCRIPTS/paths.php`, `SCRIPTS/common.php`
+   - Hauptfunktionen: Basisverzeichnis (`SV_BASE`), Pfadnormalisierung, Media-Roots/Allowlist
+   - Inputs: ENV (`SV_BASE`), `CONFIG/config.php`/`config.example.php`, `paths.*`
+   - Outputs: Normalisierte Pfade, erlaubte Roots, Verzeichnislayout (`LOGS/`, `BACKUPS/`, `TMP/`, `PREVIEWS/`)
+2. **Repo/Git-Update-Flow**
+   - Dateien: `start.ps1`, `LOGS/git_status.json`, `LOGS/git_update.last.json`
+   - Hauptfunktionen: `git fetch`, ahead/behind, FF-only Update, Lock-Serialisierung
+   - Inputs: Git-Remote, Working Tree, `LOGS/start.lock`, `LOGS/update.lock`
+   - Outputs: JSON-Statusdateien, Update-Exit-Status im Log
+3. **PHP Runtime/Ini/Extensions**
+   - Dateien: `start.ps1`, `LOGS/php_server.out.log`, `LOGS/php_server.err.log`
+   - Hauptfunktionen: PHP-CLI/Server-Start, Ini/Extensions-Load
+   - Inputs: `php.ini`, Pfad zu PHP (TOOLS/php oder PATH)
+   - Outputs: Server-PID (`LOGS/php_server.pid`), Error/Out-Logs
+4. **Webserver/HTTP-Routen**
+   - Dateien: `WWW/index.php`, `WWW/mediadb.php`, `WWW/media_view.php`, `WWW/media.php`, `WWW/media_stream.php`, `WWW/thumb.php`, `WWW/health.php`
+   - Hauptfunktionen: Dashboard/Health, Galerie/Detail, Streaming/Thumbs
+   - Inputs: HTTP-Requests, Internal-Key/IP-Whitelist
+   - Outputs: HTML/JSON, HTTP-Statuscodes (200/403/5xx)
+5. **Datenbank: DSN, Schema, Migrationen**
+   - Dateien: `SCRIPTS/db_status.php`, `SCRIPTS/migrate.php`, `SCRIPTS/db_helpers.php`, `DB/schema.sql`
+   - Hauptfunktionen: DB-Status, Migrationslauf, Schema-Check
+   - Inputs: DSN (Config), DB-Datei/Server
+   - Outputs: `schema_migrations`, DB-Status-Report (Exit-Code ≠ 0 bei Problemen)
+6. **Backups/Restore/Rotation**
+   - Dateien: `SCRIPTS/db_backup.php`, `BACKUPS/`, `LOGS/`
+   - Hauptfunktionen: DB-Backup, Rotation, `.meta.json`-Beiblatt
+   - Inputs: DSN, Backup-Keep-Wert
+   - Outputs: `BACKUPS/*.sqlite(.gz)` + `.meta.json`
+7. **Medien: Import, Pfade, Thumbs, Stream/Range**
+   - Dateien: `SCRIPTS/scan_core.php`, `SCRIPTS/thumb_core.php`, `WWW/thumb.php`, `WWW/media_stream.php`, `SCRIPTS/paths.php`
+   - Hauptfunktionen: Import/Hash-Pfad, Thumb-Generierung, HTTP-Range-Stream
+   - Inputs: Media-Dateien, `paths.*`, ffmpeg (optional)
+   - Outputs: `media`/`media_meta`/`scan_results`/`tags`, Thumb/Stream-Responses
+8. **Scanner: check, batch, rescan, Persistenz, Tag-Locking**
+   - Dateien: `SCRIPTS/scan_core.php`, `SCRIPTS/scan_worker_cli.php`, `SCRIPTS/rescan_cli.php`, `SCRIPTS/operations.php`
+   - Hauptfunktionen: Scanner-HTTP, Tagging, Rescan-Persistenz, Locked-Tags
+   - Inputs: `scanner.*`-Config, Media-Dateien
+   - Outputs: `scan_results`, `media_tags` (locked geschützt), Job-Status
+9. **Jobs/Queue/Operations**
+   - Dateien: `SCRIPTS/operations.php`, `SCRIPTS/forge_worker_cli.php`, `SCRIPTS/scan_worker_cli.php`
+   - Hauptfunktionen: Job-Erzeugung, Status/Retry, Worker-Dispatch
+   - Inputs: Job-Requests (Web/CLI), `jobs`-Tabelle
+   - Outputs: `jobs`-Status, Worker-Logs, Error-Metadaten
+10. **Logging/Observability**
+   - Dateien: `SCRIPTS/logging.php`, `LOGS/start.log`, `LOGS/php_server.*.log`, `LOGS/scanner_ingest.jsonl`
+   - Hauptfunktionen: Log-Write/Rotation, Start-/Server-/Scanner-Logs
+   - Inputs: Runtime-Events, Errors
+   - Outputs: JSON/Plaintext-Logs, strukturierte Einträge
+11. **Security: Bind-Adresse, Token-Key Pflicht, Dateischutz**
+   - Dateien: `SCRIPTS/security.php`, `WWW/media_stream.php`, `WWW/thumb.php`, `WWW/index.php`
+   - Hauptfunktionen: Internal-Key/IP-Whitelist, Pfadvalidierung, Public Read-only
+   - Inputs: `internal_key`, Whitelist, Request-IP
+   - Outputs: HTTP 403/200, Audit-Log-Einträge
+12. **Recovery: Rollback, Restore, Lock-Reset, Safe-Stop**
+   - Dateien: `SCRIPTS/consistency_check.php`, `SCRIPTS/db_backup.php`, `SCRIPTS/migrate.php`, `start.ps1`
+   - Hauptfunktionen: Konsistenz-Check, Restore-Flow, Lock-Handling
+   - Inputs: DB-Backup, Lockfiles, Repair-Flags
+   - Outputs: Reports, Exit-Codes, Wiederherstellungsläufe
+
+**Artefakte/Logs (passiv zu sammeln, Pfade aus Config/Defaults):**
+- `LOGS/start.log`
+- `LOGS/php_server.out.log`, `LOGS/php_server.err.log`, `LOGS/php_server.pid`
+- `LOGS/git_status.json`, `LOGS/git_update.last.json`
+- `LOGS/scanner_ingest.jsonl` (falls Scanner aktiv)
+- Weitere Job-/Worker-Logs in `LOGS/` (z. B. Forge-Worker-Logs)
+
+## CHECKLIST_SYSTEM (inline, abhakbar)
+> Struktur: **PASSIV (lesen)** → **AKTIV (read-only)** → **DESTRUKTIV (opt-in)**. Keine Feature-Erweiterungen; nur Diagnose und minimale Fixes bei objektivem Defekt.
+
+### 1) Umgebung & Pfade
+- **Sollzustand:** Basisverzeichnis korrekt; Pfade zeigen auf gültige Roots; LOGS/BACKUPS/TMP existieren oder können angelegt werden.
+- **Nachweis (PASSIV):** Config lesen (`paths.*`, `SV_BASE`), Pfadnormalisierung nachvollziehbar.
+- **Nachweis (AKTIV):** Read-only `realpath`/`stat` auf konfigurierte Roots.
+- **Fehlerbilder:** Pfade zeigen ins Nirgendwo; Pfad-Traversal-Fehler; fehlende Roots.
+- **Stop-Kriterium:** Pfad zeigt außerhalb erlaubter Media-Roots.
+
+### 2) Repo/Git-Update-Flow
+- **Sollzustand:** Working Tree sauber; Fetch-Status klar; Update-Locks verhindern Parallel-Updates.
+- **Nachweis (PASSIV):** `LOGS/git_status.json`/`LOGS/git_update.last.json` lesen.
+- **Nachweis (AKTIV):** `git status --porcelain`, `git rev-parse` (read-only).
+- **Fehlerbilder:** Dirty Tree + Auto-Update; Lockfiles ohne Fortschritt.
+- **Stop-Kriterium:** Update startet trotz Dirty Tree/Conflict.
+
+### 3) PHP Runtime/Ini/Extensions
+- **Sollzustand:** PHP lädt Ini; benötigte Extensions geladen; keine doppelten Loads.
+- **Nachweis (PASSIV):** `LOGS/php_server.err.log` prüfen.
+- **Nachweis (AKTIV):** `php -i` (read-only) zeigt Loaded Configuration File.
+- **Fehlerbilder:** „already loaded“, Fatal Errors beim Start.
+- **Stop-Kriterium:** wiederkehrende Fatal Errors im PHP-Serverlog.
+
+### 4) Webserver/HTTP-Routen
+- **Sollzustand:** `WWW/health.php` liefert 200; zentrale Routen reagieren.
+- **Nachweis (PASSIV):** Server-Logs/Health-Status lesen.
+- **Nachweis (AKTIV):** `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/health.php`.
+- **Fehlerbilder:** 5xx auf Health; Timeouts.
+- **Stop-Kriterium:** wiederholte 5xx/Timeouts bei Health.
+
+### 5) Datenbank: DSN, Schema, Migrationen
+- **Sollzustand:** DSN korrekt; Schema vollständig; Migrationen up-to-date.
+- **Nachweis (PASSIV):** `DB/schema.sql`, `schema_migrations` Erwartung.
+- **Nachweis (AKTIV):** `php SCRIPTS/db_status.php` (Exit-Code 0).
+- **Fehlerbilder:** fehlende Tabellen/Spalten; offene Migrationen.
+- **Stop-Kriterium:** Migrationen inkonsistent oder DB nicht erreichbar.
+
+### 6) Backups/Restore/Rotation
+- **Sollzustand:** Backups werden versioniert; Rotation hält `BackupKeep`.
+- **Nachweis (PASSIV):** Backup-Ordner/Meta-Dateien prüfen.
+- **Nachweis (AKTIV):** Read-only Listing der Backup-Dateien/Metas.
+- **Fehlerbilder:** Überschreiben statt Versionieren; fehlende `.meta.json`.
+- **Stop-Kriterium:** Backup überschreibt letzte Sicherung.
+
+### 7) Medien: Import, Pfade, Thumbs, Stream/Range
+- **Sollzustand:** Medienroots existieren; Thumbs/Streams liefern Content.
+- **Nachweis (PASSIV):** Pfadkonfig lesen; Logs prüfen.
+- **Nachweis (AKTIV):** `curl -I` auf `thumb.php?id=...` (read-only) und Range-Header-Check für `media_stream.php?id=...`.
+- **Fehlerbilder:** Thumb/Stream 5xx, Range ignoriert.
+- **Stop-Kriterium:** Stream/Thumb löst PHP-Fatal aus.
+
+### 8) Scanner: check, batch, rescan, Persistenz, Tag-Locking
+- **Sollzustand:** Scanner erreichbar; Rescan aktualisiert run_at; Locked-Tags bleiben.
+- **Nachweis (PASSIV):** Scanner-Config + `LOGS/scanner_ingest.jsonl`.
+- **Nachweis (AKTIV):** Read-only HTTP-Healthcheck; `db_status`/Query auf letzte `scan_results`.
+- **Fehlerbilder:** Unknown response; fehlende Persistenz; Locked-Tags gelöscht.
+- **Stop-Kriterium:** Scanner erreicht, aber Parser bricht ohne Audit ab.
+
+### 9) Jobs/Queue/Operations
+- **Sollzustand:** Jobs zeigen Status/Timestamps; Retry/Errors nachvollziehbar.
+- **Nachweis (PASSIV):** `jobs`-Tabelle und Job-Logs prüfen.
+- **Nachweis (AKTIV):** Read-only Query auf `jobs`-Status (running/queued/error).
+- **Fehlerbilder:** Jobs bleiben dauerhaft `running`; fehlende Error-Metadaten.
+- **Stop-Kriterium:** Stuck-Jobs ohne Transition/Repair.
+
+### 10) Logging/Observability
+- **Sollzustand:** Logs lesbar, keine Floods, Encoding ok.
+- **Nachweis (PASSIV):** `LOGS/start.log`, `LOGS/php_server.err.log`.
+- **Nachweis (AKTIV):** `tail -n` (read-only) + Encoding-Stichprobe.
+- **Fehlerbilder:** Log-Flooding; Encoding-Zerfall.
+- **Stop-Kriterium:** Logs unlesbar oder überschreiben sich.
+
+### 11) Security: Bind-Adresse, Token-Key Pflicht, Dateischutz
+- **Sollzustand:** Bind auf 127.0.0.1; Internal-Key Pflicht für Schreibpfade.
+- **Nachweis (PASSIV):** Config/Logs prüfen; Allowed Roots.
+- **Nachweis (AKTIV):** Requests ohne Key erhalten 403 (read-only).
+- **Fehlerbilder:** Öffentliche Logs/Backups; fehlende Key-Prüfung.
+- **Stop-Kriterium:** Sensible Daten öffentlich erreichbar.
+
+### 12) Recovery: Rollback, Restore, Lock-Reset, Safe-Stop
+- **Sollzustand:** Restore-Prozess dokumentiert; Lock-Reset löst Stale Locks.
+- **Nachweis (PASSIV):** Backup- und Restore-Anweisungen; Lockfiles.
+- **Nachweis (AKTIV):** `php SCRIPTS/consistency_check.php` ohne Repair (Report/Exit-Code).
+- **Fehlerbilder:** Restore verhindert Start; Locks bleiben hängen.
+- **Stop-Kriterium:** Restore führt zu Datenverlust-Risiko.
+
+### DESTRUKTIV (opt-in, klar abgetrennt)
+- **Nur wenn explizit freigegeben:** Stop/Restart, Restore von Backup, Lock-Reset, Repair/Migrationen mit Write.
+- **Voraussetzung:** Vollständiges Backup liegt vor; Operator bestätigt.
+
+## CHECKLIST_SMOKE (inline, copy/paste, read-only)
+> **Nur nicht-destruktive Checks.** Erwartung ist deterministisch beschrieben. Keine Tests wurden in dieser Änderung ausgeführt.
+
+### Umgebung & Pfade
+- `[ ]` `pwd` → zeigt Projektroot (SV_BASE).
+- `[ ]` `ls LOGS BACKUPS` → Verzeichnisse existieren (oder Hinweis, dass sie im Betrieb angelegt werden).
+
+### Repo/Git-Update-Flow
+- `[ ]` `git status --porcelain` → **keine** Ausgabe.
+- `[ ]` `cat LOGS/git_status.json` → enthält `fetch_ok` und `ahead/behind`.
+
+### PHP Runtime/Ini/Extensions
+- `[ ]` `php -v` → Version wird ausgegeben.
+- `[ ]` `php -i | rg "Loaded Configuration File"` → Zeile vorhanden.
+- `[ ]` `rg "already loaded" LOGS/php_server.err.log` → **keine** Treffer.
+
+### Webserver/HTTP-Routen
+- `[ ]` `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/health.php` → `200`.
+- `[ ]` `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/` → `200/302`.
+
+### Datenbank: DSN, Schema, Migrationen
+- `[ ]` `php SCRIPTS/db_status.php` → Exit-Code `0`.
+
+### Backups/Restore/Rotation
+- `[ ]` `ls BACKUPS` → mindestens ein Backup-File (bzw. leer bei frischem System).
+- `[ ]` `rg "\\.meta\\.json" BACKUPS` → Meta-Dateien vorhanden (wenn Backups existieren).
+
+### Medien: Import, Pfade, Thumbs, Stream/Range
+- `[ ]` `curl -I "http://127.0.0.1:8080/thumb.php?id=<media_id>"` → `200` und `Content-Type: image/*`.
+- `[ ]` `curl -I -H "Range: bytes=0-1" "http://127.0.0.1:8080/media_stream.php?id=<media_id>"` → `206`.
+
+### Scanner
+- `[ ]` `rg "scanner.base_url" CONFIG/config.php CONFIG/config.example.php` → URL gesetzt.
+- `[ ]` `tail -n 5 LOGS/scanner_ingest.jsonl` → letzte Events sichtbar (wenn Scanner genutzt).
+
+### Jobs/Queue/Operations
+- `[ ]` `php SCRIPTS/db_inspect.php` → letzte Jobs/Scan-Ergebnisse sichtbar.
+- `[ ]` `rg "error" LOGS/forge_worker_runtime.log` → keine neuen Fehler (falls Forge genutzt).
+
+### Logging/Observability
+- `[ ]` `tail -n 50 LOGS/start.log` → lesbar, kein Flooding.
+- `[ ]` `tail -n 50 LOGS/php_server.err.log` → keine wiederholten Fatal Errors.
+
+### Security
+- `[ ]` `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/media_view.php` → `200` (read-only).
+- `[ ]` `curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8080/media_view.php` → `403`.
+
+### Recovery
+- `[ ]` `ls LOGS/*.lock` → Lockfiles sichtbar; keine endlosen Updates.
+- `[ ]` `php SCRIPTS/consistency_check.php` → Report/Exit-Code `0` (ohne Repair).
+
+### DESTRUKTIV (opt-in, separat)
+- `[ ]` `php SCRIPTS/consistency_check.php --repair` → **nur** mit Operator-Freigabe.
+- `[ ]` Restore aus Backup durch Service-Stop + Copy → **nur** mit Freigabe.
 
 ## Prüflisten-Ziel (Betriebschecks in Modulen)
 Die Prüfliste zerlegt den Betrieb in Module mit **Sollzustand**, **Nachweis** und **Stop-Kriterium**. Die Reihenfolge ist verbindlich: **passiv → aktiv → destruktiv**. Die Nachweise sind als Read-Only-Checks definiert und dürfen die laufenden Prozesse nicht verändern. Stop-Kriterien sind strikt einzuhalten, sobald ein Risiko für Datenverlust oder Prozess-Stürme erkennbar ist.
