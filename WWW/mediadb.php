@@ -5,6 +5,7 @@ require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/paths.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+require_once __DIR__ . '/_layout.php';
 
 try {
     $config = sv_load_config();
@@ -540,7 +541,7 @@ $tabConfigs = [
         'overrides' => ['type' => 'all', 'issues' => null, 'prompt_quality' => 'all'],
     ],
     [
-        'label' => 'Images',
+        'label' => 'Bilder',
         'overrides' => ['type' => 'image', 'issues' => null, 'prompt_quality' => 'all'],
     ],
     [
@@ -548,7 +549,7 @@ $tabConfigs = [
         'overrides' => ['type' => 'video', 'issues' => null, 'prompt_quality' => 'all'],
     ],
     [
-        'label' => 'Issues',
+        'label' => 'Probleme',
         'overrides' => ['issues' => '1', 'prompt_quality' => 'all'],
     ],
     [
@@ -678,6 +679,10 @@ function sv_render_media_card(array $row, array $context): void
     $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
     $activityScore = (int)($row['activity_score'] ?? 0);
     $hasInternalAccess = !empty($context['hasInternalAccess']);
+    $iconRescan = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 0 1 12.9-5.1l1.1-1.1V9.5h-3.7l1.4-1.4A6 6 0 1 0 18 12h1.5A7.5 7.5 0 0 1 4.5 12z" fill="currentColor"/></svg>';
+    $iconUp = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5l7 7h-4v7H9v-7H5l7-7z" fill="currentColor"/></svg>';
+    $iconDown = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19l-7-7h4V5h6v7h4l-7 7z" fill="currentColor"/></svg>';
+    $iconCheck = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 16.2L5.5 12.5l-1.5 1.5 5.2 5.2L20 8.4 18.5 7z" fill="currentColor"/></svg>';
     ?>
     <article class="media-card status-<?= $statusVariant ?>" data-media-id="<?= $id ?>">
         <div class="card-badges">
@@ -699,13 +704,13 @@ function sv_render_media_card(array $row, array $context): void
             <span class="<?= htmlspecialchars($qualityBadge, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Curation (Quality-Status)"><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
             <span class="<?= htmlspecialchars($promptBadgeClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" title="Prompt-Qualität (A/B/C)">Prompt <?= htmlspecialchars($qualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
             <?php if ($jobRunning): ?>
-                <span class="pill pill-warn">Job running</span>
+                <span class="pill pill-warn">Job läuft</span>
             <?php endif; ?>
             <?php if ($scanStale): ?>
-                <span class="pill pill-warn" title="Scanner nicht erreichbar, Tags/Rating veraltet">Scan stale</span>
+                <span class="pill pill-warn" title="Scanner nicht erreichbar, Tags/Rating veraltet">Scan veraltet</span>
             <?php endif; ?>
             <?php if ($lastScanError): ?>
-                <span class="pill pill-bad" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Scan error</span>
+                <span class="pill pill-bad" title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Scan-Fehler</span>
             <?php elseif ($lastScanAt === ''): ?>
                 <span class="pill pill-warn">Scan fehlt</span>
             <?php endif; ?>
@@ -713,7 +718,7 @@ function sv_render_media_card(array $row, array $context): void
                 <span class="pill">Rating <?= $rating ?></span>
             <?php endif; ?>
             <?php if ($hasInternalAccess && $activityScore <= 0): ?>
-                <span class="pill pill-warn">Low activity</span>
+                <span class="pill pill-warn">Niedrige Aktivität</span>
             <?php endif; ?>
         </div>
 
@@ -740,10 +745,10 @@ function sv_render_media_card(array $row, array $context): void
                 <?php if ($hasTags): ?><span class="info-chip">Tags</span><?php endif; ?>
                 <?php if ($hasPrompt && !$promptComplete): ?><span class="info-chip chip-warn">Prompt unvollständig</span><?php endif; ?>
                 <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
-                <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan stale</span><?php endif; ?>
+                <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan veraltet</span><?php endif; ?>
                 <?php if ($hasInternalAccess): ?>
                     <span class="info-chip">Vote <?= $voteState ?></span>
-                    <span class="info-chip"><?= $checkedFlag ? 'Checked' : 'Unchecked' ?></span>
+                    <span class="info-chip"><?= $checkedFlag ? 'Geprüft' : 'Offen' ?></span>
                     <span class="info-chip">Score <?= $activityScore ?></span>
                 <?php endif; ?>
             </div>
@@ -756,29 +761,29 @@ function sv_render_media_card(array $row, array $context): void
             <div class="info-path" title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                 ID <?= $id ?> · <?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
             </div>
-            <div class="info-line">
-                <a class="btn btn-primary" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
+            <div class="card-actions">
+                <a class="btn btn--primary btn--sm" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
                 <?php if ($hasInternalAccess): ?>
-                    <form method="post" style="display:inline;">
+                    <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="rescan_job">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
-                        <button class="btn btn-secondary" type="submit">Tag-Rescan</button>
+                        <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
                     </form>
-                    <form method="post" style="display:inline;">
+                    <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="vote_up">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
-                        <button class="btn <?= $voteState === 1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👍</button>
+                        <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
                     </form>
-                    <form method="post" style="display:inline;">
+                    <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="vote_down">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
-                        <button class="btn <?= $voteState === -1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👎</button>
+                        <button class="btn btn--icon <?= $voteState === -1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote runter" title="Vote runter"><?= $iconDown ?></button>
                     </form>
-                    <form method="post" style="display:inline;">
+                    <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="checked_toggle">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
-                        <button class="btn <?= $checkedFlag ? 'btn-primary' : 'btn-secondary' ?>" type="submit"><?= $checkedFlag ? 'Checked ✓' : 'Checked ✗' ?></button>
+                        <button class="btn btn--icon <?= $checkedFlag ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="<?= $checkedFlag ? 'Checked entfernen' : 'Checked setzen' ?>" title="<?= $checkedFlag ? 'Checked entfernen' : 'Checked setzen' ?>"><?= $iconCheck ?></button>
                     </form>
                 <?php endif; ?>
             </div>
@@ -790,18 +795,72 @@ function sv_render_media_card(array $row, array $context): void
 $paginationBase = array_filter($queryParams, static fn($v) => $v !== '' && $v !== null);
 $qualityStatusLabels = sv_quality_status_labels();
 $promptQualityLabels = sv_prompt_quality_labels();
+
+$filterChips = [];
+if ($pathFilter !== '') {
+    $filterChips[] = 'Suche: ' . sv_limit_string($pathFilter, 32);
+}
+if ($typeFilter !== 'all') {
+    $filterChips[] = $typeFilter === 'video' ? 'Typ: Video' : 'Typ: Bild';
+}
+if ($hasPromptFilter !== 'all') {
+    $filterChips[] = $hasPromptFilter === 'with' ? 'Prompt: mit' : 'Prompt: ohne';
+}
+if ($hasMetaFilter !== 'all') {
+    $filterChips[] = $hasMetaFilter === 'with' ? 'Meta: mit' : 'Meta: ohne';
+}
+if ($statusFilter !== 'all') {
+    $statusLabels = [
+        'active' => 'aktiv',
+        'archived' => 'archiviert',
+        'deleted' => 'gelöscht',
+        'missing' => 'missing',
+        'deleted_logical' => 'gelöscht (logisch)',
+    ];
+    $filterChips[] = 'Status: ' . ($statusLabels[$statusFilter] ?? $statusFilter);
+}
+if ($minRating > 0) {
+    $filterChips[] = 'Rating ≥ ' . $minRating;
+}
+if ($incompleteFilter !== 'none') {
+    $incompleteLabels = [
+        'prompt' => 'Prompt',
+        'tags' => 'Tags',
+        'meta' => 'Meta',
+        'any' => 'alles',
+    ];
+    $filterChips[] = 'Unvollständig: ' . ($incompleteLabels[$incompleteFilter] ?? $incompleteFilter);
+}
+if ($promptQualityFilter !== 'all') {
+    $filterChips[] = 'Prompt-Qualität: ' . ($promptQualityLabels[$promptQualityFilter] ?? $promptQualityFilter);
+}
+if ($curationFilter !== 'all') {
+    $filterChips[] = 'Curation: ' . ($qualityStatusLabels[$curationFilter] ?? $curationFilter);
+}
+if ($issueFilter) {
+    $filterChips[] = 'Issues';
+}
+if ($dupeFilter) {
+    $filterChips[] = $dupeHashFilter !== '' ? 'Dupe: ' . $dupeHashFilter : 'Dupes';
+}
+if ($hasInternalAccess) {
+    if ($voteFilter !== 'any') {
+        $filterChips[] = $voteFilter === 'up' ? 'Vote: up' : 'Vote: down';
+    }
+    if ($checkedFilter !== 'any') {
+        $filterChips[] = $checkedFilter === 'checked' ? 'Geprüft' : 'Offen';
+    }
+    if ($lowActivityFilter === 'low') {
+        $filterChips[] = 'Niedrige Aktivität';
+    }
+}
+
+$filtersOpen = $filterChips !== [];
 ?>
-<!doctype html>
-<html lang="de">
-<head>
-    <meta charset="utf-8">
-    <title>SuperVisOr Medien</title>
-    <link rel="stylesheet" href="mediadb.css">
-</head>
-<body class="media-grid-page">
-<header class="page-header">
+<?php sv_ui_header('Medien', 'medien'); ?>
+<div class="page-header">
     <div>
-        <h1>SuperVisOr Medien</h1>
+        <h1 class="page-title">Medien</h1>
         <div class="header-stats">
             Gesamt: <?= (int)$total ?> Einträge | <?= $showAdult ? 'FSK18 sichtbar' : 'FSK18 ausgeblendet' ?>
         </div>
@@ -813,7 +872,7 @@ $promptQualityLabels = sv_prompt_quality_labels();
             <?php endforeach; ?>
             <input type="hidden" name="p" value="1">
             <input type="text" name="q" value="<?= htmlspecialchars($pathFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Pfad oder Name" aria-label="Pfad oder Name">
-            <button type="submit" class="btn btn-secondary">Suche</button>
+            <button type="submit" class="btn btn--secondary btn--sm">Suche</button>
         </form>
         <div class="fsk-toggle">
             <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '0', 'p' => 1])) ?>" class="<?= $showAdult ? '' : 'active' ?>">FSK18 aus</a>
@@ -823,22 +882,22 @@ $promptQualityLabels = sv_prompt_quality_labels();
             <label>
                 <span>Modus:</span>
                 <select name="view" form="view-form">
-                    <option value="grid" <?= $viewMode === 'grid' ? 'selected' : '' ?>>Card Grid</option>
-                    <option value="list" <?= $viewMode === 'list' ? 'selected' : '' ?>>List Mode</option>
+                    <option value="grid" <?= $viewMode === 'grid' ? 'selected' : '' ?>>Kacheln</option>
+                    <option value="list" <?= $viewMode === 'list' ? 'selected' : '' ?>>Liste</option>
                 </select>
             </label>
         </div>
     </div>
-</header>
+</div>
 
 <?php if (!empty($configWarning)): ?>
-    <div style="margin: 0.5rem 1rem; padding: 0.6rem 0.8rem; background: #fff3cd; color: #7f4e00; border: 1px solid #ffeeba;">
+    <div class="banner banner--warn">
         <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
     </div>
 <?php endif; ?>
 
 <?php if ($actionMessage !== null || $actionError !== null): ?>
-    <div style="margin: 0.5rem 1rem; padding: 0.6rem 0.8rem; background: <?= $actionError ? '#fdecea' : '#e6ffed' ?>; color: <?= $actionError ? '#9b1c1c' : '#14532d' ?>; border: 1px solid <?= $actionError ? '#f5c2c7' : '#b6e2c0' ?>;">
+    <div class="banner <?= $actionError ? 'banner--error' : 'banner--success' ?>">
         <?= htmlspecialchars($actionError ?? $actionMessage ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
     </div>
 <?php endif; ?>
@@ -858,9 +917,9 @@ $promptQualityLabels = sv_prompt_quality_labels();
             <span>Status:</span>
             <select name="status" form="filters-form">
                 <option value="all" <?= $statusFilter === 'all' ? 'selected' : '' ?>>alle</option>
-                <option value="active" <?= $statusFilter === 'active' ? 'selected' : '' ?>>active</option>
-                <option value="archived" <?= $statusFilter === 'archived' ? 'selected' : '' ?>>archived</option>
-                <option value="deleted" <?= $statusFilter === 'deleted' ? 'selected' : '' ?>>deleted</option>
+                <option value="active" <?= $statusFilter === 'active' ? 'selected' : '' ?>>aktiv</option>
+                <option value="archived" <?= $statusFilter === 'archived' ? 'selected' : '' ?>>archiviert</option>
+                <option value="deleted" <?= $statusFilter === 'deleted' ? 'selected' : '' ?>>gelöscht</option>
             </select>
         </label>
     </div>
@@ -873,104 +932,120 @@ $promptQualityLabels = sv_prompt_quality_labels();
     <input type="hidden" name="p" value="1">
 </form>
 
-<form id="filters-form" method="get" class="controls">
-    <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p'], true)) { continue; } ?>
-        <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-    <?php endforeach; ?>
-    <input type="hidden" name="p" value="1">
-    <label>
-        Typ
-        <select name="type">
-            <option value="all" <?= $typeFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="image" <?= $typeFilter === 'image' ? 'selected' : '' ?>>Bilder</option>
-            <option value="video" <?= $typeFilter === 'video' ? 'selected' : '' ?>>Videos</option>
-        </select>
-    </label>
-    <label>
-        Prompt
-        <select name="has_prompt">
-            <option value="all" <?= $hasPromptFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="with" <?= $hasPromptFilter === 'with' ? 'selected' : '' ?>>mit Prompt</option>
-            <option value="without" <?= $hasPromptFilter === 'without' ? 'selected' : '' ?>>ohne Prompt</option>
-        </select>
-    </label>
-    <label>
-        Metadaten
-        <select name="has_meta">
-            <option value="all" <?= $hasMetaFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <option value="with" <?= $hasMetaFilter === 'with' ? 'selected' : '' ?>>mit Meta</option>
-            <option value="without" <?= $hasMetaFilter === 'without' ? 'selected' : '' ?>>ohne Meta</option>
-        </select>
-    </label>
-    <label>
-        Min Rating
-        <select name="min_rating">
-            <option value="0" <?= $minRating === 0 ? 'selected' : '' ?>>egal</option>
-            <option value="1" <?= $minRating === 1 ? 'selected' : '' ?>>1+</option>
-            <option value="2" <?= $minRating === 2 ? 'selected' : '' ?>>2+</option>
-            <option value="3" <?= $minRating === 3 ? 'selected' : '' ?>>3</option>
-        </select>
-    </label>
-    <label>
-        Incomplete
-        <select name="incomplete">
-            <option value="none" <?= $incompleteFilter === 'none' ? 'selected' : '' ?>>aus</option>
-            <option value="prompt" <?= $incompleteFilter === 'prompt' ? 'selected' : '' ?>>Prompt</option>
-            <option value="tags" <?= $incompleteFilter === 'tags' ? 'selected' : '' ?>>Tags</option>
-            <option value="meta" <?= $incompleteFilter === 'meta' ? 'selected' : '' ?>>Meta</option>
-            <option value="any" <?= $incompleteFilter === 'any' ? 'selected' : '' ?>>alles</option>
-        </select>
-    </label>
-    <label>
-        Curation
-        <select name="curation">
-            <option value="all" <?= $curationFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <?php foreach (sv_quality_status_labels() as $statusValue => $statusLabel): ?>
-                <option value="<?= htmlspecialchars($statusValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $curationFilter === $statusValue ? 'selected' : '' ?>>
-                    <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                </option>
+<details class="filters" <?= $filtersOpen ? 'open' : '' ?>>
+    <summary>
+        Filter
+        <?php if ($filterChips !== []): ?>
+            <span class="summary-chips">
+                <?php foreach ($filterChips as $chip): ?>
+                    <span class="filter-chip"><?= htmlspecialchars($chip, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                <?php endforeach; ?>
+            </span>
+        <?php endif; ?>
+    </summary>
+    <div class="details-body">
+        <form id="filters-form" method="get" class="controls">
+            <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p'], true)) { continue; } ?>
+                <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
             <?php endforeach; ?>
-        </select>
-    </label>
-    <label>
-        Prompt-Qualität
-        <select name="prompt_quality">
-            <option value="all" <?= $promptQualityFilter === 'all' ? 'selected' : '' ?>>alle</option>
-            <?php foreach (sv_prompt_quality_labels() as $qualityValue => $qualityLabel): ?>
-                <option value="<?= htmlspecialchars($qualityValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $promptQualityFilter === $qualityValue ? 'selected' : '' ?>>
-                    <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                </option>
-            <?php endforeach; ?>
-        </select>
-    </label>
-    <?php if ($hasInternalAccess): ?>
-        <label>
-            Vote
-            <select name="vote">
-                <option value="any" <?= $voteFilter === 'any' ? 'selected' : '' ?>>alle</option>
-                <option value="up" <?= $voteFilter === 'up' ? 'selected' : '' ?>>up</option>
-                <option value="down" <?= $voteFilter === 'down' ? 'selected' : '' ?>>down</option>
-            </select>
-        </label>
-        <label>
-            Checked
-            <select name="checked">
-                <option value="any" <?= $checkedFilter === 'any' ? 'selected' : '' ?>>alle</option>
-                <option value="checked" <?= $checkedFilter === 'checked' ? 'selected' : '' ?>>checked</option>
-                <option value="unchecked" <?= $checkedFilter === 'unchecked' ? 'selected' : '' ?>>unchecked</option>
-            </select>
-        </label>
-        <label>
-            Low Activity
-            <select name="low_activity">
-                <option value="all" <?= $lowActivityFilter === 'all' ? 'selected' : '' ?>>alle</option>
-                <option value="low" <?= $lowActivityFilter === 'low' ? 'selected' : '' ?>>nur low</option>
-            </select>
-        </label>
-    <?php endif; ?>
-    <button type="submit">Filter anwenden</button>
-    <a class="reset-link" href="?adult=<?= $showAdult ? '1' : '0' ?>">Reset</a>
-</form>
+            <input type="hidden" name="p" value="1">
+            <label>
+                Typ
+                <select name="type">
+                    <option value="all" <?= $typeFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="image" <?= $typeFilter === 'image' ? 'selected' : '' ?>>Bilder</option>
+                    <option value="video" <?= $typeFilter === 'video' ? 'selected' : '' ?>>Videos</option>
+                </select>
+            </label>
+            <label>
+                Prompt
+                <select name="has_prompt">
+                    <option value="all" <?= $hasPromptFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="with" <?= $hasPromptFilter === 'with' ? 'selected' : '' ?>>mit Prompt</option>
+                    <option value="without" <?= $hasPromptFilter === 'without' ? 'selected' : '' ?>>ohne Prompt</option>
+                </select>
+            </label>
+            <label>
+                Metadaten
+                <select name="has_meta">
+                    <option value="all" <?= $hasMetaFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="with" <?= $hasMetaFilter === 'with' ? 'selected' : '' ?>>mit Meta</option>
+                    <option value="without" <?= $hasMetaFilter === 'without' ? 'selected' : '' ?>>ohne Meta</option>
+                </select>
+            </label>
+            <label>
+                Min Rating
+                <select name="min_rating">
+                    <option value="0" <?= $minRating === 0 ? 'selected' : '' ?>>egal</option>
+                    <option value="1" <?= $minRating === 1 ? 'selected' : '' ?>>1+</option>
+                    <option value="2" <?= $minRating === 2 ? 'selected' : '' ?>>2+</option>
+                    <option value="3" <?= $minRating === 3 ? 'selected' : '' ?>>3</option>
+                </select>
+            </label>
+            <label>
+                Unvollständig
+                <select name="incomplete">
+                    <option value="none" <?= $incompleteFilter === 'none' ? 'selected' : '' ?>>aus</option>
+                    <option value="prompt" <?= $incompleteFilter === 'prompt' ? 'selected' : '' ?>>Prompt</option>
+                    <option value="tags" <?= $incompleteFilter === 'tags' ? 'selected' : '' ?>>Tags</option>
+                    <option value="meta" <?= $incompleteFilter === 'meta' ? 'selected' : '' ?>>Meta</option>
+                    <option value="any" <?= $incompleteFilter === 'any' ? 'selected' : '' ?>>alles</option>
+                </select>
+            </label>
+            <label>
+                Curation
+                <select name="curation">
+                    <option value="all" <?= $curationFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <?php foreach (sv_quality_status_labels() as $statusValue => $statusLabel): ?>
+                        <option value="<?= htmlspecialchars($statusValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $curationFilter === $statusValue ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <label>
+                Prompt-Qualität
+                <select name="prompt_quality">
+                    <option value="all" <?= $promptQualityFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <?php foreach (sv_prompt_quality_labels() as $qualityValue => $qualityLabel): ?>
+                        <option value="<?= htmlspecialchars($qualityValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $promptQualityFilter === $qualityValue ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <?php if ($hasInternalAccess): ?>
+                <label>
+                    Vote
+                    <select name="vote">
+                        <option value="any" <?= $voteFilter === 'any' ? 'selected' : '' ?>>alle</option>
+                        <option value="up" <?= $voteFilter === 'up' ? 'selected' : '' ?>>up</option>
+                        <option value="down" <?= $voteFilter === 'down' ? 'selected' : '' ?>>down</option>
+                    </select>
+                </label>
+                <label>
+                    Geprüft
+                    <select name="checked">
+                        <option value="any" <?= $checkedFilter === 'any' ? 'selected' : '' ?>>alle</option>
+                        <option value="checked" <?= $checkedFilter === 'checked' ? 'selected' : '' ?>>checked</option>
+                        <option value="unchecked" <?= $checkedFilter === 'unchecked' ? 'selected' : '' ?>>unchecked</option>
+                    </select>
+                </label>
+                <label>
+                    Niedrige Aktivität
+                    <select name="low_activity">
+                        <option value="all" <?= $lowActivityFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                        <option value="low" <?= $lowActivityFilter === 'low' ? 'selected' : '' ?>>nur low</option>
+                    </select>
+                </label>
+            <?php endif; ?>
+            <div class="controls-actions">
+                <button type="submit" class="btn btn--primary btn--sm">Filter anwenden</button>
+                <a class="reset-link" href="?adult=<?= $showAdult ? '1' : '0' ?>">Reset</a>
+            </div>
+        </form>
+    </div>
+</details>
 
 <div class="pager compact">
     <span>Seite <?= (int)$page ?> / <?= (int)$pages ?></span>
@@ -1000,7 +1075,7 @@ $promptQualityLabels = sv_prompt_quality_labels();
     ];
     ?>
     <?php if ($featureRows !== []): ?>
-        <section style="margin: 1rem;">
+        <section class="panel">
             <div class="panel-header">Featureview · niedrigste Aktivität</div>
             <div class="media-grid">
                 <?php foreach ($featureRows as $row): ?>
@@ -1018,20 +1093,21 @@ $promptQualityLabels = sv_prompt_quality_labels();
         <?php endforeach; ?>
     </div>
 <?php else: ?>
-    <div class="panel" style="margin: 1rem;">
+    <div class="panel">
         <div class="panel-header">Listenansicht</div>
         <div class="panel-content">
             <?php if ($rows === []): ?>
                 <div class="empty">Keine Einträge für diesen Filter.</div>
             <?php else: ?>
-                <table style="width:100%; border-collapse: collapse; font-size: 0.9rem;">
-                    <thead>
-                        <tr style="text-align:left; border-bottom:1px solid #1f2733;">
-                            <th>ID</th>
-                            <th>Name</th>
-                            <th>Typ</th>
-                            <th>Prompt</th>
-                            <th>Meta</th>
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Name</th>
+                                <th>Typ</th>
+                                <th>Prompt</th>
+                                <th>Meta</th>
                             <th>Tags</th>
                             <th>Modell</th>
                             <th>Scan</th>
@@ -1040,103 +1116,110 @@ $promptQualityLabels = sv_prompt_quality_labels();
                             <th>Curation</th>
                             <th>Prompt</th>
                             <th>Status</th>
-                            <?php if ($hasInternalAccess): ?>
-                                <th>Vote</th>
-                                <th>Checked</th>
-                                <th>Aktivität</th>
-                            <?php endif; ?>
-                            <th>Aktion</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($rows as $row):
-                        $id      = (int)$row['id'];
-                        $path    = (string)$row['path'];
-                        $pathLabel = sv_safe_path_label($path);
-                        $type    = (string)$row['type'];
-                        $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
-                        $qualityLabel = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
-                        $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
-                        $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
-                        $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
-                        $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
-                        $hasIssues = isset($issuesByMedia[$id]);
-                        $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
-                        $jobRunning = (int)($row['job_running'] ?? 0) === 1;
-                        $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
-                        $lastScanScanner = (string)($row['last_scan_scanner'] ?? '');
-                        $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
-                        $lastScanError = $scanInfo['error'] ?? null;
-                        $rating  = (int)($row['rating'] ?? 0);
-                        $status  = (string)($row['status'] ?? '');
-                        $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
-                        $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
-                        $promptQualityData = $row['quality'] ?? sv_prompt_quality_from_text(
-                            $row['prompt_text'] ?? null,
-                            isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
-                            isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
-                        );
-                        $promptQualityClass = $promptQualityData['quality_class'] ?? 'C';
-                        $voteState = (int)($row['vote_state'] ?? 0);
-                        $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
-                        $activityScore = (int)($row['activity_score'] ?? 0);
-                        ?>
-                        <tr style="border-bottom:1px solid #111827;">
-                            <td><?= $id ?></td>
-                            <td title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                            <td><?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                            <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
-                            <td><?= $hasMeta ? 'ja' : 'nein' ?></td>
-                            <td><?= $hasTags ? 'ja' : 'nein' ?></td>
-                            <td><?= $promptModel !== '' ? htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></td>
-                            <td><?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?><?php if ($lastScanScanner !== ''): ?> (<?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?><?php if ($lastScanError): ?> · <span title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?></td>
-                            <td><?= $hasIssues ? 'ja' : '—' ?></td>
-                            <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
-                            <td><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                            <td><?= htmlspecialchars($promptQualityLabels[$promptQualityClass] ?? $promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                            <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'active' ?><?= $scanStale ? ' (stale)' : '' ?><?= $jobRunning ? ' (job)' : '' ?></td>
-                            <?php if ($hasInternalAccess): ?>
-                                <td><?= $voteState ?></td>
-                                <td><?= $checkedFlag ? 'ja' : 'nein' ?></td>
-                                <td><?= $activityScore ?></td>
-                            <?php endif; ?>
-                            <td>
-                                <a class="btn btn-secondary" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
                                 <?php if ($hasInternalAccess): ?>
-                                    <form method="post" style="display:inline;">
-                                        <input type="hidden" name="action" value="rescan_job">
-                                        <input type="hidden" name="media_id" value="<?= $id ?>">
-                                        <button class="btn btn-secondary" type="submit">Tag-Rescan</button>
-                                    </form>
-                                    <form method="post" style="display:inline;">
-                                        <input type="hidden" name="action" value="vote_up">
-                                        <input type="hidden" name="media_id" value="<?= $id ?>">
-                                        <button class="btn <?= $voteState === 1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👍</button>
-                                    </form>
-                                    <form method="post" style="display:inline;">
-                                        <input type="hidden" name="action" value="vote_down">
-                                        <input type="hidden" name="media_id" value="<?= $id ?>">
-                                        <button class="btn <?= $voteState === -1 ? 'btn-primary' : 'btn-secondary' ?>" type="submit">👎</button>
-                                    </form>
-                                    <form method="post" style="display:inline;">
-                                        <input type="hidden" name="action" value="checked_toggle">
-                                        <input type="hidden" name="media_id" value="<?= $id ?>">
-                                        <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
-                                        <button class="btn <?= $checkedFlag ? 'btn-primary' : 'btn-secondary' ?>" type="submit"><?= $checkedFlag ? 'Checked ✓' : 'Checked ✗' ?></button>
-                                    </form>
+                                    <th>Vote</th>
+                                    <th>Geprüft</th>
+                                    <th>Aktivität</th>
                                 <?php endif; ?>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
+                                <th>Aktion</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($rows as $row):
+                            $id      = (int)$row['id'];
+                            $path    = (string)$row['path'];
+                            $pathLabel = sv_safe_path_label($path);
+                            $type    = (string)$row['type'];
+                            $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
+                            $qualityLabel = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
+                            $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
+                            $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
+                            $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
+                            $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
+                            $hasIssues = isset($issuesByMedia[$id]);
+                            $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
+                            $jobRunning = (int)($row['job_running'] ?? 0) === 1;
+                            $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
+                            $lastScanScanner = (string)($row['last_scan_scanner'] ?? '');
+                            $scanInfo = sv_extract_scan_info($row['last_scan_raw'] ?? null);
+                            $lastScanError = $scanInfo['error'] ?? null;
+                            $rating  = (int)($row['rating'] ?? 0);
+                            $status  = (string)($row['status'] ?? '');
+                            $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
+                            $detailParams = array_merge($paginationBase, ['id' => $id, 'p' => $page]);
+                            $promptQualityData = $row['quality'] ?? sv_prompt_quality_from_text(
+                                $row['prompt_text'] ?? null,
+                                isset($row['prompt_width']) ? (int)$row['prompt_width'] : null,
+                                isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
+                            );
+                            $promptQualityClass = $promptQualityData['quality_class'] ?? 'C';
+                            $voteState = (int)($row['vote_state'] ?? 0);
+                            $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
+                            $activityScore = (int)($row['activity_score'] ?? 0);
+                            $iconRescan = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 0 1 12.9-5.1l1.1-1.1V9.5h-3.7l1.4-1.4A6 6 0 1 0 18 12h1.5A7.5 7.5 0 0 1 4.5 12z" fill="currentColor"/></svg>';
+                            $iconUp = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5l7 7h-4v7H9v-7H5l7-7z" fill="currentColor"/></svg>';
+                            $iconDown = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19l-7-7h4V5h6v7h4l-7 7z" fill="currentColor"/></svg>';
+                            $iconCheck = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 16.2L5.5 12.5l-1.5 1.5 5.2 5.2L20 8.4 18.5 7z" fill="currentColor"/></svg>';
+                            ?>
+                            <tr>
+                                <td><?= $id ?></td>
+                                <td title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
+                                <td><?= $hasMeta ? 'ja' : 'nein' ?></td>
+                                <td><?= $hasTags ? 'ja' : 'nein' ?></td>
+                                <td><?= $promptModel !== '' ? htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></td>
+                                <td><?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?><?php if ($lastScanScanner !== ''): ?> (<?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?><?php if ($lastScanError): ?> · <span title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?></td>
+                                <td><?= $hasIssues ? 'ja' : '—' ?></td>
+                                <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
+                                <td><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars($promptQualityLabels[$promptQualityClass] ?? $promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td><?= $status !== '' ? htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'aktiv' ?><?= $scanStale ? ' (veraltet)' : '' ?><?= $jobRunning ? ' (Job)' : '' ?></td>
+                                <?php if ($hasInternalAccess): ?>
+                                    <td><?= $voteState ?></td>
+                                    <td><?= $checkedFlag ? 'ja' : 'nein' ?></td>
+                                    <td><?= $activityScore ?></td>
+                                <?php endif; ?>
+                                <td>
+                                    <div class="table-actions">
+                                        <a class="btn btn--secondary btn--sm" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
+                                        <?php if ($hasInternalAccess): ?>
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="rescan_job">
+                                                <input type="hidden" name="media_id" value="<?= $id ?>">
+                                                <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
+                                            </form>
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="vote_up">
+                                                <input type="hidden" name="media_id" value="<?= $id ?>">
+                                                <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
+                                            </form>
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="vote_down">
+                                                <input type="hidden" name="media_id" value="<?= $id ?>">
+                                                <button class="btn btn--icon <?= $voteState === -1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote runter" title="Vote runter"><?= $iconDown ?></button>
+                                            </form>
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="checked_toggle">
+                                                <input type="hidden" name="media_id" value="<?= $id ?>">
+                                                <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
+                                                <button class="btn btn--icon <?= $checkedFlag ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="<?= $checkedFlag ? 'Checked entfernen' : 'Checked setzen' ?>" title="<?= $checkedFlag ? 'Checked entfernen' : 'Checked setzen' ?>"><?= $iconCheck ?></button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
             <?php endif; ?>
         </div>
     </div>
 <?php endif; ?>
 
-<div class="meta" style="text-align:center; padding:0.6rem; color:#9ca3af;">
-    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Card Grid · Legacy-Grid ist nur noch per Direktaufruf erreichbar
+<div class="meta-note">
+    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Kacheln · Legacy-Grid ist nur noch per Direktaufruf erreichbar
 </div>
 
 <div class="pager compact">
@@ -1152,16 +1235,4 @@ $promptQualityLabels = sv_prompt_quality_labels();
         <span class="disabled">weiter »</span>
     <?php endif; ?>
 </div>
-
-<script>
-document.addEventListener('DOMContentLoaded', () => {
-    const viewSelect = document.querySelector('select[name="view"][form="view-form"]');
-    const viewForm = document.getElementById('view-form');
-    if (viewSelect && viewForm) {
-        viewSelect.addEventListener('change', () => viewForm.submit());
-    }
-});
-</script>
-
-</body>
-</html>
+<?php sv_ui_footer(); ?>

@@ -5,6 +5,7 @@ require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/db_helpers.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+require_once __DIR__ . '/_layout.php';
 
 try {
     $config = sv_load_config();
@@ -261,297 +262,48 @@ function sv_badge_class(string $status): string
 {
     $status = strtolower($status);
     if (in_array($status, ['ok', 'done'], true)) {
-        return 'badge badge-ok';
+        return 'badge badge--ok';
     }
     if (in_array($status, ['error', 'failed'], true)) {
-        return 'badge badge-error';
+        return 'badge badge--error';
     }
     if (in_array($status, ['running', 'queued', 'pending'], true)) {
-        return 'badge badge-info';
+        return 'badge badge--info';
     }
     if (in_array($status, ['warn', 'warning'], true)) {
-        return 'badge badge-warn';
+        return 'badge badge--warn';
     }
 
     return 'badge';
 }
 ?>
-<!doctype html>
-<html lang="de">
-<head>
-    <meta charset="utf-8">
-    <title>Operator Dashboard – SuperVisOr</title>
-    <style>
-        :root {
-            color-scheme: light;
-            --bg: #f4f6f8;
-            --card: #ffffff;
-            --text: #1b1f24;
-            --muted: #59636e;
-            --border: #e0e5ea;
-            --accent: #1f6feb;
-            --warn: #f2b400;
-            --danger: #d1242f;
-            --ok: #1a7f37;
-        }
-
-        body {
-            margin: 0;
-            font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-        }
-
-        a { color: var(--accent); text-decoration: none; }
-        a:hover { text-decoration: underline; }
-
-        .container {
-            max-width: 1100px;
-            margin: 0 auto;
-            padding: 24px;
-        }
-
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 24px;
-            flex-wrap: wrap;
-            margin-bottom: 18px;
-        }
-
-        .header h1 {
-            margin: 0 0 4px 0;
-            font-size: 2rem;
-        }
-
-        .header p {
-            margin: 0;
-            color: var(--muted);
-        }
-
-        .header-actions {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            align-items: flex-end;
-        }
-
-        .button {
-            display: inline-block;
-            padding: 10px 16px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: var(--card);
-            color: var(--text);
-            font-weight: 600;
-        }
-
-        .button.primary {
-            background: var(--accent);
-            color: #fff;
-            border-color: var(--accent);
-        }
-
-        .nav-links {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            font-size: 0.9rem;
-        }
-
-        .banner {
-            padding: 12px 14px;
-            border-radius: 10px;
-            border: 1px solid var(--border);
-            background: #fff;
-            margin-bottom: 12px;
-        }
-
-        .banner.warn { border-color: #f0df9f; background: #fff7df; color: #7b5a00; }
-        .banner.error { border-color: #f2b3b3; background: #ffe9ea; color: #8a1b1b; }
-        .banner.success { border-color: #c7e7c0; background: #eff9f0; color: #1a5c2e; }
-
-        .card {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 16px;
-            margin-bottom: 16px;
-        }
-
-        .section-title {
-            margin: 0 0 12px 0;
-            font-size: 1.2rem;
-        }
-
-        .health-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 12px;
-        }
-
-        .health-row {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .health-row .line {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-            font-size: 0.95rem;
-        }
-
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 2px 8px;
-            border-radius: 999px;
-            font-size: 0.75rem;
-            background: #eef2f6;
-            color: #3c4a5a;
-        }
-
-        .badge-ok { background: #e5f6eb; color: var(--ok); }
-        .badge-warn { background: #fff4cf; color: #7b5a00; }
-        .badge-error { background: #ffe0e2; color: var(--danger); }
-        .badge-info { background: #e0edff; color: #2456b3; }
-
-        .job-columns {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 12px;
-        }
-
-        .job-card {
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 12px;
-            background: #fafbfc;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .job-line {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            align-items: center;
-        }
-
-        .job-meta {
-            color: var(--muted);
-            font-size: 0.85rem;
-        }
-
-        .job-error {
-            color: var(--danger);
-            font-size: 0.85rem;
-        }
-
-        .job-actions form { display: inline; }
-        .job-actions button {
-            border: 1px solid var(--border);
-            background: #fff;
-            border-radius: 6px;
-            padding: 4px 8px;
-            margin-right: 6px;
-        }
-
-        .operator-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 12px;
-        }
-
-        .operator-card {
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 12px;
-            background: #fff;
-        }
-
-        .operator-card h3 {
-            margin: 0 0 8px 0;
-            font-size: 1rem;
-        }
-
-        .inline-fields {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-        }
-
-        .inline-fields input[type="text"],
-        .inline-fields input[type="number"],
-        .inline-fields textarea {
-            padding: 6px 8px;
-            border-radius: 6px;
-            border: 1px solid var(--border);
-        }
-
-        .inline-fields textarea {
-            flex: 1 1 100%;
-            min-height: 120px;
-            resize: vertical;
-        }
-
-        .event-list {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .event-item {
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 10px 12px;
-            background: #fff;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        details summary { cursor: pointer; color: var(--accent); }
-        .muted { color: var(--muted); }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header class="header">
-            <div>
-                <h1>Start</h1>
-                <p>Operator-Control-Center für Galerie, Health und Jobs.</p>
+<?php sv_ui_header('Operator Dashboard', 'dashboard'); ?>
+    <div class="page-header">
+        <div>
+            <h1 class="page-title">Start</h1>
+            <p class="muted">Operator-Control-Center für Galerie, Health und Jobs.</p>
+        </div>
+        <div class="header-actions">
+            <a class="btn btn--primary" href="mediadb.php">Galerie öffnen</a>
+            <div class="header-links">
+                <a href="mediadb.php">Letzte Medien</a>
+                <a href="#update-center">Update Center</a>
+                <a href="#job-center-recent">Letzte Fehler</a>
+                <a href="#job-center">Job-Center</a>
+                <a href="#health-snapshot">Health</a>
+                <a href="#event-log">Ereignisse</a>
             </div>
-            <div class="header-actions">
-                <a class="button primary" href="mediadb.php">Galerie öffnen</a>
-                <div class="nav-links">
-                    <a href="mediadb.php">Letzte Medien</a>
-                    <a href="#update-center">Update Center</a>
-                    <a href="#job-center-recent">Letzte Fehler</a>
-                    <a href="#job-center">Job-Center</a>
-                    <a href="#health-snapshot">Health</a>
-                    <a href="#event-log">Ereignisse</a>
-                </div>
-            </div>
-        </header>
+        </div>
+    </div>
 
         <?php if (!empty($configWarning)): ?>
-            <div class="banner warn">
+            <div class="banner banner--warn">
                 <?= htmlspecialchars($configWarning, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
             </div>
         <?php endif; ?>
 
         <?php if ($dbError !== null): ?>
-            <div class="banner error">
+            <div class="banner banner--error">
                 <strong>DB-Verbindung fehlgeschlagen:</strong>
                 <?= htmlspecialchars(sv_sanitize_error_message($dbError), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                 <div class="muted">Quelle: <?= htmlspecialchars((string)($config['_config_path'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
@@ -559,13 +311,13 @@ function sv_badge_class(string $status): string
         <?php endif; ?>
 
         <?php if ($actionMessage !== null): ?>
-            <div class="banner success">
+            <div class="banner banner--success">
                 <?= htmlspecialchars($actionMessage, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
             </div>
         <?php endif; ?>
 
         <?php if ($actionError !== null): ?>
-            <div class="banner error">
+            <div class="banner banner--error">
                 <?= htmlspecialchars(sv_sanitize_error_message($actionError), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
             </div>
         <?php endif; ?>
@@ -583,14 +335,14 @@ function sv_badge_class(string $status): string
                             $gitAhead  = isset($gitStatus['ahead']) ? (int)$gitStatus['ahead'] : 0;
                             $gitBehind = isset($gitStatus['behind']) ? (int)$gitStatus['behind'] : 0;
                             $gitDirty  = !empty($gitStatus['dirty']);
-                            $behindClass = $gitBehind > 0 ? 'badge-warn' : 'badge-ok';
-                            $dirtyClass = $gitDirty ? 'badge-warn' : 'badge-ok';
+                            $behindClass = $gitBehind > 0 ? 'badge--warn' : 'badge--ok';
+                            $dirtyClass = $gitDirty ? 'badge--warn' : 'badge--ok';
                             $fetchOk = $gitStatus['fetch_ok'] ?? null;
-                            $fetchBadge = $fetchOk === null ? 'badge' : ($fetchOk ? 'badge-ok' : 'badge-error');
+                            $fetchBadge = $fetchOk === null ? 'badge' : ($fetchOk ? 'badge--ok' : 'badge--error');
                             ?>
                             <div class="line">
                                 <span class="badge <?= $behindClass ?>">behind <?= $gitBehind ?></span>
-                                <span class="badge badge-info">ahead <?= $gitAhead ?></span>
+                                <span class="badge badge--info">ahead <?= $gitAhead ?></span>
                                 <span class="badge <?= $dirtyClass ?>">dirty <?= $gitDirty ? 'yes' : 'no' ?></span>
                             </div>
                             <div class="line">
@@ -598,7 +350,7 @@ function sv_badge_class(string $status): string
                                 <span>Head: <?= htmlspecialchars((string)($gitStatus['head'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                             </div>
                             <details>
-                                <summary>Show more</summary>
+                                <summary>Mehr anzeigen</summary>
                                 <div class="muted">Upstream: <?= htmlspecialchars((string)($gitStatus['upstream'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                 <div class="muted">Letztes Fetch: <?= htmlspecialchars((string)($gitStatus['updated_at'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                 <?php if ($fetchOk !== null): ?>
@@ -625,7 +377,7 @@ function sv_badge_class(string $status): string
                             $afterCommit = is_array($gitLast['after'] ?? null) ? (string)($gitLast['after']['commit'] ?? '—') : '—';
                             ?>
                             <div class="line">
-                                <span class="badge badge-info"><?= htmlspecialchars((string)($gitLast['action'] ?? 'update'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                <span class="badge badge--info"><?= htmlspecialchars((string)($gitLast['action'] ?? 'update'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                 <span class="<?= $updateBadge ?>"><?= htmlspecialchars($updateResult, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                             </div>
                             <div class="line">
@@ -633,7 +385,7 @@ function sv_badge_class(string $status): string
                                 <span>Ende: <?= htmlspecialchars((string)($gitLast['finished_at'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                             </div>
                             <details>
-                                <summary>Show more</summary>
+                                <summary>Mehr anzeigen</summary>
                                 <div class="muted">Before: <?= htmlspecialchars($beforeCommit, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                 <div class="muted">After: <?= htmlspecialchars($afterCommit, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                 <?php if (!empty($gitLast['short_error'])): ?>
@@ -643,15 +395,15 @@ function sv_badge_class(string $status): string
                         <?php endif; ?>
                     </div>
                 </div>
-                <form method="post" style="margin-top: 12px;">
+                <form method="post" class="inline-fields">
                     <input type="hidden" name="action" value="update_center">
                     <input type="hidden" name="update_action" value="update_ff_restart">
                     <?php if ($internalKey !== ''): ?>
                         <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                     <?php endif; ?>
-                    <button type="submit" class="button primary" onclick="return confirm('Update jetzt starten?');">Update (FF + DB + Restart)</button>
+                    <button type="submit" class="btn btn--primary" onclick="return confirm('Update jetzt starten?');">Update (FF + DB + Restart)</button>
                 </form>
-                <div class="muted" style="margin-top: 8px;">FF-only Standard; Merge nur über separaten Action-Parameter.</div>
+                <div class="muted">FF-only Standard; Merge nur über separaten Action-Parameter.</div>
             </section>
         <?php endif; ?>
 
@@ -667,7 +419,7 @@ function sv_badge_class(string $status): string
                     <div class="health-row">
                         <strong>DB Health</strong>
                         <div class="line">
-                            <span class="badge <?= $dbError === null ? 'badge-ok' : 'badge-error' ?>">
+                            <span class="badge <?= $dbError === null ? 'badge--ok' : 'badge--error' ?>">
                                 <?= $dbError === null ? 'connected' : 'offline' ?>
                             </span>
                             <span>Treiber: <?= htmlspecialchars((string)($dbHealth['driver'] ?? 'unbekannt'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -675,7 +427,7 @@ function sv_badge_class(string $status): string
                             <span>Issues: <?= htmlspecialchars((string)($dbHealth['issues_total'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                         </div>
                         <details>
-                            <summary>Show more</summary>
+                            <summary>Mehr anzeigen</summary>
                             <div class="muted">DSN (redacted): <?= htmlspecialchars((string)($dbHealth['redacted_dsn'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                             <?php if (!empty($dbHealth['pending_migrations'])): ?>
                                 <div class="muted">Pending: <?= htmlspecialchars(implode(', ', (array)$dbHealth['pending_migrations']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
@@ -689,15 +441,15 @@ function sv_badge_class(string $status): string
                     <div class="health-row">
                         <strong>Job Health</strong>
                         <div class="line">
-                            <span class="badge badge-info">queued <?= (int)($jobCounts['queued'] ?? 0) ?></span>
-                            <span class="badge badge-info">running <?= (int)($jobCounts['running'] ?? 0) ?></span>
-                            <span class="badge <?= ($jobHealth['stuck_jobs'] ?? 0) > 0 ? 'badge-warn' : 'badge-ok' ?>">
+                            <span class="badge badge--info">queued <?= (int)($jobCounts['queued'] ?? 0) ?></span>
+                            <span class="badge badge--info">running <?= (int)($jobCounts['running'] ?? 0) ?></span>
+                            <span class="badge <?= ($jobHealth['stuck_jobs'] ?? 0) > 0 ? 'badge--warn' : 'badge--ok' ?>">
                                 stuck <?= (int)($jobHealth['stuck_jobs'] ?? 0) ?>
                             </span>
                             <span>Letzter Fehler: <?= htmlspecialchars((string)($jobHealth['last_error']['message'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                         </div>
                         <details>
-                            <summary>Show more</summary>
+                            <summary>Mehr anzeigen</summary>
                             <div class="muted">Done: <?= (int)($jobCounts['done'] ?? 0) ?> · Error: <?= (int)($jobCounts['error'] ?? 0) ?></div>
                             <?php if (!empty($jobHealth['last_error'])): ?>
                                 <div class="job-error">#<?= htmlspecialchars((string)($jobHealth['last_error']['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> (<?= htmlspecialchars((string)($jobHealth['last_error']['type'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)</div>
@@ -713,7 +465,7 @@ function sv_badge_class(string $status): string
                             <span>Fehlende Marker: <?= htmlspecialchars((string)($scanHealth['missing_run_at'] ?? 0), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                         </div>
                         <details>
-                            <summary>Show more</summary>
+                            <summary>Mehr anzeigen</summary>
                             <?php if (!empty($scanHealth['latest'])): ?>
                                 <ul class="muted">
                                     <?php foreach ($scanHealth['latest'] as $scan): ?>
@@ -738,13 +490,13 @@ function sv_badge_class(string $status): string
                         <input type="hidden" name="action" value="scan_path">
                         <div class="inline-fields">
                             <textarea name="scan_path" rows="6" placeholder="Pfad 1&#10;Pfad 2"></textarea>
-                            <input type="number" name="scan_limit" min="1" step="1" placeholder="Limit">
-                            <?php if ($internalKey !== ''): ?>
-                                <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                            <?php endif; ?>
-                            <button type="submit">Scan starten</button>
-                        </div>
-                    </form>
+                        <input type="number" name="scan_limit" min="1" step="1" placeholder="Limit">
+                        <?php if ($internalKey !== ''): ?>
+                            <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        <?php endif; ?>
+                        <button type="submit" class="btn btn--primary btn--sm">Scan starten</button>
+                    </div>
+                </form>
                     <div class="muted">Ein Pfad pro Zeile (Ordner oder Datei).</div>
                     <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['scan_start'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 </div>
@@ -755,22 +507,22 @@ function sv_badge_class(string $status): string
                         <input type="hidden" name="action" value="rescan_db">
                         <div class="inline-fields">
                             <input type="number" name="rescan_limit" min="1" step="1" placeholder="Limit">
-                            <input type="number" name="rescan_offset" min="0" step="1" placeholder="Offset">
-                            <?php if ($internalKey !== ''): ?>
-                                <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                            <?php endif; ?>
-                            <button type="submit">Rescan starten</button>
-                        </div>
-                    </form>
+                        <input type="number" name="rescan_offset" min="0" step="1" placeholder="Offset">
+                        <?php if ($internalKey !== ''): ?>
+                            <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        <?php endif; ?>
+                        <button type="submit" class="btn btn--primary btn--sm">Rescan starten</button>
+                    </div>
+                </form>
                     <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['rescan_start'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 </div>
 
                 <div class="operator-card">
                     <h3>Forge Worker Status</h3>
                     <div class="line">
-                        <span class="badge badge-info">open <?= (int)($forgeOverview['open'] ?? 0) ?></span>
-                        <span class="badge badge-ok">done <?= (int)($forgeOverview['done'] ?? 0) ?></span>
-                        <span class="badge badge-error">error <?= (int)($forgeOverview['error'] ?? 0) ?></span>
+                        <span class="badge badge--info">open <?= (int)($forgeOverview['open'] ?? 0) ?></span>
+                        <span class="badge badge--ok">done <?= (int)($forgeOverview['done'] ?? 0) ?></span>
+                        <span class="badge badge--error">error <?= (int)($forgeOverview['error'] ?? 0) ?></span>
                     </div>
                     <div class="muted">Dispatch via <code>php SCRIPTS/forge_worker_cli.php --limit=1</code>.</div>
                 </div>
@@ -782,7 +534,7 @@ function sv_badge_class(string $status): string
                 </div>
             </div>
             <?php if (!$hasInternalAccess): ?>
-                <div class="muted" style="margin-top: 10px;">Aktionen erfordern Internal-Key + IP-Whitelist.</div>
+                <div class="muted">Aktionen erfordern Internal-Key + IP-Whitelist.</div>
             <?php endif; ?>
         </section>
 
@@ -807,11 +559,11 @@ function sv_badge_class(string $status): string
                                 <?php $statusClass = sv_badge_class((string)($job['status'] ?? '')); ?>
                                 <div class="job-card">
                                     <div class="job-line">
-                                        <span class="badge badge-info">#<?= (int)$job['id'] ?></span>
-                                        <span class="badge badge-info"><?= htmlspecialchars((string)$job['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                                        <span class="badge badge--info">#<?= (int)$job['id'] ?></span>
+                                        <span class="badge badge--info"><?= htmlspecialchars((string)$job['type'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                         <span class="<?= $statusClass ?>"><?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                                         <?php if (!empty($job['stuck'])): ?>
-                                            <span class="badge badge-warn">stuck</span>
+                                            <span class="badge badge--warn">stuck</span>
                                         <?php endif; ?>
                                     </div>
                                     <div class="job-meta">
@@ -847,7 +599,7 @@ function sv_badge_class(string $status): string
                                                 <?php if ($internalKey !== ''): ?>
                                                     <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <?php endif; ?>
-                                                <button type="submit">Requeue</button>
+                                                <button type="submit" class="btn btn--xs btn--secondary">Requeue</button>
                                             </form>
                                         <?php endif; ?>
                                         <?php if (in_array($job['status'], ['queued', 'running'], true)): ?>
@@ -857,12 +609,12 @@ function sv_badge_class(string $status): string
                                                 <?php if ($internalKey !== ''): ?>
                                                     <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <?php endif; ?>
-                                                <button type="submit">Cancel</button>
+                                                <button type="submit" class="btn btn--xs btn--ghost">Cancel</button>
                                             </form>
                                         <?php endif; ?>
                                     </div>
                                     <details>
-                                        <summary>Show more</summary>
+                                        <summary>Mehr anzeigen</summary>
                                         <div class="job-meta">ID: <?= (int)$job['id'] ?></div>
                                         <div class="job-meta">Status: <?= htmlspecialchars((string)$job['status'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                     </details>
@@ -893,6 +645,4 @@ function sv_badge_class(string $status): string
                 </ul>
             <?php endif; ?>
         </section>
-    </div>
-</body>
-</html>
+<?php sv_ui_footer(); ?>
