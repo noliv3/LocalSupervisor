@@ -500,8 +500,9 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 ## Asynchrone Scans
 
 - Web-Trigger für Scans/Rescan legen Jobs (`scan_path`, `rescan_media`) in die Queue und starten automatisch einen dedizierten Worker im Hintergrund.
-- Backfill für „ohne Tags“ läuft über den Job-Typ `scan_backfill_tags` und reiht daraus Rescan-Jobs in Chunks ein; UI-Trigger im Dashboard ist rein enqueue-only.
-- Der Worker läuft rein im CLI-Kontext (`SCRIPTS/scan_worker_cli.php`) und zieht queued/running-Jobs ohne Web-Timeouts ab, Status landet in `jobs.status/forge_response_json`; `--media-id=<id>` verarbeitet gezielt einen Rescan-Job.
+- Backfill für „ohne Tags“ läuft über den Job-Typ `scan_backfill_tags` und reiht daraus Rescan-Jobs in Chunks ein; UI-Trigger im Dashboard ist rein enqueue-only. Backfill setzt pro Worker-Tick ein Enqueue-Cap (Default 200) und speichert einen Cursor-Checkpoint im Job-Payload für Fortsetzungen.
+- Der Worker läuft rein im CLI-Kontext (`SCRIPTS/scan_worker_cli.php`) und zieht queued/running-Jobs ohne Web-Timeouts ab, Status landet in `jobs.status/forge_response_json`; `--media-id=<id>` verarbeitet gezielt einen Rescan-Job. Standardmäßig verarbeitet der Worker pro Tick höchstens 1 Backfill-Job und bis zu 10 Rescans, bevor er beendet.
+- Dashboard-Enqueue begrenzt `rescan_limit`/`backfill_chunk` serverseitig (Default 200, Max 500), damit einzelne Requests keine Job-Stürme erzeugen.
 - Jobs mit Status `running`, die länger als ~30 Minuten kein Update erhalten, werden mit `job_stuck_timeout` auf `error` gesetzt; Scan-Jobs unterstützen Cancel/Delete/Prune (fertige Zustände).
 - Beispiel: `php SCRIPTS/scan_worker_cli.php --path="/data/import" --limit=5` verarbeitet maximal fünf anstehende Scans für den angegebenen Wurzelpfad.
 

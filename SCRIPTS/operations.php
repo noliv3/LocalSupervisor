@@ -38,6 +38,88 @@ const SV_QUALITY_UNKNOWN          = 'unknown';
 const SV_QUALITY_OK               = 'ok';
 const SV_QUALITY_REVIEW           = 'review';
 const SV_QUALITY_BLOCKED          = 'blocked';
+const SV_BACKFILL_MAX_ENQUEUE_PER_RUN = 200;
+
+function sv_is_sqlite_busy(Throwable $error): bool
+{
+    if (!$error instanceof PDOException) {
+        return false;
+    }
+
+    $message = $error->getMessage();
+    if (is_string($message) && stripos($message, 'SQLITE_BUSY') !== false) {
+        return true;
+    }
+    if (is_string($message) && stripos($message, 'database is locked') !== false) {
+        return true;
+    }
+
+    $info = $error->errorInfo ?? null;
+    if (is_array($info) && isset($info[1]) && (int)$info[1] === 5) {
+        return true;
+    }
+
+    return false;
+}
+
+function sv_db_exec_retry(callable $fn, int $retries = 5, int $minSleepMs = 50, int $maxSleepMs = 250)
+{
+    $attempts = 0;
+    while (true) {
+        try {
+            return $fn();
+        } catch (Throwable $e) {
+            if (!sv_is_sqlite_busy($e) || $attempts >= $retries) {
+                throw $e;
+            }
+            $sleepMs = random_int($minSleepMs, $maxSleepMs);
+            usleep($sleepMs * 1000);
+            $attempts++;
+        }
+    }
+}
+
+function sv_jobs_supports_payload_json(PDO $pdo): bool
+{
+    static $hasColumn = null;
+    if ($hasColumn !== null) {
+        return $hasColumn;
+    }
+
+    try {
+        $stmt = $pdo->query('PRAGMA table_info(jobs)');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        foreach ($rows as $row) {
+            if (($row['name'] ?? null) === 'payload_json') {
+                $hasColumn = true;
+                return true;
+            }
+        }
+    } catch (Throwable $e) {
+        $hasColumn = false;
+        return false;
+    }
+
+    $hasColumn = false;
+    return false;
+}
+
+function sv_update_job_checkpoint_payload(PDO $pdo, int $jobId, array $payload): void
+{
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        return;
+    }
+    $column = sv_jobs_supports_payload_json($pdo) ? 'payload_json' : 'forge_request_json';
+    sv_db_exec_retry(static function () use ($pdo, $jobId, $json, $column): void {
+        $stmt = $pdo->prepare('UPDATE jobs SET ' . $column . ' = :payload, updated_at = :updated_at WHERE id = :id');
+        $stmt->execute([
+            ':payload'    => $json,
+            ':updated_at' => date('c'),
+            ':id'         => $jobId,
+        ]);
+    });
+}
 
 function sv_scan_job_types(): array
 {
@@ -2234,18 +2316,20 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
         'nsfw_threshold' => (float)($config['scanner']['nsfw_threshold'] ?? 0.7),
     ];
 
-    $insert = $pdo->prepare(
-        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
-        . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
-    );
-    $insert->execute([
-        ':media_id'   => $mediaId,
-        ':type'       => SV_JOB_TYPE_RESCAN_MEDIA,
-        ':status'     => 'queued',
-        ':created_at' => $now,
-        ':updated_at' => $now,
-        ':payload'    => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-    ]);
+    sv_db_exec_retry(static function () use ($pdo, $mediaId, $now, $payload): void {
+        $insert = $pdo->prepare(
+            'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
+            . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
+        );
+        $insert->execute([
+            ':media_id'   => $mediaId,
+            ':type'       => SV_JOB_TYPE_RESCAN_MEDIA,
+            ':status'     => 'queued',
+            ':created_at' => $now,
+            ':updated_at' => $now,
+            ':payload'    => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        ]);
+    });
 
     $jobId = (int)$pdo->lastInsertId();
     $logger('Rescan-Job angelegt: ID=' . $jobId . ' (Media ' . $mediaId . ')');
@@ -2386,6 +2470,9 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         $finishedAt = date('c');
         $response['error'] = $error;
         $response['finished_at'] = $finishedAt;
+        if (!empty($resultMeta['short_error'])) {
+            $response['short_error'] = $resultMeta['short_error'];
+        }
         sv_update_job_status(
             $pdo,
             $jobId,
@@ -2410,6 +2497,9 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         if (!isset($response['run_at']) && isset($resultMeta['run_at'])) {
             $response['run_at'] = $resultMeta['run_at'];
         }
+        if (!empty($resultMeta['short_error'])) {
+            $response['short_error'] = $resultMeta['short_error'];
+        }
         $response['finished_at'] = date('c');
         sv_update_job_status(
             $pdo,
@@ -2430,11 +2520,13 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
     } finally {
         $now = date('c');
         $response['updated_at'] = $now;
-        $update = $pdo->prepare('UPDATE jobs SET updated_at = :updated_at WHERE id = :id');
-        $update->execute([
-            ':updated_at' => $now,
-            ':id'         => $jobId,
-        ]);
+        sv_db_exec_retry(static function () use ($pdo, $jobId, $now): void {
+            $update = $pdo->prepare('UPDATE jobs SET updated_at = :updated_at WHERE id = :id');
+            $update->execute([
+                ':updated_at' => $now,
+                ':id'         => $jobId,
+            ]);
+        });
     }
 }
 
@@ -2458,11 +2550,15 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
     $mode = is_string($payload['mode'] ?? null) ? trim((string)$payload['mode']) : 'no_tags';
     $chunk = isset($payload['chunk']) ? (int)$payload['chunk'] : 200;
     $max = isset($payload['max']) ? (int)$payload['max'] : null;
+    $maxEnqueuePerRun = isset($payload['max_enqueue_per_run']) ? (int)$payload['max_enqueue_per_run'] : SV_BACKFILL_MAX_ENQUEUE_PER_RUN;
     if ($chunk <= 0) {
         $chunk = 200;
     }
     if ($max !== null && $max <= 0) {
         $max = null;
+    }
+    if ($maxEnqueuePerRun <= 0) {
+        $maxEnqueuePerRun = SV_BACKFILL_MAX_ENQUEUE_PER_RUN;
     }
 
     $jobLogger = function (string $msg) use ($logger, $jobId): void {
@@ -2486,8 +2582,16 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
     $enqueued = isset($progress['enqueued']) ? (int)$progress['enqueued'] : 0;
     $deduped = isset($progress['deduped']) ? (int)$progress['deduped'] : 0;
     $lastId = isset($progress['last_id']) ? (int)$progress['last_id'] : 0;
+    $payloadLastId = isset($payload['cursor_last_id']) ? (int)$payload['cursor_last_id'] : 0;
+    $payloadEnqueued = isset($payload['enqueued_total']) ? (int)$payload['enqueued_total'] : null;
+    if ($payloadLastId > 0) {
+        $lastId = $payloadLastId;
+    }
+    if ($payloadEnqueued !== null) {
+        $enqueued = $payloadEnqueued;
+    }
 
-    $jobLogger('Starte Backfill (' . $mode . '), chunk=' . $chunk . ($max !== null ? ', max=' . $max : ''));
+    $jobLogger('Starte Backfill (' . $mode . '), chunk=' . $chunk . ($max !== null ? ', max=' . $max : '') . ', cap=' . $maxEnqueuePerRun);
 
     $cancelCheck = static function () use ($pdo, $jobId): bool {
         return sv_is_job_canceled($pdo, $jobId);
@@ -2508,7 +2612,18 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         null
     );
+    sv_update_job_checkpoint_payload($pdo, $jobId, array_filter([
+        'mode'            => $mode,
+        'chunk'           => $chunk,
+        'max'             => $max,
+        'max_enqueue_per_run' => $maxEnqueuePerRun,
+        'cursor_last_id'  => $lastId,
+        'enqueued_total'  => $enqueued,
+        'done'            => false,
+    ], static fn ($value) => $value !== null));
 
+    $enqueuedThisRun = 0;
+    $stopEarly = false;
     while (true) {
         if ($cancelCheck()) {
             return sv_finalize_canceled_job(
@@ -2526,6 +2641,11 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
                 $logger,
                 'backfill loop'
             );
+        }
+
+        if ($enqueuedThisRun >= $maxEnqueuePerRun) {
+            $stopEarly = true;
+            break;
         }
 
         $remaining = $max !== null ? max(0, $max - $processed) : null;
@@ -2569,9 +2689,17 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
                     $deduped++;
                 } else {
                     $enqueued++;
+                    $enqueuedThisRun++;
                 }
             } catch (Throwable $e) {
                 $jobLogger('Backfill-Rescan-Fehler (Media ' . $lastId . '): ' . $e->getMessage());
+            }
+
+            usleep(random_int(10000, 25000));
+
+            if ($enqueuedThisRun >= $maxEnqueuePerRun) {
+                $stopEarly = true;
+                break;
             }
         }
 
@@ -2590,6 +2718,56 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
             null
         );
+        sv_update_job_checkpoint_payload($pdo, $jobId, array_filter([
+            'mode'            => $mode,
+            'chunk'           => $chunk,
+            'max'             => $max,
+            'max_enqueue_per_run' => $maxEnqueuePerRun,
+            'cursor_last_id'  => $lastId,
+            'enqueued_total'  => $enqueued,
+            'done'            => false,
+        ], static fn ($value) => $value !== null));
+
+        if ($stopEarly) {
+            break;
+        }
+    }
+
+    if ($stopEarly) {
+        $response = [
+            'mode'     => $mode,
+            'result'   => 'partial',
+            'progress' => [
+                'processed' => $processed,
+                'enqueued'  => $enqueued,
+                'deduped'   => $deduped,
+                'last_id'   => $lastId,
+                'enqueued_this_run' => $enqueuedThisRun,
+                'max_enqueue_per_run' => $maxEnqueuePerRun,
+            ],
+        ];
+        sv_update_job_status(
+            $pdo,
+            $jobId,
+            'running',
+            json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            null
+        );
+        sv_update_job_checkpoint_payload($pdo, $jobId, array_filter([
+            'mode'            => $mode,
+            'chunk'           => $chunk,
+            'max'             => $max,
+            'max_enqueue_per_run' => $maxEnqueuePerRun,
+            'cursor_last_id'  => $lastId,
+            'enqueued_total'  => $enqueued,
+            'done'            => false,
+        ], static fn ($value) => $value !== null));
+
+        return [
+            'job_id' => $jobId,
+            'status' => 'running',
+            'result' => $response,
+        ];
     }
 
     $resultState = $max !== null && $processed >= $max ? 'max_reached' : 'done';
@@ -2611,6 +2789,15 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
         json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         null
     );
+    sv_update_job_checkpoint_payload($pdo, $jobId, array_filter([
+        'mode'            => $mode,
+        'chunk'           => $chunk,
+        'max'             => $max,
+        'max_enqueue_per_run' => $maxEnqueuePerRun,
+        'cursor_last_id'  => $lastId,
+        'enqueued_total'  => $enqueued,
+        'done'            => true,
+    ], static fn ($value) => $value !== null));
 
     sv_audit_log($pdo, 'backfill_no_tags_done', 'jobs', $jobId, $response);
     $jobLogger('Backfill abgeschlossen: processed=' . $processed . ', enqueued=' . $enqueued . ', deduped=' . $deduped);
@@ -2908,7 +3095,15 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     ];
 }
 
-function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?string $pathFilter = null, ?int $mediaId = null): array
+function sv_process_scan_job_batch(
+    PDO $pdo,
+    array $config,
+    ?int $limit,
+    callable $logger,
+    ?string $pathFilter = null,
+    ?int $mediaId = null,
+    array $options = []
+): array
 {
     sv_mark_stuck_jobs($pdo, sv_scan_job_types(), SV_JOB_STUCK_MINUTES, $logger);
 
@@ -2927,20 +3122,30 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
     }
 
     // Backfill-Jobs zuerst abarbeiten
+    $backfillLimit = isset($options['backfill_limit']) ? (int)$options['backfill_limit'] : null;
+    if ($backfillLimit !== null && $backfillLimit <= 0) {
+        $backfillLimit = null;
+    }
+    $backfillRemaining = $backfillLimit !== null
+        ? ($remaining !== null ? min($remaining, $backfillLimit) : $backfillLimit)
+        : $remaining;
     $backfillSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
-    if ($remaining !== null) {
+    if ($backfillRemaining !== null) {
         $backfillSql .= ' LIMIT :limit';
     }
     $backfillStmt = $pdo->prepare($backfillSql);
     $backfillStmt->bindValue(':type', SV_JOB_TYPE_SCAN_BACKFILL_TAGS, PDO::PARAM_STR);
-    if ($remaining !== null) {
-        $backfillStmt->bindValue(':limit', $remaining, PDO::PARAM_INT);
+    if ($backfillRemaining !== null) {
+        $backfillStmt->bindValue(':limit', $backfillRemaining, PDO::PARAM_INT);
     }
     $backfillStmt->execute();
     $backfillJobs = $backfillStmt->fetchAll(PDO::FETCH_ASSOC);
 
     foreach ($backfillJobs as $jobRow) {
         if ($remaining !== null && $remaining <= 0) {
+            break;
+        }
+        if ($backfillRemaining !== null && $backfillRemaining <= 0) {
             break;
         }
         $jobId = (int)($jobRow['id'] ?? 0);
@@ -2950,9 +3155,12 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
             if ($remaining !== null) {
                 $remaining--;
             }
+            if ($backfillRemaining !== null) {
+                $backfillRemaining--;
+            }
             $logger('Verarbeite Backfill-Job #' . $jobId);
             $result = sv_process_scan_backfill_job($pdo, $config, $jobRow, $logger);
-            if (($result['status'] ?? '') === 'done') {
+            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === 'running') {
                 $done++;
             } elseif (($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
                 $done++;
@@ -2971,12 +3179,19 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
     }
 
     // Rescan-Medien danach abarbeiten
+    $rescanLimit = isset($options['rescan_limit']) ? (int)$options['rescan_limit'] : null;
+    if ($rescanLimit !== null && $rescanLimit <= 0) {
+        $rescanLimit = null;
+    }
+    $rescanRemaining = $rescanLimit !== null
+        ? ($remaining !== null ? min($remaining, $rescanLimit) : $rescanLimit)
+        : $remaining;
     $rescanSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running")';
     if ($mediaId !== null && $mediaId > 0) {
         $rescanSql .= ' AND media_id = :media_id';
     }
     $rescanSql .= ' ORDER BY id ASC';
-    if ($remaining !== null) {
+    if ($rescanRemaining !== null) {
         $rescanSql .= ' LIMIT :limit';
     }
 
@@ -2985,8 +3200,8 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
     if ($mediaId !== null && $mediaId > 0) {
         $rescanStmt->bindValue(':media_id', $mediaId, PDO::PARAM_INT);
     }
-    if ($remaining !== null) {
-        $rescanStmt->bindValue(':limit', $remaining, PDO::PARAM_INT);
+    if ($rescanRemaining !== null) {
+        $rescanStmt->bindValue(':limit', $rescanRemaining, PDO::PARAM_INT);
     }
     $rescanStmt->execute();
     $rescanJobs = $rescanStmt->fetchAll(PDO::FETCH_ASSOC);
@@ -2995,12 +3210,18 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
         if ($remaining !== null && $remaining <= 0) {
             break;
         }
+        if ($rescanRemaining !== null && $rescanRemaining <= 0) {
+            break;
+        }
         $jobId = (int)($jobRow['id'] ?? 0);
         try {
             $processed++;
             $rescanProcessed++;
             if ($remaining !== null) {
                 $remaining--;
+            }
+            if ($rescanRemaining !== null) {
+                $rescanRemaining--;
             }
             $logger('Verarbeite Rescan-Job #' . $jobId . ' (Media ' . (int)($jobRow['media_id'] ?? 0) . ')');
             $result = sv_process_rescan_media_job($pdo, $config, $jobRow, $logger);
@@ -3021,15 +3242,22 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
     }
 
     // Danach Scan-Path-Jobs
+    $scanLimit = isset($options['scan_limit']) ? (int)$options['scan_limit'] : null;
+    if ($scanLimit !== null && $scanLimit <= 0) {
+        $scanLimit = null;
+    }
+    $scanRemaining = $scanLimit !== null
+        ? ($remaining !== null ? min($remaining, $scanLimit) : $scanLimit)
+        : $remaining;
     $scanSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
-    if ($remaining !== null) {
+    if ($scanRemaining !== null) {
         $scanSql .= ' LIMIT :limit';
     }
 
     $stmt = $pdo->prepare($scanSql);
     $stmt->bindValue(':type', SV_JOB_TYPE_SCAN_PATH, PDO::PARAM_STR);
-    if ($remaining !== null) {
-        $stmt->bindValue(':limit', $remaining, PDO::PARAM_INT);
+    if ($scanRemaining !== null) {
+        $stmt->bindValue(':limit', $scanRemaining, PDO::PARAM_INT);
     }
     $stmt->execute();
 
@@ -3037,6 +3265,9 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
 
     foreach ($jobs as $jobRow) {
         if ($remaining !== null && $remaining <= 0) {
+            break;
+        }
+        if ($scanRemaining !== null && $scanRemaining <= 0) {
             break;
         }
 
@@ -3053,6 +3284,9 @@ function sv_process_scan_job_batch(PDO $pdo, array $config, ?int $limit, callabl
             $scanProcessed++;
             if ($remaining !== null) {
                 $remaining--;
+            }
+            if ($scanRemaining !== null) {
+                $scanRemaining--;
             }
             $logger('Verarbeite Scan-Job #' . $jobId . ' (' . $jobPath . ')');
             sv_process_single_scan_job($pdo, $config, $jobRow, $logger);
@@ -3611,24 +3845,54 @@ function sv_cancel_job(PDO $pdo, int $jobId, callable $logger): array
 function sv_delete_job(PDO $pdo, int $jobId, callable $logger): array
 {
     $job = sv_load_job($pdo, $jobId);
-    $status = (string)($job['status'] ?? '');
-    if (!in_array($status, sv_finished_job_statuses(), true)) {
-        throw new InvalidArgumentException('Nur abgeschlossene Jobs können gelöscht werden.');
-    }
+    $currentStatus = '';
+    $currentType = '';
+    $deletedCount = 0;
 
-    $stmt = $pdo->prepare('DELETE FROM jobs WHERE id = :id');
-    $stmt->execute([':id' => $jobId]);
+    $pdo->beginTransaction();
+    try {
+        $check = $pdo->prepare('SELECT id, type, status FROM jobs WHERE id = :id');
+        $check->execute([':id' => $jobId]);
+        $row = $check->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            throw new InvalidArgumentException('Job nicht gefunden.');
+        }
+        $currentStatus = (string)($row['status'] ?? '');
+        $currentType = (string)($row['type'] ?? '');
+        if (!in_array($currentStatus, sv_finished_job_statuses(), true)) {
+            throw new InvalidArgumentException('Nur abgeschlossene Jobs können gelöscht werden.');
+        }
+
+        $placeholders = implode(',', array_fill(0, count(sv_finished_job_statuses()), '?'));
+        $params = array_merge([$jobId], sv_finished_job_statuses());
+        $stmt = $pdo->prepare('DELETE FROM jobs WHERE id = ? AND status IN (' . $placeholders . ')');
+        $stmt->execute($params);
+        $deletedCount = $stmt->rowCount();
+        if ($deletedCount <= 0) {
+            throw new RuntimeException('Job-Status geändert, Löschung abgebrochen.');
+        }
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
 
     $logger('Job #' . $jobId . ' gelöscht.');
     sv_audit_log($pdo, 'job_delete', 'jobs', $jobId, [
-        'previous_status' => $status,
-        'job_type'        => (string)($job['type'] ?? ''),
+        'previous_status' => (string)($job['status'] ?? ''),
+        'checked_status'  => $currentStatus,
+        'job_type'        => $currentType,
     ]);
 
     return [
-        'job_id'  => $jobId,
-        'status'  => $status,
-        'deleted' => true,
+        'job_id'       => $jobId,
+        'status'       => $currentStatus,
+        'job_type'     => $currentType,
+        'deleted'      => $deletedCount > 0,
+        'deleted_count'=> $deletedCount,
     ];
 }
 
@@ -3686,47 +3950,95 @@ function sv_prune_jobs(PDO $pdo, array $criteria, callable $logger): array
         }
     }
 
-    $countsByStatus = [];
-    $countsByType = [];
     $ids = [];
     foreach ($candidates as $row) {
         $id = (int)($row['id'] ?? 0);
         if ($id <= 0) {
             continue;
         }
-        $status = (string)($row['status'] ?? '');
-        $type = (string)($row['type'] ?? '');
-        $countsByStatus[$status] = ($countsByStatus[$status] ?? 0) + 1;
-        $countsByType[$type] = ($countsByType[$type] ?? 0) + 1;
         $ids[] = $id;
     }
+
+    $deletedTotal = 0;
+    $skipped = 0;
+    $deletedByStatus = [];
+    $deletedByType = [];
 
     if ($ids !== []) {
         $chunks = array_chunk($ids, 200);
         foreach ($chunks as $chunk) {
-            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
-            $del = $pdo->prepare('DELETE FROM jobs WHERE id IN (' . $placeholders . ')');
-            foreach ($chunk as $idx => $id) {
-                $del->bindValue($idx + 1, $id, PDO::PARAM_INT);
+            $pdo->beginTransaction();
+            try {
+                $chunkPlaceholders = implode(',', array_fill(0, count($chunk), '?'));
+                $statusPlaceholders = implode(',', array_fill(0, count($statuses), '?'));
+                $select = $pdo->prepare(
+                    'SELECT id, type, status FROM jobs WHERE id IN (' . $chunkPlaceholders . ')'
+                    . ' AND status IN (' . $statusPlaceholders . ')'
+                );
+                $pos = 1;
+                foreach ($chunk as $id) {
+                    $select->bindValue($pos++, $id, PDO::PARAM_INT);
+                }
+                foreach ($statuses as $status) {
+                    $select->bindValue($pos++, $status, PDO::PARAM_STR);
+                }
+                $select->execute();
+                $rowsToDelete = $select->fetchAll(PDO::FETCH_ASSOC);
+
+                $deleteIds = [];
+                foreach ($rowsToDelete as $row) {
+                    $deleteIds[] = (int)$row['id'];
+                    $status = (string)($row['status'] ?? '');
+                    $type = (string)($row['type'] ?? '');
+                    $deletedByStatus[$status] = ($deletedByStatus[$status] ?? 0) + 1;
+                    $deletedByType[$type] = ($deletedByType[$type] ?? 0) + 1;
+                }
+                $skipped += count($chunk) - count($deleteIds);
+
+                if ($deleteIds !== []) {
+                    $deletePlaceholders = implode(',', array_fill(0, count($deleteIds), '?'));
+                    $delete = $pdo->prepare(
+                        'DELETE FROM jobs WHERE id IN (' . $deletePlaceholders . ') AND status IN (' . $statusPlaceholders . ')'
+                    );
+                    $pos = 1;
+                    foreach ($deleteIds as $id) {
+                        $delete->bindValue($pos++, $id, PDO::PARAM_INT);
+                    }
+                    foreach ($statuses as $status) {
+                        $delete->bindValue($pos++, $status, PDO::PARAM_STR);
+                    }
+                    $delete->execute();
+                    $deletedTotal += $delete->rowCount();
+                }
+
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $e;
             }
-            $del->execute();
         }
     }
 
-    $logger('Jobs bereinigt: ' . count($ids) . ' gelöscht.');
+    $logger('Jobs bereinigt: ' . $deletedTotal . ' gelöscht, ' . $skipped . ' übersprungen.');
     sv_audit_log($pdo, 'jobs_pruned', 'jobs', null, [
         'types'           => $types,
         'older_than_days' => $olderThanDays,
         'keep_last'       => $keepLast,
-        'deleted_total'   => count($ids),
-        'by_status'       => $countsByStatus,
-        'by_type'         => $countsByType,
+        'candidates_total'=> count($ids),
+        'deleted_total'   => $deletedTotal,
+        'skipped_total'   => $skipped,
+        'by_status'       => $deletedByStatus,
+        'by_type'         => $deletedByType,
     ]);
 
     return [
-        'deleted_total' => count($ids),
-        'by_status'     => $countsByStatus,
-        'by_type'       => $countsByType,
+        'candidates_total' => count($ids),
+        'deleted_total'    => $deletedTotal,
+        'skipped_total'    => $skipped,
+        'by_status'        => $deletedByStatus,
+        'by_type'          => $deletedByType,
     ];
 }
 
@@ -5319,9 +5631,11 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
     }
 
     $now = date('c');
-    $existingStmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
-    $existingStmt->execute([':id' => $jobId]);
-    $existingJson = $existingStmt->fetchColumn();
+    $existingJson = sv_db_exec_retry(static function () use ($pdo, $jobId) {
+        $existingStmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
+        $existingStmt->execute([':id' => $jobId]);
+        return $existingStmt->fetchColumn();
+    });
     $existingData = is_string($existingJson) ? json_decode($existingJson, true) : null;
     $existingData = is_array($existingData) ? $existingData : [];
 
@@ -5351,16 +5665,18 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
         $responseJson = json_encode($responseData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 
-    $stmt = $pdo->prepare(
-        'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at WHERE id = :id'
-    );
-    $stmt->execute([
-        ':status'     => $status,
-        ':response'   => $responseJson,
-        ':error'      => $error,
-        ':updated_at' => $now,
-        ':id'         => $jobId,
-    ]);
+    sv_db_exec_retry(static function () use ($pdo, $status, $responseJson, $error, $now, $jobId): void {
+        $stmt = $pdo->prepare(
+            'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at WHERE id = :id'
+        );
+        $stmt->execute([
+            ':status'     => $status,
+            ':response'   => $responseJson,
+            ':error'      => $error,
+            ':updated_at' => $now,
+            ':id'         => $jobId,
+        ]);
+    });
 }
 
 function sv_format_job_age(?int $seconds): ?string

@@ -896,6 +896,14 @@ function sv_scan_with_local_scanner(
         ? (string)($scannerCfg['batch_endpoint'] ?? '/batch')
         : '/check';
     $fieldName = $mediaType === 'video' ? 'file' : 'image';
+    $connectTimeout = isset($scannerCfg['connect_timeout']) ? (int)$scannerCfg['connect_timeout'] : 5;
+    $timeout = isset($scannerCfg['timeout']) ? (int)$scannerCfg['timeout'] : 30;
+    if ($connectTimeout <= 0) {
+        $connectTimeout = 5;
+    }
+    if ($timeout <= 0) {
+        $timeout = 30;
+    }
 
     if ($logger) {
         $logger('Scanner-Aufruf mit Auth=' . $authMode . ' Endpoint=' . $endpoint . ' Feld=' . $fieldName);
@@ -916,7 +924,8 @@ function sv_scan_with_local_scanner(
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, (int)($scannerCfg['timeout'] ?? 30));
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $connectTimeout);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
 
     $headers = [
         'Accept: application/json',
@@ -932,6 +941,9 @@ function sv_scan_with_local_scanner(
     $resp = curl_exec($ch);
     if ($resp === false) {
         $err = curl_error($ch);
+        $errno = curl_errno($ch);
+        $timeoutCode = defined('CURLE_OPERATION_TIMEDOUT') ? CURLE_OPERATION_TIMEDOUT : 28;
+        $isTimeout = $errno === $timeoutCode || (is_string($err) && stripos($err, 'timed out') !== false);
         curl_close($ch);
         if ($logger) {
             $logger("Scanner CURL-Fehler: {$err}");
@@ -939,8 +951,8 @@ function sv_scan_with_local_scanner(
         $errorMeta = [
             'http_status' => null,
             'endpoint'    => $endpoint,
-            'error'       => $err,
-            'error_code'  => 'curl_error',
+            'error'       => $isTimeout ? 'scanner_timeout' : $err,
+            'error_code'  => $isTimeout ? 'scanner_timeout' : 'curl_error',
             'body_snippet'=> null,
             'response_type_detected' => 'curl_error',
         ];
@@ -2510,6 +2522,14 @@ function sv_rescan_media(
     }
 
     $scanData  = sv_scan_with_local_scanner($fullPath, $scannerCfg, $logger, $logContext, $pathsCfg);
+    if ($cancelCheck && $cancelCheck()) {
+        $resultMeta['error'] = 'canceled';
+        $resultMeta['canceled'] = true;
+        if ($logger) {
+            $logger("Media ID {$id}: Rescan abgebrochen (Cancel-Signal nach Scanner-Call).");
+        }
+        return false;
+    }
     if (empty($scanData['ok'])) {
         if ($logger) {
             $logger("Media ID {$id}: Scanner fehlgeschlagen.");
@@ -2523,6 +2543,9 @@ function sv_rescan_media(
             'response_type_detected' => 'none',
         ];
         $resultMeta['error'] = sv_scanner_format_error_message($errorMeta);
+        if (($errorMeta['error_code'] ?? null) === 'scanner_timeout') {
+            $resultMeta['short_error'] = 'scanner_timeout';
+        }
         $scanMeta = sv_merge_scan_result_meta([
             'tags_written' => 0,
             'path_before'  => $fullPath,

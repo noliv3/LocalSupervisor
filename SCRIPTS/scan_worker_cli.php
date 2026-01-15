@@ -90,7 +90,15 @@ $logger = function (string $msg): void {
 };
 
 try {
-    $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger, $pathFilter, $mediaId);
+    $options = [];
+    if ($limit === null || $limit <= 0) {
+        $limit = 11;
+        $options = [
+            'backfill_limit' => 1,
+            'rescan_limit'   => 10,
+        ];
+    }
+    $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger, $pathFilter, $mediaId, $options);
     $line = sprintf(
         'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Rescan: %d | Scan: %d | Backfill: %d',
         (int)($summary['total'] ?? 0),
