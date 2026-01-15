@@ -2225,7 +2225,8 @@ function sv_run_scan_path(
     array $scannerCfg,
     float $nsfwThreshold,
     ?callable $logger = null,
-    ?int $limit = null
+    ?int $limit = null,
+    ?callable $cancelCheck = null
 ): array {
     $inputReal = realpath($inputPath);
     if ($inputReal === false) {
@@ -2250,7 +2251,12 @@ function sv_run_scan_path(
             $limit = null;
         }
 
-        if ($limit !== null && $handledTotal >= $limit) {
+        if ($cancelCheck && $cancelCheck()) {
+            $limitReached = false;
+            if ($logger) {
+                $logger('Scan abgebrochen (Cancel-Signal).');
+            }
+        } elseif ($limit !== null && $handledTotal >= $limit) {
             $limitReached = true;
         } else {
             if ($logger) {
@@ -2283,6 +2289,7 @@ function sv_run_scan_path(
             'processed' => $processed,
             'skipped'   => $skipped,
             'errors'    => $errors,
+            'canceled'  => $cancelCheck ? (bool)$cancelCheck() : false,
         ];
     }
 
@@ -2310,6 +2317,7 @@ function sv_run_scan_path(
     $skipLog = [];
 
     $stack = [$inputReal];
+    $canceled = false;
     while ($stack) {
         $dir = array_pop($stack);
 
@@ -2323,6 +2331,13 @@ function sv_run_scan_path(
         }
 
         foreach ($entries as $entry) {
+            if ($cancelCheck && $cancelCheck()) {
+                $canceled = true;
+                if ($logger) {
+                    $logger('Scan abgebrochen (Cancel-Signal).');
+                }
+                break 2;
+            }
             if ($entry === '.' || $entry === '..') {
                 continue;
             }
@@ -2391,6 +2406,7 @@ function sv_run_scan_path(
         'processed' => $processed,
         'skipped'   => $skipped,
         'errors'    => $errors,
+        'canceled'  => $canceled,
     ];
 }
 
@@ -2404,7 +2420,8 @@ function sv_rescan_media(
     array $scannerCfg,
     float $nsfwThreshold,
     ?callable $logger = null,
-    ?array &$resultMeta = null
+    ?array &$resultMeta = null,
+    ?callable $cancelCheck = null
 ): bool {
     $id   = (int)$mediaRow['id'];
     $path = (string)$mediaRow['path'];
@@ -2423,7 +2440,17 @@ function sv_rescan_media(
         'path_before'  => $path,
         'path_after'   => $path,
         'error'        => null,
+        'canceled'     => false,
     ];
+
+    if ($cancelCheck && $cancelCheck()) {
+        $resultMeta['error'] = 'canceled';
+        $resultMeta['canceled'] = true;
+        if ($logger) {
+            $logger("Media ID {$id}: Rescan abgebrochen (Cancel-Signal).");
+        }
+        return false;
+    }
 
     $fullPath = str_replace('\\', '/', $path);
     $logContext = [
@@ -2608,6 +2635,15 @@ function sv_rescan_media(
     }
 
     $resultMeta['path_after'] = $newPath;
+
+    if ($cancelCheck && $cancelCheck()) {
+        $resultMeta['error'] = 'canceled';
+        $resultMeta['canceled'] = true;
+        if ($logger) {
+            $logger("Media ID {$id}: Rescan vor Persistenz abgebrochen (Cancel-Signal).");
+        }
+        return false;
+    }
 
     try {
         $pdo->beginTransaction();

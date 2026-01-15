@@ -111,6 +111,7 @@
 - Web-Schicht führt keine direkten SQL-Manipulationen auf Jobs aus, sondern ruft die Operations-Helper auf.
 - Neue Job-Typen müssen ihre Steuerlogik an die Job-API in `operations.php` anbinden.
 - Laufende Jobs, die länger als ~30 Minuten kein Update erhalten, werden automatisch mit `job_stuck_timeout` auf `error` gesetzt (aktuell für Forge/Scan/Rescan).
+- Cancel/Delete/Prune für Scan-Jobs laufen über Operations-Helper; Delete/Prune nur in `done/error/canceled`.
 
 ## Job Robustness Contract
 - **Zustandsmaschine**: `queued` → `running` → `done/error` (oder `canceled`) plus `stuck-marked` als Flag auf Fehlerfällen. `started_at` wird genau einmal beim Übergang auf `running` gesetzt, `finished_at` immer bei `done/error/canceled`; beide Zeitstempel liegen in `jobs.forge_response_json` und werden in UI/Jobs ausgewertet.
@@ -123,6 +124,7 @@
 - Web-Einstiege (Dashboard/Media-Ansichten) dürfen Scans nur einreihen und ggf. einen Worker starten, niemals direkt scannen.
 - Scanner/Import-Logik bleibt in `scan_core.php`; Worker/Queue-Handling gehört nach `operations.php` und `SCRIPTS/scan_worker_cli.php`.
 - Einzel-Rescan läuft als Job (`rescan_media`) und wird ebenfalls über `scan_worker_cli.php` abgearbeitet (`--media-id=<id>` unterstützt).
+- Backfill „ohne Tags“ läuft als Job (`scan_backfill_tags`), der Rescan-Jobs in Chunks einreiht.
 
 ## Integritäts- und Reparaturfunktionen
 - Integritätsprüfungen und Reparaturen müssen vollständig über `SCRIPTS/operations.php` laufen.
@@ -159,7 +161,7 @@
 - **Zweck**: `WWW/index.php` ist der klare Operator-Startpunkt (kein Debug-/Statistik-View).
 - **Abschnitte**: Header/Start (Galerie + Anker), Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf.
 - **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) sowie letzte Audit-Events in Kurzform.
-- **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned über das Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, keine neuen Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
+- **Aktionen**: Scan-Path-Batch, Rescan unscanned sowie Backfill „ohne Tags“ über das Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, keine neuen Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
 ## Update Center Contract
 - `start.ps1` führt alle 3 Stunden `git fetch` aus, berechnet ahead/behind/dirty und schreibt den Status nach `LOGS/git_status.json` (Runtime-File).
