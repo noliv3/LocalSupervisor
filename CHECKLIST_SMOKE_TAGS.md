@@ -10,6 +10,7 @@ curl -X POST "http://localhost:8000/index.php" \
   -d "backfill_max=1000" \
   -d "internal_key=<INTERNAL_KEY>"
 ```
+> Hinweis: `backfill_chunk` wird serverseitig auf max. 500 begrenzt (Default 200).
 
 ## 2) Jobs prüfen (Scan-Job-Liste)
 ```
@@ -25,6 +26,7 @@ curl -X POST "http://localhost:8000/index.php?ajax=job_cancel&id=<JOB_ID>&intern
 ```
 sqlite3 <DB_PATH> "SELECT media_id, COUNT(*) FROM jobs WHERE type='rescan_media' AND status IN ('queued','running') GROUP BY media_id HAVING COUNT(*) > 1;"
 ```
+> Hinweis: `rescan_limit` wird serverseitig auf max. 500 begrenzt (Default 200).
 
 ## 5) Delete eines fertigen Jobs
 ```

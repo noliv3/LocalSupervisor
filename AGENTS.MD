@@ -124,7 +124,9 @@
 - Web-Einstiege (Dashboard/Media-Ansichten) dürfen Scans nur einreihen und ggf. einen Worker starten, niemals direkt scannen.
 - Scanner/Import-Logik bleibt in `scan_core.php`; Worker/Queue-Handling gehört nach `operations.php` und `SCRIPTS/scan_worker_cli.php`.
 - Einzel-Rescan läuft als Job (`rescan_media`) und wird ebenfalls über `scan_worker_cli.php` abgearbeitet (`--media-id=<id>` unterstützt).
-- Backfill „ohne Tags“ läuft als Job (`scan_backfill_tags`), der Rescan-Jobs in Chunks einreiht.
+- Backfill „ohne Tags“ läuft als Job (`scan_backfill_tags`), der Rescan-Jobs in Chunks einreiht; pro Worker-Tick gilt ein Enqueue-Cap (Default 200) mit Cursor-Checkpoint im Job-Payload.
+- Dashboard-Enqueue begrenzt `rescan_limit`/`backfill_chunk` serverseitig (Default 200, Max 500).
+- Der Scan-Worker verarbeitet pro Tick standardmäßig höchstens 1 Backfill-Job und bis zu 10 Rescans, bevor er beendet wird.
 
 ## Integritäts- und Reparaturfunktionen
 - Integritätsprüfungen und Reparaturen müssen vollständig über `SCRIPTS/operations.php` laufen.

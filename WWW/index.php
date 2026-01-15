@@ -247,8 +247,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $limit   = isset($_POST['rescan_limit']) ? (int)$_POST['rescan_limit'] : null;
             $offset  = isset($_POST['rescan_offset']) ? (int)$_POST['rescan_offset'] : null;
 
-            if ($limit !== null && $limit <= 0) {
-                $limit = null;
+            if ($limit === null || $limit <= 0) {
+                $limit = 200;
+            }
+            if ($limit > 500) {
+                $limit = 500;
             }
             if ($offset !== null && $offset < 0) {
                 $offset = null;
@@ -263,11 +266,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
                 }
                 $actionMessage = sprintf(
-                    'Rescan-Jobs eingereiht: total %d, created %d, deduped %d, errors %d.',
+                    'Rescan-Jobs eingereiht: total %d, created %d, deduped %d, errors %d. Limit angewandt: %d.',
                     (int)($result['total'] ?? 0),
                     (int)($result['created'] ?? 0),
                     (int)($result['deduped'] ?? 0),
-                    (int)($result['errors'] ?? 0)
+                    (int)($result['errors'] ?? 0),
+                    $limit
                 );
                 sv_audit_log($pdo, 'rescan_start', 'fs', null, [
                     'limit'      => $limit,
@@ -286,6 +290,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $max   = isset($_POST['backfill_max']) ? (int)$_POST['backfill_max'] : null;
             if ($chunk <= 0) {
                 $chunk = 200;
+            }
+            if ($chunk > 500) {
+                $chunk = 500;
             }
             if ($max !== null && $max <= 0) {
                 $max = null;
@@ -307,7 +314,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         '_sv_worker_started_at' => $worker['started'],
                     ]);
                 }
-                $actionMessage = 'Backfill-Job eingereiht: #' . (int)($result['job_id'] ?? 0) . '.';
+                $actionMessage = 'Backfill-Job eingereiht: #' . (int)($result['job_id'] ?? 0) . '. Limit angewandt: ' . $chunk . '.';
                 if (!empty($result['deduped'])) {
                     $actionMessage .= ' (bereits vorhanden)';
                 }
