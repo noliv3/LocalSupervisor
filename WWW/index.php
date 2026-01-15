@@ -46,7 +46,94 @@ $jobCenterLog  = [];
 $knownActions = [
     'scan_start'   => 'Scan gestartet',
     'rescan_start' => 'Rescan gestartet',
+    'backfill_no_tags' => 'Backfill gestartet',
 ];
+
+if (is_string($_GET['ajax'] ?? null) && trim((string)$_GET['ajax']) !== '') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    if (!$pdo instanceof PDO) {
+        http_response_code(503);
+        echo json_encode([
+            'ok'    => false,
+            'error' => 'Keine DB-Verbindung.',
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    sv_require_internal_access($config, 'dashboard_ajax');
+
+    $ajaxAction = trim((string)$_GET['ajax']);
+    try {
+        if ($ajaxAction === 'jobs_list') {
+            $type = is_string($_GET['type'] ?? null) ? trim((string)$_GET['type']) : '';
+            if ($type !== 'scan') {
+                throw new InvalidArgumentException('Ungültiger Job-Typ.');
+            }
+            $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 30;
+            $jobs = sv_fetch_scan_related_jobs($pdo, $limit);
+            echo json_encode([
+                'ok'          => true,
+                'server_time' => date('c'),
+                'jobs'        => $jobs,
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($ajaxAction === 'job_cancel') {
+            $jobId = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+            $logger = sv_operation_logger(null, $jobCenterLog);
+            if ($jobId <= 0) {
+                throw new InvalidArgumentException('Job-ID fehlt oder ist ungültig.');
+            }
+            $result = sv_cancel_job($pdo, $jobId, $logger);
+            echo json_encode([
+                'ok'     => true,
+                'result' => $result,
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($ajaxAction === 'job_delete') {
+            $jobId = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+            $logger = sv_operation_logger(null, $jobCenterLog);
+            if ($jobId <= 0) {
+                throw new InvalidArgumentException('Job-ID fehlt oder ist ungültig.');
+            }
+            $result = sv_delete_job($pdo, $jobId, $logger);
+            echo json_encode([
+                'ok'     => true,
+                'result' => $result,
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ($ajaxAction === 'jobs_prune') {
+            $olderThanDays = isset($_POST['older_than_days']) ? (int)$_POST['older_than_days'] : null;
+            $keepLast = isset($_POST['keep_last']) ? (int)$_POST['keep_last'] : 0;
+            $logger = sv_operation_logger(null, $jobCenterLog);
+            $result = sv_prune_jobs($pdo, [
+                'types'           => sv_scan_job_types(),
+                'older_than_days' => $olderThanDays,
+                'keep_last'       => $keepLast,
+            ], $logger);
+            echo json_encode([
+                'ok'     => true,
+                'result' => $result,
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        throw new InvalidArgumentException('Ungültige AJAX-Aktion.');
+    } catch (Throwable $e) {
+        http_response_code(400);
+        echo json_encode([
+            'ok'    => false,
+            'error' => sv_sanitize_error_message($e->getMessage()),
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$pdo instanceof PDO) {
@@ -55,7 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         sv_require_internal_access($config, 'dashboard_action');
 
         $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-        $allowedActions = ['scan_path', 'rescan_db', 'job_requeue', 'job_cancel', 'update_center'];
+        $allowedActions = ['scan_path', 'rescan_db', 'backfill_no_tags', 'job_requeue', 'job_cancel', 'update_center'];
 
         if (!in_array($action, $allowedActions, true)) {
             $actionError = 'Ungültige Aktion.';
@@ -170,16 +257,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             [$logFile, $logger] = sv_create_operation_log($config, 'rescan', $logLines, 50);
 
             try {
-                sv_run_rescan_operation($pdo, $config, $limit, $offset, $logger);
-                $actionMessage = 'Rescan abgeschlossen.';
+                $result = sv_enqueue_rescan_unscanned_jobs($pdo, $config, $limit, $offset, $logger);
+                $worker = null;
+                if (($result['total'] ?? 0) > 0) {
+                    $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
+                }
+                $actionMessage = sprintf(
+                    'Rescan-Jobs eingereiht: total %d, created %d, deduped %d, errors %d.',
+                    (int)($result['total'] ?? 0),
+                    (int)($result['created'] ?? 0),
+                    (int)($result['deduped'] ?? 0),
+                    (int)($result['errors'] ?? 0)
+                );
                 sv_audit_log($pdo, 'rescan_start', 'fs', null, [
                     'limit'      => $limit,
                     'offset'     => $offset,
                     'log_file'   => $logFile,
+                    'queued'     => $result,
+                    'worker_pid' => $worker['pid'] ?? null,
+                    'worker_note'=> $worker && !empty($worker['unknown']) ? 'pid_unknown' : 'pid_recorded',
                     'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
                 ]);
             } catch (Throwable $e) {
                 $actionError = 'Rescan-Fehler: ' . $e->getMessage();
+            }
+        } elseif ($action === 'backfill_no_tags') {
+            $chunk = isset($_POST['backfill_chunk']) ? (int)$_POST['backfill_chunk'] : 200;
+            $max   = isset($_POST['backfill_max']) ? (int)$_POST['backfill_max'] : null;
+            if ($chunk <= 0) {
+                $chunk = 200;
+            }
+            if ($max !== null && $max <= 0) {
+                $max = null;
+            }
+
+            [$logFile, $logger] = sv_create_operation_log($config, 'backfill_no_tags', $logLines, 50);
+
+            try {
+                $result = sv_create_scan_backfill_job($pdo, $config, [
+                    'mode'  => 'no_tags',
+                    'chunk' => $chunk,
+                    'max'   => $max,
+                ], $logger);
+                $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
+                $jobId = (int)($result['job_id'] ?? 0);
+                if ($jobId > 0) {
+                    sv_merge_job_response_metadata($pdo, $jobId, [
+                        '_sv_worker_pid'        => $worker['pid'],
+                        '_sv_worker_started_at' => $worker['started'],
+                    ]);
+                }
+                $actionMessage = 'Backfill-Job eingereiht: #' . (int)($result['job_id'] ?? 0) . '.';
+                if (!empty($result['deduped'])) {
+                    $actionMessage .= ' (bereits vorhanden)';
+                }
+            } catch (Throwable $e) {
+                $actionError = 'Backfill-Fehler: ' . $e->getMessage();
             }
         } elseif ($action === 'job_requeue') {
             $jobId = isset($_POST['job_id']) ? (int)$_POST['job_id'] : 0;
@@ -514,7 +647,25 @@ function sv_badge_class(string $status): string
                         <button type="submit" class="btn btn--primary btn--sm">Rescan starten</button>
                     </div>
                 </form>
+                    <div class="muted">Reiht Jobs für Medien ohne Scan-Ergebnis ein (kein Scan im Request).</div>
                     <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['rescan_start'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+                </div>
+
+                <div class="operator-card">
+                    <h3>Backfill Tags (ohne Tags)</h3>
+                    <form method="post">
+                        <input type="hidden" name="action" value="backfill_no_tags">
+                        <div class="inline-fields">
+                            <input type="number" name="backfill_chunk" min="1" step="1" placeholder="Chunk" value="200">
+                        <input type="number" name="backfill_max" min="1" step="1" placeholder="Max">
+                        <?php if ($internalKey !== ''): ?>
+                            <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                        <?php endif; ?>
+                        <button type="submit" class="btn btn--primary btn--sm">Backfill starten</button>
+                    </div>
+                </form>
+                    <div class="muted">Scant Medien ohne Tags über die Job-Queue (asynchron).</div>
+                    <div class="muted">Letzter Lauf: <?= htmlspecialchars((string)($lastRuns['backfill_no_tags'] ?? '—'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                 </div>
 
                 <div class="operator-card">
@@ -536,6 +687,23 @@ function sv_badge_class(string $status): string
             <?php if (!$hasInternalAccess): ?>
                 <div class="muted">Aktionen erfordern Internal-Key + IP-Whitelist.</div>
             <?php endif; ?>
+        </section>
+
+        <section id="scan-jobs" class="card" data-scan-jobs data-endpoint="index.php?ajax=jobs_list&amp;type=scan" data-manage="<?= $hasInternalAccess ? 'true' : 'false' ?>">
+            <h2 class="section-title">Scan-Jobs</h2>
+            <div class="line">
+                <span class="muted" data-scan-jobs-poll>Polling inaktiv.</span>
+                <button type="button" class="btn btn--xs btn--secondary" data-scan-jobs-refresh>Refresh</button>
+            </div>
+            <div class="job-list" data-scan-jobs-list>
+                <div class="muted">Lade Scan-Jobs…</div>
+            </div>
+            <form class="inline-fields" data-scan-jobs-prune>
+                <input type="number" name="older_than_days" min="1" step="1" placeholder="Älter als (Tage)">
+                <input type="number" name="keep_last" min="0" step="1" placeholder="Keep last" value="0">
+                <button type="submit" class="btn btn--xs btn--ghost">Prune finished</button>
+            </form>
+            <div class="muted">Cancel/Delete nur für scanbezogene Jobs, Delete/Prune nur in done/error/canceled.</div>
         </section>
 
         <section id="job-center" class="card">

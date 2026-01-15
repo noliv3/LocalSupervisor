@@ -388,7 +388,7 @@ Die folgenden Nachweise sind im Betrieb noch zu erbringen und wurden in dieser D
 - **Zweck**: `WWW/index.php` ist der klare Operator-Startpunkt (kein Debug-View, keine Statistik-Wüsten).
 - **Abschnitte**: Header/Start (Galerie + Anker), Health Snapshot, Job-Center, Operator-Aktionen, Ereignisverlauf.
 - **Garantierte Daten**: Galerie-Link, DB/Job/Scan-Health (inkl. stuck jobs, letzter Fehler, letzter Scan), Job-Queues (running/queued/stuck/recent done|error) und letzte Audit-Events in Kurzform.
-- **Aktionen**: Nur Scan-Path-Batch und Rescan unscanned via Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, nicht als neue Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
+- **Aktionen**: Scan-Path-Batch, Rescan unscanned sowie Backfill „ohne Tags“ via Dashboard. Scan-Path-Batch akzeptiert mehrere Pfade (ein Pfad pro Zeile, Ordner oder Datei). Forge-Worker und Konsistenzcheck werden als Status/Quick-Link angezeigt, nicht als neue Web-Tools. Internal-Key/IP-Whitelist bleibt Pflicht für alle Web-Schreibaktionen.
 
 ## Update Center (Dashboard)
 - `start.ps1` schreibt alle 3 Stunden einen Git-Status (`git fetch` + ahead/behind/dirty) nach `LOGS/git_status.json`.
@@ -458,6 +458,7 @@ Die folgenden Nachweise sind im Betrieb noch zu erbringen und wurden in dieser D
 | Endpoint | Zweck | Internal-Key |
 | --- | --- | --- |
 | `WWW/index.php` (Action-POSTs) | Scan/Rescan/Job-Recovery (Requeue/Cancel) | erforderlich |
+| `WWW/index.php?ajax=jobs_list|job_cancel|job_delete|jobs_prune` | Scan-Job-Liste, Cancel/Delete/Prune | erforderlich |
 | `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Curation, Rescan-Job | erforderlich |
 | `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status für Detailansicht | erforderlich |
 | `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status für Detailansicht | erforderlich |
@@ -499,8 +500,9 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 ## Asynchrone Scans
 
 - Web-Trigger für Scans/Rescan legen Jobs (`scan_path`, `rescan_media`) in die Queue und starten automatisch einen dedizierten Worker im Hintergrund.
+- Backfill für „ohne Tags“ läuft über den Job-Typ `scan_backfill_tags` und reiht daraus Rescan-Jobs in Chunks ein; UI-Trigger im Dashboard ist rein enqueue-only.
 - Der Worker läuft rein im CLI-Kontext (`SCRIPTS/scan_worker_cli.php`) und zieht queued/running-Jobs ohne Web-Timeouts ab, Status landet in `jobs.status/forge_response_json`; `--media-id=<id>` verarbeitet gezielt einen Rescan-Job.
-- Jobs mit Status `running`, die länger als ~30 Minuten kein Update erhalten, werden mit `job_stuck_timeout` auf `error` gesetzt.
+- Jobs mit Status `running`, die länger als ~30 Minuten kein Update erhalten, werden mit `job_stuck_timeout` auf `error` gesetzt; Scan-Jobs unterstützen Cancel/Delete/Prune (fertige Zustände).
 - Beispiel: `php SCRIPTS/scan_worker_cli.php --path="/data/import" --limit=5` verarbeitet maximal fünf anstehende Scans für den angegebenen Wurzelpfad.
 
 ## Job Robustness Contract
@@ -594,6 +596,7 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 - Pro Job werden Typ, Medium, Start/Age, Finish, Status, Kurzfehler und vorhandene Requeue/Cancel-Aktionen angezeigt (Internal-Key/IP-Whitelist erforderlich).
 - Steuerung: „Requeue“ für `error`/`done`/`canceled`, „Cancel“ für `queued`/`running`; Schreibaktionen erfordern Internal-Key/IP-Whitelist und rufen ausschließlich `SCRIPTS/operations.php`.
 - Verarbeitung der Jobs bleibt beim CLI-Worker (`forge_worker_cli.php`), die Weboberfläche erzeugt oder manipuliert keine Forge-Aufrufe direkt.
+- Zusätzlich listet der Scan-Jobs-Block die letzten Scan-Job-Typen (`scan_path`, `rescan_media`, `scan_backfill_tags`) mit Cancel/Delete/Prune (nur fertige Zustände für Delete/Prune).
 
 ## Hashbasierte Library, Dupes und Rename-Backfill
 - **Dateiablage**: Neu importierte Medien landen hashbasiert unter `<hh>/<hash>.<ext>` (erste zwei Hex-Zeichen als Ordner). Pfade werden zentral über `sv_resolve_library_path` erzeugt.

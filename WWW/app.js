@@ -529,6 +529,188 @@
         loadState();
     }
 
+    function initScanJobsPanel() {
+        const panel = document.querySelector('[data-scan-jobs]');
+        if (!panel) return;
+
+        const endpoint = panel.dataset.endpoint || '';
+        const canManage = panel.dataset.manage === 'true';
+        const list = panel.querySelector('[data-scan-jobs-list]');
+        const pollMeta = panel.querySelector('[data-scan-jobs-poll]');
+        const refreshBtn = panel.querySelector('[data-scan-jobs-refresh]');
+        const pruneForm = panel.querySelector('[data-scan-jobs-prune]');
+        if (!endpoint || !list) return;
+        if (!canManage) {
+            list.innerHTML = '<div class="muted">Internal-Key erforderlich.</div>';
+            return;
+        }
+
+        const activeStatuses = ['queued', 'running'];
+        let pollTimer = null;
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function badge(status) {
+            const normalized = (status || '').toLowerCase();
+            if (['done', 'ok'].includes(normalized)) return 'badge badge--ok';
+            if (['error', 'failed'].includes(normalized)) return 'badge badge--error';
+            if (['queued', 'running', 'pending'].includes(normalized)) return 'badge badge--info';
+            if (['canceled'].includes(normalized)) return 'badge badge--warn';
+            return 'badge';
+        }
+
+        function renderJobs(jobs) {
+            if (!jobs.length) {
+                list.innerHTML = '<div class="muted">Keine Scan-Jobs.</div>';
+                return;
+            }
+
+            const cards = jobs.map((job) => {
+                const status = job.status || 'queued';
+                const type = job.type || 'scan';
+                const created = job.created_at || '—';
+                const started = job.started_at || '';
+                const finished = job.finished_at || '';
+                const media = job.media_id ? `Media #${job.media_id}` : null;
+                let meta = '';
+                if (type === 'scan_path') {
+                    const path = job.path ? `Pfad: ${escapeHtml(job.path)}` : '';
+                    const limit = job.limit ? `Limit: ${job.limit}` : '';
+                    meta = [path, limit].filter(Boolean).join(' · ');
+                } else if (type === 'rescan_media') {
+                    meta = media ? escapeHtml(media) : '';
+                } else if (type === 'scan_backfill_tags') {
+                    const progress = job.progress || {};
+                    const progressParts = [
+                        typeof progress.processed !== 'undefined' ? `processed ${progress.processed}` : null,
+                        typeof progress.enqueued !== 'undefined' ? `enqueued ${progress.enqueued}` : null,
+                        typeof progress.deduped !== 'undefined' ? `deduped ${progress.deduped}` : null,
+                    ].filter(Boolean);
+                    meta = [`Mode: ${escapeHtml(job.mode || 'no_tags')}`, progressParts.join(' · ')].filter(Boolean).join(' · ');
+                }
+
+                const actionButtons = [];
+                if (canManage && activeStatuses.includes(status.toLowerCase())) {
+                    actionButtons.push(`<button type="button" class="btn btn--xs btn--ghost" data-job-action="cancel" data-job-id="${job.id}">Cancel</button>`);
+                }
+                if (canManage && ['done', 'error', 'canceled'].includes(status.toLowerCase())) {
+                    actionButtons.push(`<button type="button" class="btn btn--xs btn--secondary" data-job-action="delete" data-job-id="${job.id}">Delete</button>`);
+                }
+
+                const errorLine = job.error ? `<div class="job-error">Fehler: ${escapeHtml(job.error)}</div>` : '';
+                const timeLine = `${escapeHtml(created)}${started ? ` → ${escapeHtml(started)}` : ''}${finished ? ` → ${escapeHtml(finished)}` : ''}`;
+
+                return `
+                    <div class="job-card">
+                        <div class="job-line">
+                            <span class="badge badge--info">#${job.id}</span>
+                            <span class="badge badge--info">${escapeHtml(type)}</span>
+                            <span class="${badge(status)}">${escapeHtml(status)}</span>
+                        </div>
+                        <div class="job-meta">Zeit: ${timeLine}</div>
+                        ${meta ? `<div class="job-meta">${meta}</div>` : ''}
+                        ${errorLine}
+                        ${actionButtons.length ? `<div class="job-actions">${actionButtons.join('')}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            list.innerHTML = cards.join('');
+        }
+
+        function updatePollMeta(active) {
+            if (!pollMeta) return;
+            const label = active ? 'laufend' : 'inaktiv';
+            pollMeta.textContent = `Letzter Poll: ${new Date().toISOString()} · ${label}`;
+        }
+
+        function scheduleNext(active) {
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+            }
+            if (active) {
+                pollTimer = setTimeout(loadJobs, 2000);
+            }
+            updatePollMeta(active);
+        }
+
+        function loadJobs() {
+            fetch(endpoint, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+                .then((resp) => {
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    return resp.json();
+                })
+                .then((data) => {
+                    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+                    renderJobs(jobs);
+                    const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
+                    scheduleNext(active);
+                })
+                .catch((err) => {
+                    list.innerHTML = `<div class="job-error">Scan-Jobs konnten nicht geladen werden (${escapeHtml(err.message)}).</div>`;
+                    scheduleNext(true);
+                });
+        }
+
+        function buildAjaxUrl(action, id) {
+            const url = new URL(endpoint, window.location.href);
+            url.searchParams.set('ajax', action);
+            if (id) {
+                url.searchParams.set('id', id);
+            } else {
+                url.searchParams.delete('id');
+            }
+            return url.toString();
+        }
+
+        panel.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-job-action]');
+            if (!button) return;
+            if (!canManage) return;
+            const action = button.dataset.jobAction || '';
+            const jobId = button.dataset.jobId || '';
+            if (!jobId) return;
+            if (action === 'cancel' && !window.confirm('Job wirklich abbrechen?')) return;
+            if (action === 'delete' && !window.confirm('Job wirklich löschen?')) return;
+
+            const ajaxAction = action === 'cancel' ? 'job_cancel' : 'job_delete';
+            fetch(buildAjaxUrl(ajaxAction, jobId), { method: 'POST', credentials: 'same-origin' })
+                .then((resp) => resp.json())
+                .then(() => loadJobs())
+                .catch(() => loadJobs());
+        });
+
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => loadJobs());
+        }
+
+        if (pruneForm) {
+            pruneForm.addEventListener('submit', (event) => {
+                event.preventDefault();
+                if (!canManage) return;
+                if (!window.confirm('Fertige Scan-Jobs wirklich prunen?')) return;
+                const formData = new FormData(pruneForm);
+                fetch(buildAjaxUrl('jobs_prune'), {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin',
+                })
+                    .then((resp) => resp.json())
+                    .then(() => loadJobs())
+                    .catch(() => loadJobs());
+            });
+        }
+
+        loadJobs();
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         initViewModeSelect();
         initTabs();
@@ -539,5 +721,6 @@
         initVideoTools();
         initForgeJobs();
         initRescanJobs();
+        initScanJobsPanel();
     });
 })();

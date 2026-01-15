@@ -92,12 +92,13 @@ $logger = function (string $msg): void {
 try {
     $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger, $pathFilter, $mediaId);
     $line = sprintf(
-        'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Rescan: %d | Scan: %d',
+        'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Rescan: %d | Scan: %d | Backfill: %d',
         (int)($summary['total'] ?? 0),
         (int)($summary['done'] ?? 0),
         (int)($summary['error'] ?? 0),
         (int)($summary['rescan'] ?? 0),
-        (int)($summary['scan'] ?? 0)
+        (int)($summary['scan'] ?? 0),
+        (int)($summary['backfill'] ?? 0)
     );
     fwrite(STDOUT, $line . PHP_EOL);
     exit(0);
