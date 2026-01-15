@@ -158,6 +158,67 @@ if ($ajaxAction === 'rescan_jobs') {
     exit;
 }
 
+if ($ajaxAction === 'forge_repair_start') {
+    header('Content-Type: application/json; charset=utf-8');
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo json_encode(['ok' => false, 'message' => 'Methode nicht erlaubt']);
+        exit;
+    }
+    sv_require_internal_access($config, 'media_view_forge_repair_start');
+    [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_repair', $actionLogs, 10);
+    try {
+        $postId = isset($_POST['media_id']) ? (int)$_POST['media_id'] : 0;
+        if ($postId !== $id) {
+            throw new RuntimeException('Media-ID stimmt nicht überein.');
+        }
+
+        $endpoint = sv_forge_endpoint_config($config, true);
+        if ($endpoint === null) {
+            throw new RuntimeException('Forge-Dispatch ist deaktiviert oder nicht konfiguriert.');
+        }
+        $health = sv_forge_healthcheck($endpoint, $logger);
+        if (!$health['ok']) {
+            sv_audit_log($pdo, 'forge_health_failed', 'media', $id, [
+                'http_status' => $health['http_code'] ?? null,
+                'target_url'  => $health['target_url'] ?? null,
+            ]);
+            throw new RuntimeException('Forge-Endpoint nicht erreichbar. Bitte später erneut versuchen.');
+        }
+
+        $options = [
+            'source'      => sv_limit_string((string)($_POST['source'] ?? ''), 20),
+            'goal'        => sv_limit_string((string)($_POST['goal'] ?? ''), 20),
+            'intensity'   => sv_limit_string((string)($_POST['intensity'] ?? ''), 20),
+            'tech_fix'    => sv_limit_string((string)($_POST['tech_fix'] ?? ''), 30),
+            'prompt_edit' => sv_limit_string((string)($_POST['prompt_edit'] ?? ''), 200),
+        ];
+
+        $result = sv_run_forge_repair_job($pdo, $config, $id, $options, $logger);
+        $jobId = (int)($result['job_id'] ?? 0);
+        echo json_encode([
+            'ok'      => true,
+            'job_id'  => $jobId,
+            'message' => 'Repair-Job #' . $jobId . ' wurde in die Warteschlange gestellt.',
+            'applied' => [
+                'source_used' => $result['repair_plan']['source_used'] ?? null,
+                'goal'        => $result['repair_plan']['goal'] ?? null,
+                'intensity'   => $result['repair_plan']['intensity'] ?? null,
+                'tech_fix'    => $result['repair_plan']['tech_fix'] ?? null,
+                'mode'        => $result['repair_plan']['mode'] ?? null,
+                'variants'    => $result['repair_plan']['variants'] ?? null,
+            ],
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    } catch (Throwable $e) {
+        http_response_code(400);
+        echo json_encode([
+            'ok'      => false,
+            'message' => 'Repair nicht möglich: ' . sv_sanitize_error_message($e->getMessage()),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         sv_require_internal_access($config, 'media_action');
@@ -1456,6 +1517,14 @@ $metaScanAt = $latestScanRunAt !== '' ? $latestScanRunAt : '–';
             <?php endif; ?>
 
             <div class="action-feedback">
+                <div class="action-feedback-title">Repair</div>
+                <div class="button-stack inline">
+                    <button class="btn btn--primary" type="button" id="forge-repair-open" <?= $forgeDisabled ? 'disabled' : '' ?>>Repair</button>
+                </div>
+                <div class="hint small">Öffnet das kompakte Repair-Panel (5 Controls + Start).</div>
+            </div>
+
+            <div class="action-feedback">
                 <div class="action-feedback-title">Operator Quick Actions</div>
                 <div class="button-stack inline">
                     <form method="post">
@@ -1579,6 +1648,56 @@ $metaScanAt = $latestScanRunAt !== '' ? $latestScanRunAt : '–';
                     <button class="btn btn--danger" type="submit" name="_sv_mode" value="replace" <?= $forgeDisabled ? 'disabled' : '' ?>>Replace sofort</button>
                 </div>
             </form>
+
+            <div id="forge-repair-modal" class="repair-modal is-hidden" data-endpoint="media_view.php?<?= http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'ajax' => 'forge_repair_start'])) ?>">
+                <div class="repair-modal__content panel" role="dialog" aria-modal="true" aria-labelledby="forge-repair-title">
+                    <div class="panel-header" id="forge-repair-title">Repair</div>
+                    <form id="forge-repair-form" class="repair-form">
+                        <input type="hidden" name="media_id" value="<?= (int)$id ?>">
+                        <div class="repair-grid">
+                            <label>Quelle
+                                <select name="source">
+                                    <option value="auto" selected>auto</option>
+                                    <option value="prompt">prompt</option>
+                                    <option value="tags">tags</option>
+                                    <option value="minimal">minimal</option>
+                                </select>
+                            </label>
+                            <label>Ziel
+                                <select name="goal">
+                                    <option value="repair" selected>repair</option>
+                                    <option value="rebuild">rebuild</option>
+                                    <option value="vary">vary</option>
+                                </select>
+                            </label>
+                            <label>Intensität
+                                <select name="intensity">
+                                    <option value="fast">fast</option>
+                                    <option value="normal" selected>normal</option>
+                                    <option value="strong">strong</option>
+                                </select>
+                            </label>
+                            <label>Technik-Fix
+                                <select name="tech_fix">
+                                    <option value="none" selected>none</option>
+                                    <option value="sampler_compat">sampler_compat</option>
+                                    <option value="black_reset">black_reset</option>
+                                    <option value="universal_negative">universal_negative</option>
+                                    <option value="normalize_size">normalize_size</option>
+                                </select>
+                            </label>
+                            <label>Prompt-Änderung
+                                <input type="text" name="prompt_edit" maxlength="200" placeholder="replace: banana -> apple">
+                            </label>
+                        </div>
+                        <div class="button-stack inline">
+                            <button class="btn btn--primary" type="submit" id="forge-repair-start">Start</button>
+                        </div>
+                        <div class="hint small">Klick außerhalb des Panels schließt den Dialog.</div>
+                        <div id="forge-repair-status" class="action-note is-hidden"></div>
+                    </form>
+                </div>
+            </div>
 
             <div class="button-stack">
                 <button class="btn btn--secondary" type="button" <?= $overrideDisabled ? 'disabled' : '' ?> onclick="document.getElementById('prompt-panel')?.scrollIntoView({ behavior: 'smooth' });">Prompt bearbeiten</button>

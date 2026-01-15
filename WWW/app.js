@@ -240,10 +240,11 @@
                 const attemptLine = job.attempt_index ? `Attempt ${job.attempt_index}/${job.attempt_chain ? job.attempt_chain.length : 3}` : 'Attempt –';
                 const errorBlock = job.error ? `<div class="job-error">${job.error}</div>` : '';
                 const detailsId = `job-details-${job.id}`;
+                const jobLabel = job.job_label ? ` · ${job.job_label}` : '';
 
                 item.innerHTML = `
                     <div class="timeline-header">
-                        <div class="timeline-title">Job #${job.id}</div>
+                        <div class="timeline-title">Job #${job.id}${jobLabel}</div>
                         <span class="status-badge ${statusClass(job.status)}">${job.status || 'queued'}</span>
                         ${stuckBadge}
                     </div>
@@ -316,6 +317,16 @@
                     lastStatusLabel = jobs.length ? `Status: ${jobs.map((j) => j.status || 'queued').join(', ')}` : 'Keine Jobs';
                     renderJobs(jobs);
                     const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
+                    const refreshCandidate = jobs.find((job) => job.auto_refresh);
+                    if (refreshCandidate && !active && (refreshCandidate.status || '').toLowerCase() === 'done') {
+                        const key = 'sv-repair-refresh';
+                        const lastRefresh = sessionStorage.getItem(key);
+                        if (String(refreshCandidate.id) !== lastRefresh) {
+                            sessionStorage.setItem(key, String(refreshCandidate.id));
+                            window.location.reload();
+                            return;
+                        }
+                    }
                     scheduleNext(active);
                 })
                 .catch((err) => {
@@ -334,7 +345,100 @@
             });
         }
 
+        document.addEventListener('sv-forge-refresh', () => {
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+            }
+            loadJobs();
+        });
+
         loadJobs();
+    }
+
+    function initForgeRepair() {
+        const openButton = document.getElementById('forge-repair-open');
+        const modal = document.getElementById('forge-repair-modal');
+        const form = document.getElementById('forge-repair-form');
+        const status = document.getElementById('forge-repair-status');
+        const startButton = document.getElementById('forge-repair-start');
+        if (!openButton || !modal || !form) return;
+
+        const endpoint = modal.dataset.endpoint || '';
+
+        function resetStatus() {
+            if (!status) return;
+            status.textContent = '';
+            status.classList.add('is-hidden');
+            status.classList.remove('error');
+        }
+
+        function openModal() {
+            resetStatus();
+            modal.classList.remove('is-hidden');
+        }
+
+        function closeModal() {
+            modal.classList.add('is-hidden');
+        }
+
+        openButton.addEventListener('click', () => {
+            if (openButton.disabled) return;
+            openModal();
+        });
+
+        modal.addEventListener('click', (event) => {
+            if (event.target === modal) {
+                closeModal();
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !modal.classList.contains('is-hidden')) {
+                closeModal();
+            }
+        });
+
+        form.addEventListener('submit', (event) => {
+            event.preventDefault();
+            if (!endpoint) return;
+            if (startButton) {
+                startButton.disabled = true;
+            }
+            const formData = new FormData(form);
+            fetch(endpoint, {
+                method: 'POST',
+                body: formData,
+                headers: { Accept: 'application/json' },
+            })
+                .then((resp) => {
+                    if (!resp.ok) {
+                        throw new Error(`HTTP ${resp.status}`);
+                    }
+                    return resp.json();
+                })
+                .then((payload) => {
+                    if (status) {
+                        status.classList.remove('is-hidden');
+                        status.classList.toggle('error', !payload.ok);
+                        status.textContent = payload.message || (payload.ok ? 'Repair gestartet.' : 'Repair fehlgeschlagen.');
+                    }
+                    if (payload.ok) {
+                        document.dispatchEvent(new Event('sv-forge-refresh'));
+                    }
+                })
+                .catch((err) => {
+                    if (status) {
+                        status.classList.remove('is-hidden');
+                        status.classList.add('error');
+                        status.textContent = `Repair fehlgeschlagen (${err.message}).`;
+                    }
+                })
+                .finally(() => {
+                    if (startButton) {
+                        startButton.disabled = false;
+                    }
+                });
+        });
     }
 
     function initRescanJobs() {
@@ -720,6 +824,7 @@
         initManualPromptIndicators();
         initVideoTools();
         initForgeJobs();
+        initForgeRepair();
         initRescanJobs();
         initScanJobsPanel();
     });
