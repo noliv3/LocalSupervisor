@@ -40,6 +40,7 @@
 | `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Quality, Rescan-Job | erforderlich |
 | `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status | erforderlich |
 | `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status | erforderlich |
+| `WWW/media_view.php?ajax=forge_repair_start` | Forge-Repair-Start | erforderlich |
 | `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
 | `WWW/media.php?ajax=forge_jobs` | Forge-Job-Status (Legacy-Grid) | erforderlich |
 | `WWW/media.php?ajax=scan_jobs` | Scan-Job-Status (Legacy-Grid) | erforderlich |
@@ -89,6 +90,7 @@
 ## Forge-Regeneration
 - Forge-bezogene Operationen laufen ausschließlich über `SCRIPTS/operations.php` (Job-Erzeugung/Dispatch) und `WWW/media_view.php` (UI-Auslöser).
 - Neue Forge-Funktionen müssen das `jobs`-Modell verwenden und auditierbar sein; keine direkten Forge-Helper im Webroot anlegen.
+- Repair-Workflow nutzt `CONFIG/forge_recipes.json` + `SCRIPTS/forge_recipes.php`; Repair legt reguläre `forge_regen`-Jobs im Preview-Modus an, Replace bleibt explizit.
 - Auto-Start des Forge-Workers erfolgt non-blocking aus der Webschicht mit Cooldown-Lock unter `LOGS/forge_worker_spawn.lock` (Standard 15s), Spawn-Ergebnis landet in `jobs.forge_response_json`.
 - Spawn schreibt immer in `LOGS/forge_worker_spawn.err.log` (Status spawned/skipped/error mit Grund) und `LOGS/forge_worker_spawn.out.log`; Jobs speichern `worker_spawn`, Kommando, Snippet und Log-Pfade. Jeder Worker hinterlegt beim Start einen Eintrag in `LOGS/forge_worker_runtime.log`.
 - Forge-Worker akzeptieren `forge_regen`/`forge_regen_replace`/`forge_regen_v3` in den Status `queued`/`pending`/`created`; Auswahl-Scopes (Media-ID/WHERE-Klausel/Job-Anzahl) werden geloggt und leere Trefferlisten landen mit Klartext („No forge jobs found for media_id=<scope>, exiting“) im Runtime-Log.

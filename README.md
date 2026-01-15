@@ -461,6 +461,7 @@ Die folgenden Nachweise sind im Betrieb noch zu erbringen und wurden in dieser D
 | `WWW/index.php?ajax=jobs_list|job_cancel|job_delete|jobs_prune` | Scan-Job-Liste, Cancel/Delete/Prune | erforderlich |
 | `WWW/media_view.php` (POST) | Forge-Regeneration, NSFW, Tags, Curation, Rescan-Job | erforderlich |
 | `WWW/media_view.php?ajax=forge_jobs` | Forge-Job-Status für Detailansicht | erforderlich |
+| `WWW/media_view.php?ajax=forge_repair_start` (POST) | Forge-Repair-Workflow (Recipe-UI) | erforderlich |
 | `WWW/media_view.php?ajax=rescan_jobs` | Rescan-Status für Detailansicht | erforderlich |
 | `WWW/media.php` (POST) | Forge-Regeneration/Missing-Flag | erforderlich |
 | `WWW/media.php?ajax=forge_jobs` | Forge-Job-Status (Legacy-Grid) | erforderlich |
@@ -573,6 +574,11 @@ In allen Fällen: keine Pfade/Secrets in der Antwort.
 4. In der Grid-Ansicht (`media.php`) gibt es einen Button „Forge Regen“ pro Medium. Der Klick legt einen Job an, stößt sofort einen dedizierten Worker (`php SCRIPTS/forge_worker_cli.php --limit=1 --media-id=<ID>`) an und zeigt Job-ID, Status und Worker-PID direkt im UI (Live-Polling, keine Wartezeit im Request).
 5. CLI-Worker separat/regelmäßig per Cron (`php SCRIPTS/forge_worker_cli.php --limit=1`) ausführen: Der Worker lädt Jobs der Typen `forge_regen`, `forge_regen_replace` und `forge_regen_v3` in den Status `queued`/`pending`/`created`, ruft Forge und wertet `_sv_mode` aus. Standard ist `preview` (Ergebnis landet nur als Preview-Datei), `replace` schreibt nach Backup in die Bibliothek und stößt Re-Scan/Prompt/Tag-Refresh an. Audit-/Job-Response werden in beiden Fällen gepflegt.
 - Der Worker protokolliert die genutzten WHERE-Bedingungen inkl. Media-Scope, die Anzahl gefundener Jobs und loggt bei leerer Auswahl klar `No forge jobs found for media_id=<scope>, exiting` ins Runtime-Log, damit stille Exits mit `--media-id` nachvollziehbar bleiben.
+
+### Forge-Repair (Recipe-Workflow)
+- Der Repair-Button in `media_view.php` legt ebenfalls `forge_regen`-Jobs an, nutzt aber den deterministischen Recipe-Resolver (keine kreativen Heuristiken) und bleibt bei `_sv_mode=preview`.
+- Rezepte liegen in `CONFIG/forge_recipes.json` und werden über `SCRIPTS/forge_recipes.php` geladen/validiert. Bei ungültigem JSON greifen die eingebauten Defaults.
+- Das UI bleibt bei 5 Controls + Start (Quelle, Ziel, Intensität, Technik-Fix, Prompt-Änderung); der Job-Status läuft über die vorhandene Forge-Job-Polling-UI.
 
 **Worker-Spawn & Nachweis (Windows/Linux/macOS)**
 - Spawn erfolgt non-blocking mit Lockfile (`LOGS/forge_worker_spawn.lock`, Cooldown Default 15s). Jede Anfrage schreibt eine Statuszeile (spawned/skipped/error + Grund) nach `LOGS/forge_worker_spawn.err.log`; stdout-Redirect nach `LOGS/forge_worker_spawn.out.log`.

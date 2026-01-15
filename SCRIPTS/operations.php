@@ -8,6 +8,7 @@ require_once __DIR__ . '/db_helpers.php';
 require_once __DIR__ . '/logging.php';
 require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
+require_once __DIR__ . '/forge_recipes.php';
 
 const SV_FORGE_JOB_TYPE           = 'forge_regen';
 const SV_FORGE_JOB_TYPES          = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
@@ -1674,6 +1675,256 @@ function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, call
         'model_error'     => $jobData['model_error'] ?? null,
         'regen_plan'      => $jobData['regen_plan'],
     ];
+}
+
+function sv_prepare_forge_repair_job(PDO $pdo, array $config, int $mediaId, array $options, callable $logger): array
+{
+    $mediaRow = sv_load_media_with_prompt($pdo, $mediaId);
+    $type     = (string)($mediaRow['type'] ?? '');
+    $status   = (string)($mediaRow['status'] ?? '');
+
+    if ($type !== 'image') {
+        throw new InvalidArgumentException('Nur Bildmedien können repariert werden.');
+    }
+    if ($status === 'missing') {
+        throw new RuntimeException('Repair für fehlende Dateien nicht möglich.');
+    }
+
+    $path = (string)($mediaRow['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Dateipfad nicht vorhanden.');
+    }
+
+    $pathsCfg = $config['paths'] ?? [];
+    sv_assert_media_path_allowed($path, $pathsCfg, 'forge_regen_replace');
+
+    $tags = sv_fetch_media_tags_for_regen($pdo, $mediaId, SV_FORGE_MAX_TAGS_PROMPT);
+    $mediaRow['tags'] = $tags;
+    $mediaRow['_image_exists'] = is_file($path);
+
+    $recipes = sv_load_forge_recipes($config, $logger);
+    $resolved = sv_resolve_forge_repair($mediaRow, $options, $recipes);
+
+    $seedInfo = sv_ensure_media_seed($pdo, (int)$mediaRow['id'], (string)($resolved['params']['seed'] ?? ''), $logger);
+    $seedPolicy = (string)($resolved['seed_policy'] ?? 'keep');
+    $seedUsed = $seedInfo['seed'];
+    $seedSource = $seedInfo['created'] ? 'generated' : 'stored';
+    if ($seedPolicy === 'new') {
+        $seedUsed = (string)random_int(1, 2147483647);
+        $seedSource = 'policy:new';
+    }
+
+    $payload = [
+        'prompt'          => (string)$resolved['prompt'],
+        'negative_prompt' => (string)$resolved['negative'],
+        'model'           => (string)($resolved['params']['model'] ?? ''),
+        'sampler'         => (string)($resolved['params']['sampler'] ?? ''),
+        'cfg_scale'       => (float)($resolved['params']['cfg'] ?? 7.0),
+        'steps'           => (int)($resolved['params']['steps'] ?? 30),
+        'seed'            => (string)$seedUsed,
+        'width'           => (int)($resolved['params']['width'] ?? 1024),
+        'height'          => (int)($resolved['params']['height'] ?? 1024),
+    ];
+
+    if (!empty($resolved['params']['scheduler'])) {
+        $payload['scheduler'] = (string)$resolved['params']['scheduler'];
+    }
+    if (!empty($mediaRow['sampler_settings'])) {
+        $payload['sampler_settings'] = json_decode((string)$mediaRow['sampler_settings'], true) ?? (string)$mediaRow['sampler_settings'];
+    }
+    if (!empty($mediaRow['loras'])) {
+        $payload['loras'] = json_decode((string)$mediaRow['loras'], true) ?? (string)$mediaRow['loras'];
+    }
+    if (!empty($mediaRow['controlnet'])) {
+        $payload['controlnet'] = json_decode((string)$mediaRow['controlnet'], true) ?? (string)$mediaRow['controlnet'];
+    }
+    if (!empty($mediaRow['source_metadata'])) {
+        $payload['source_metadata'] = (string)$mediaRow['source_metadata'];
+    }
+
+    if (!empty($resolved['variants']) && (int)$resolved['variants'] > 1) {
+        $payload['batch_size'] = (int)$resolved['variants'];
+        $payload['n_iter'] = 1;
+    }
+
+    $requestedModel = (string)($payload['model'] ?? '');
+    $modelListResult = sv_forge_list_models($config, $logger);
+    $modelResolution = [];
+    $resolvedModel = sv_resolve_forge_model($config, $requestedModel, $logger, $modelListResult, $modelResolution);
+    $payload['model'] = $resolvedModel;
+    $payload['_sv_requested_model'] = $requestedModel;
+    $payload['_sv_model_source']    = $modelResolution['model_source'] ?? ($modelListResult['source'] ?? null);
+    $payload['_sv_model_status']    = $modelResolution['model_status'] ?? ($modelListResult['status'] ?? null);
+    if (!empty($modelResolution['model_error'])) {
+        $payload['_sv_model_error'] = sv_forge_limit_error((string)$modelResolution['model_error']);
+    } elseif (!empty($modelListResult['error'])) {
+        $payload['_sv_model_error'] = sv_forge_limit_error((string)$modelListResult['error']);
+    }
+
+    $generationMode = $resolved['mode'] === 'img2img' ? 'img2img' : 'txt2img';
+    if ($generationMode === 'img2img') {
+        $payload['init_images'] = [sv_encode_init_image($path)];
+        if (!isset($payload['denoising_strength']) && $resolved['denoise'] !== null) {
+            $payload['denoising_strength'] = (float)$resolved['denoise'];
+        }
+    }
+    $payload['_sv_generation_mode'] = $generationMode;
+    $payload['_sv_decided_mode']    = $generationMode;
+    $payload['_sv_decided_reason']  = $resolved['mode_reason'] ?? null;
+    $payload['_sv_decided_denoise'] = $payload['denoising_strength'] ?? null;
+
+    $payload['_sv_prompt_source']   = $resolved['source_used'] ?? null;
+    $payload['_sv_negative_source'] = $resolved['negative_source'] ?? null;
+    $payload['_sv_negative_mode']   = $resolved['negative_source'] ?? null;
+    $payload['_sv_negative_len']    = $resolved['negative_len'] ?? null;
+    $payload['_sv_mode']            = 'preview';
+    $payload['_sv_job_label']       = 'Repair';
+
+    $payload['_sv_regen_plan'] = [
+        'category'         => 'repair',
+        'final_prompt'     => $resolved['prompt'],
+        'original_prompt'  => $mediaRow['prompt'] ?? null,
+        'prompt_missing'   => $resolved['prompt_missing'] ?? false,
+        'prompt_source'    => $resolved['source_used'] ?? null,
+        'tags_used_count'  => $resolved['tags_used_count'] ?? 0,
+        'tags_limited'     => $resolved['tags_limited'] ?? false,
+        'negative_mode'    => $resolved['negative_source'] ?? null,
+        'negative_len'     => $resolved['negative_len'] ?? 0,
+        'seed_generated'   => $seedInfo['created'],
+        'seed_source'      => $seedSource,
+        'recipe_id'        => $resolved['recipe_id'] ?? null,
+        'goal'             => $resolved['goal'] ?? null,
+        'intensity'        => $resolved['intensity'] ?? null,
+        'tech_fix'         => $resolved['tech_fix'] ?? null,
+        'mode_hint'        => $resolved['mode_hint'] ?? null,
+        'mode'             => $generationMode,
+        'variants'         => $resolved['variants'] ?? 1,
+        'seed_policy'      => $seedPolicy,
+        'applied_deltas'   => $resolved['applied_deltas'] ?? '',
+        'model_family'     => $resolved['model_family'] ?? null,
+        'decided_mode'     => $generationMode,
+        'decided_reason'   => $resolved['mode_reason'] ?? null,
+        'decided_denoise'  => $payload['_sv_decided_denoise'],
+    ];
+
+    $payload['_sv_repair_meta'] = [
+        'recipe_id'      => $resolved['recipe_id'] ?? null,
+        'source_used'    => $resolved['source_used'] ?? null,
+        'goal'           => $resolved['goal'] ?? null,
+        'intensity'      => $resolved['intensity'] ?? null,
+        'tech_fix'       => $resolved['tech_fix'] ?? null,
+        'applied_deltas' => $resolved['applied_deltas'] ?? '',
+        'seed_policy'    => $seedPolicy,
+    ];
+
+    $promptId = $resolved['source_used'] === 'prompt' && isset($mediaRow['prompt_id'])
+        ? (int)$mediaRow['prompt_id']
+        : null;
+
+    return [
+        'payload'         => $payload,
+        'prompt_id'       => $promptId,
+        'repair_plan'     => $resolved,
+        'requested_model' => $requestedModel,
+        'resolved_model'  => $resolvedModel,
+        'model_source'    => $payload['_sv_model_source'] ?? null,
+        'model_status'    => $payload['_sv_model_status'] ?? null,
+        'model_error'     => $payload['_sv_model_error'] ?? null,
+    ];
+}
+
+function sv_queue_forge_repair_job(PDO $pdo, array $config, int $mediaId, array $options, callable $logger): array
+{
+    if (!sv_is_forge_enabled($config)) {
+        throw new RuntimeException('Forge ist deaktiviert.');
+    }
+
+    $jobData = sv_prepare_forge_repair_job($pdo, $config, $mediaId, $options, $logger);
+    $fallbackModel = sv_forge_fallback_model($config);
+
+    $jobId = sv_create_forge_job(
+        $pdo,
+        $mediaId,
+        $jobData['payload'],
+        $jobData['prompt_id'],
+        $logger
+    );
+
+    if ($jobData['resolved_model'] !== $jobData['requested_model']) {
+        $logger('Forge-Modell in Repair-Job #' . $jobId . ' angepasst: requested=' . $jobData['requested_model'] . ', used=' . $jobData['resolved_model'] . '.');
+        sv_audit_log($pdo, 'forge_model_resolved', 'jobs', $jobId, [
+            'requested_model' => $jobData['requested_model'],
+            'resolved_model'  => $jobData['resolved_model'],
+            'fallback_used'   => $jobData['resolved_model'] === $fallbackModel,
+        ]);
+    }
+
+    return [
+        'job_id'          => $jobId,
+        'status'          => 'queued',
+        'resolved_model'  => $jobData['resolved_model'],
+        'requested_model' => $jobData['requested_model'],
+        'model_source'    => $jobData['model_source'] ?? null,
+        'model_status'    => $jobData['model_status'] ?? null,
+        'model_error'     => $jobData['model_error'] ?? null,
+        'repair_plan'     => $jobData['repair_plan'],
+    ];
+}
+
+function sv_run_forge_repair_job(PDO $pdo, array $config, int $mediaId, array $options, callable $logger): array
+{
+    $logger('Forge-Repair wird asynchron über die Job-Queue abgewickelt.');
+
+    $queued = sv_queue_forge_repair_job($pdo, $config, $mediaId, $options, $logger);
+
+    $worker = sv_spawn_forge_worker_for_media(
+        $pdo,
+        $config,
+        $mediaId,
+        (int)($queued['job_id'] ?? 0) ?: null,
+        1,
+        $logger
+    );
+
+    if (($worker['state'] ?? null) === 'error' && !empty($queued['job_id'])) {
+        $snippet = trim((string)($worker['err_snippet'] ?? $worker['reason'] ?? 'spawn failed'));
+        $snippet = sv_sanitize_error_message($snippet, 200);
+        $snippet = sv_forge_limit_error($snippet, 200);
+        $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
+        $stmt    = $pdo->prepare(
+            'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
+            . ' ELSE CONCAT(error_message, "; ", :msg) END WHERE id = :id'
+        );
+        $stmt->execute([
+            ':msg' => $message,
+            ':id'  => (int)$queued['job_id'],
+        ]);
+        $queued['error_message'] = isset($queued['error_message']) && (string)$queued['error_message'] !== ''
+            ? $queued['error_message'] . '; ' . $message
+            : $message;
+    }
+
+    $pidStatus = $worker['pid'] !== null ? sv_is_pid_running((int)$worker['pid']) : ['running' => false, 'unknown' => $worker['unknown']];
+    $status    = ($pidStatus['running'] ?? false) ? 'running' : ($queued['status'] ?? 'queued');
+    $spawnMessage = 'Job in Queue';
+    if (!empty($worker['skipped'])) {
+        $spawnMessage = 'Worker-Spawn übersprungen: ' . ((string)($worker['reason'] ?? 'cooldown'));
+    } elseif ($status === 'running') {
+        $spawnMessage = 'Worker läuft';
+    }
+
+    return array_merge($queued, [
+        'status'               => $status,
+        'worker_pid'           => $worker['pid'],
+        'worker_started_at'    => $worker['started'],
+        'worker_status_unknown'=> (bool)($pidStatus['unknown'] ?? $worker['unknown']),
+        'worker_spawn_skipped' => (bool)($worker['skipped'] ?? false),
+        'worker_spawn_reason'  => $worker['reason'] ?? null,
+        'worker_spawn'         => $worker['state'] ?? null,
+        'worker_spawn_cmd'     => $worker['cmd'] ?? null,
+        'worker_spawn_log_paths' => $worker['log_paths'] ?? null,
+        'message'              => $spawnMessage,
+    ]);
 }
 
 function sv_record_forge_worker_meta(PDO $pdo, int $mediaId, ?int $pid, string $startedAt): void
@@ -6766,6 +7017,8 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
         $response = json_decode((string)($row['forge_response_json'] ?? ''), true);
         $response = is_array($response) ? $response : [];
         $regenPlan = is_array($payload['_sv_regen_plan'] ?? null) ? $payload['_sv_regen_plan'] : [];
+        $repairMeta = is_array($payload['_sv_repair_meta'] ?? null) ? $payload['_sv_repair_meta'] : [];
+        $jobLabel = $payload['_sv_job_label'] ?? null;
 
         $workerPid    = $response['_sv_worker_pid'] ?? ($workerMeta['worker_pid'] ?? null);
         $workerStart  = $response['_sv_worker_started_at'] ?? ($workerMeta['worker_started_at'] ?? null);
@@ -6839,6 +7092,12 @@ function sv_fetch_forge_jobs_for_media(PDO $pdo, int $mediaId, int $limit = 10, 
             'new_hash'           => $resultMeta['new_hash'] ?? null,
             'output_path'        => $outputPath,
             'version_token'      => $resultMeta['version_token'] ?? null,
+            'job_label'          => is_string($jobLabel) ? $jobLabel : null,
+            'repair_recipe'      => $repairMeta['recipe_id'] ?? null,
+            'repair_goal'        => $repairMeta['goal'] ?? null,
+            'repair_intensity'   => $repairMeta['intensity'] ?? null,
+            'repair_tech_fix'    => $repairMeta['tech_fix'] ?? null,
+            'auto_refresh'       => $jobLabel === 'Repair',
         ];
     }
 

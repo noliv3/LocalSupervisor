@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "defaults": {
+    "steps_min": 10,
+    "steps_max": 60,
+    "cfg_min": 3,
+    "cfg_max": 12,
+    "size_default": [1024, 1024],
+    "size_grid": 64
+  },
+  "model_families": {
+    "sdxl": {
+      "default_preset": "sdxl_default",
+      "presets": {
+        "sdxl_default": {
+          "sampler": "DPM++ 2M Karras",
+          "steps": 28,
+          "cfg": 6.5,
+          "size": [1024, 1024],
+          "negative_default": "universal_sdxl"
+        },
+        "sdxl_fast": {
+          "sampler": "DPM++ 2M Karras",
+          "steps": 22,
+          "cfg": 6.0,
+          "size": [1024, 1024],
+          "negative_default": "universal_sdxl"
+        }
+      },
+      "sampler_compat_map": {
+        "Euler": "Euler a",
+        "EulerA": "Euler a",
+        "euler": "Euler a"
+      }
+    },
+    "flux": {
+      "default_preset": "flux_default",
+      "presets": {
+        "flux_default": {
+          "sampler": "DPM++ 2M Karras",
+          "steps": 24,
+          "cfg": 5.0,
+          "size": [1024, 1024],
+          "negative_default": ""
+        }
+      },
+      "sampler_compat_map": {}
+    }
+  },
+  "negatives": {
+    "universal_sdxl": "worst quality, low quality, lowres, jpeg artifacts, blurry, bad anatomy, extra limbs, extra fingers, deformed, watermark, text"
+  },
+  "recipes": {
+    "repair": {
+      "fast": { "mode_hint": "i2i_if_image_else_t2i", "i2i_denoise": 0.25, "variants": 1 },
+      "normal": { "mode_hint": "i2i_if_image_else_t2i", "i2i_denoise": 0.40, "variants": 1 },
+      "strong": { "mode_hint": "i2i_if_image_else_t2i", "i2i_denoise": 0.60, "variants": 2 }
+    },
+    "rebuild": {
+      "fast": { "mode_hint": "t2i", "variants": 1 },
+      "normal": { "mode_hint": "t2i", "variants": 2 },
+      "strong": { "mode_hint": "t2i", "variants": 4 }
+    },
+    "vary": {
+      "fast": { "mode_hint": "t2i_or_i2i", "seed_policy": "new", "variants": 1 },
+      "normal": { "mode_hint": "t2i_or_i2i", "seed_policy": "new", "variants": 2 },
+      "strong": { "mode_hint": "t2i_or_i2i", "seed_policy": "new", "variants": 4 }
+    }
+  },
+  "tech_fixes": {
+    "none": {},
+    "sampler_compat": { "apply_sampler_map": true },
+    "black_reset": { "force_steps": 28, "force_cfg": 6.5, "force_sampler": "DPM++ 2M Karras" },
+    "universal_negative": { "force_negative_key": "universal_sdxl" },
+    "normalize_size": { "force_size_default": true }
+  }
+}

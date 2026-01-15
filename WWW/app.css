@@ -838,6 +838,40 @@ label {
     gap: 12px;
 }
 
+.repair-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(15, 23, 42, 0.7);
+}
+
+.repair-modal__content {
+    width: min(520px, 100%);
+}
+
+.repair-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.repair-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+}
+
+.repair-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.9rem;
+}
+
 .timeline-item {
     padding: 12px;
     border-radius: 12px;
