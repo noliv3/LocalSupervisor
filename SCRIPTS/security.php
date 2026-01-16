@@ -24,6 +24,18 @@ function sv_is_cli(): bool
     return PHP_SAPI === 'cli';
 }
 
+function sv_is_loopback_remote_addr(): bool
+{
+    if (sv_is_cli()) {
+        return true;
+    }
+
+    $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
+    return $remoteAddr === '127.0.0.1'
+        || $remoteAddr === '::1'
+        || $remoteAddr === '::ffff:127.0.0.1';
+}
+
 function sv_get_client_ip(): string
 {
     if (sv_is_cli()) {
@@ -77,6 +89,18 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
     if (sv_is_cli()) {
         $GLOBALS['sv_last_internal_key_valid'] = true;
         return true;
+    }
+
+    $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (!sv_is_loopback_remote_addr()) {
+        sv_security_log($config, 'Internal access blocked: non-loopback', [
+            'action' => $action,
+            'ip'     => $remoteAddr,
+        ]);
+        if ($hardFail) {
+            sv_security_error(403, 'Forbidden: local internal access only.');
+        }
+        return false;
     }
 
     $security    = $config['security'] ?? [];
@@ -142,7 +166,7 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
         return false;
     }
 
-    if (in_array($providedSource, ['header', 'get', 'post'], true)) {
+    if (in_array($providedSource, ['header', 'get', 'post'], true) && sv_is_loopback_remote_addr()) {
         $_SESSION['sv_internal_key'] = $expectedKey;
         if (!headers_sent()) {
             $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';

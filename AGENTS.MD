@@ -9,6 +9,11 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 - **Neue Dateien nur nach Auftrag**; bestehende Strukturen bevorzugen.
 - **Keine Tests ausführen**, sofern nicht ausdrücklich verlangt.
 
+## Hinweis – Web-Zugriff (Dokumentation)
+- Public ist auf Galerie/Detailansicht + Upvote beschränkt; alle internen Aktionen erfordern Loopback + `internal_api_key`.
+- FSK18-Inhalte bleiben für Public unsichtbar (Filter/Stream/Thumb blockiert) und können nicht per Query-Parameter aktiviert werden.
+- Session/Cookie-Speicherung des `internal_key` erfolgt nur bei Loopback-Requests.
+
 ## Diagnose – bekannte Auffälligkeiten
 1. **Runtime-Verzeichnisse fehlen im Repo:** `LOGS/` und `BACKUPS/` sind im Arbeitsbaum nicht vorhanden und werden erst zur Laufzeit erzeugt. 
 2. **Beispiel-Konfigurationen ohne echte Instanz:** Unter `config/` liegen nur `*.example.json`-Dateien; echte produktive Konfigurationsdateien sind nicht enthalten. 
@@ -16,4 +21,3 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 
 ## Diagnose – offene Punkte (ohne Codeeingriffe)
 - Ein Versionen-/Änderungslog wird nun über `VERSIONSLOG.MD` geführt. Runtime-Änderungen sollten zusätzlich in `LOGS/` dokumentiert werden, sofern die Umgebung das unterstützt.
-

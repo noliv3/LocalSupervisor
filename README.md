@@ -22,6 +22,12 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **VIDAX-Server:** `npm run start:vidax`.
 - **VA-Tools:** `npm run va:doctor` und `npm run va:install`.
 
+## Zugriff & Sicherheit (Web)
+- **Public (Remote):** Galerie/Detailansicht lesen, Metadaten sehen und `vote_up` via POST; keine Admin-/Scan-/Rescan-/Checked-/Downvote-Aktionen.
+- **FSK18-Inhalte:** Sichtbarkeit/Stream/Thumb nur bei internem Zugriff; Public kann `?adult=1` nicht erzwingen.
+- **Intern (lokal):** Vollzugriff nur über Loopback (`127.0.0.1/::1/::ffff:127.0.0.1`) **und** `internal_api_key`; Dashboard und interne Aktionen sind geschützt.
+- **Key-Storage:** Session/Cookie für `internal_key` wird nur für Loopback-Requests gesetzt.
+
 ## Laufzeit-Artefakte
 - `LOGS/` und `BACKUPS/` werden zur Laufzeit erstellt und liegen nicht im Repository.
 
@@ -37,4 +43,3 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **VERSIONSLOG.MD** – rekonstruiertes Funktions-Update-Log.
 
 > Hinweis: Es wurden **keine Tests** ausgeführt.
-
