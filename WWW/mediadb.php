@@ -32,7 +32,6 @@ $actionError = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
-        sv_require_internal_access($config, 'mediadb_action');
         $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
         $mediaId = isset($_POST['media_id']) ? (int)$_POST['media_id'] : 0;
 
@@ -40,14 +39,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new RuntimeException('Ungültige Media-ID.');
         }
 
-        if ($action === 'vote_up' || $action === 'vote_down') {
-            $voteValue = $action === 'vote_up' ? 1 : -1;
+        if ($action === 'vote_up') {
+            $voteValue = 1;
             sv_set_media_meta_value($pdo, $mediaId, 'vote.state', $voteValue);
             sv_audit_log($pdo, 'vote_set', 'media', $mediaId, [
                 'state' => $voteValue,
             ]);
             $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
-        } elseif ($action === 'checked_toggle') {
+        } else {
+            sv_require_internal_access($config, 'mediadb_action');
+            if ($action === 'vote_down') {
+                $voteValue = -1;
+                sv_set_media_meta_value($pdo, $mediaId, 'vote.state', $voteValue);
+                sv_audit_log($pdo, 'vote_set', 'media', $mediaId, [
+                    'state' => $voteValue,
+                ]);
+                $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
+            } elseif ($action === 'checked_toggle') {
             $checkedValue = isset($_POST['checked_value']) && (string)$_POST['checked_value'] === '1' ? 1 : 0;
             sv_set_media_meta_value($pdo, $mediaId, 'curation.checked', $checkedValue);
             if ($checkedValue === 1) {
@@ -57,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'checked' => $checkedValue,
             ]);
             $actionMessage = $checkedValue === 1 ? 'Checked gesetzt.' : 'Checked entfernt.';
-        } elseif ($action === 'rescan_job') {
+            } elseif ($action === 'rescan_job') {
             $logLines = [];
             $logger = sv_operation_logger(null, $logLines);
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $mediaId, $logger);
@@ -77,8 +85,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $actionMessage = 'Tag-Rescan-Job #' . $jobId . ' eingereiht.';
             }
-        } else {
-            throw new RuntimeException('Unbekannte Aktion.');
+            } else {
+                throw new RuntimeException('Unbekannte Aktion.');
+            }
         }
     } catch (Throwable $e) {
         $actionError = sv_sanitize_error_message($e->getMessage());
@@ -183,6 +192,7 @@ function sv_extract_scan_info($rawJson): array
 }
 
 $showAdult = sv_normalize_adult_flag($_GET);
+$showAdult = $showAdult && $hasInternalAccess;
 $viewMode  = (isset($_GET['view']) && $_GET['view'] === 'list') ? 'list' : 'grid';
 
 $page    = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
@@ -763,16 +773,16 @@ function sv_render_media_card(array $row, array $context): void
             </div>
             <div class="card-actions">
                 <a class="btn btn--primary btn--sm" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
+                <form method="post" class="inline-form">
+                    <input type="hidden" name="action" value="vote_up">
+                    <input type="hidden" name="media_id" value="<?= $id ?>">
+                    <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
+                </form>
                 <?php if ($hasInternalAccess): ?>
                     <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="rescan_job">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
-                    </form>
-                    <form method="post" class="inline-form">
-                        <input type="hidden" name="action" value="vote_up">
-                        <input type="hidden" name="media_id" value="<?= $id ?>">
-                        <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
                     </form>
                     <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="vote_down">
@@ -874,10 +884,12 @@ $filtersOpen = $filterChips !== [];
             <input type="text" name="q" value="<?= htmlspecialchars($pathFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Pfad oder Name" aria-label="Pfad oder Name">
             <button type="submit" class="btn btn--secondary btn--sm">Suche</button>
         </form>
-        <div class="fsk-toggle">
-            <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '0', 'p' => 1])) ?>" class="<?= $showAdult ? '' : 'active' ?>">FSK18 aus</a>
-            <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '1', 'p' => 1])) ?>" class="<?= $showAdult ? 'active' : '' ?>">FSK18 an</a>
-        </div>
+        <?php if ($hasInternalAccess): ?>
+            <div class="fsk-toggle">
+                <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '0', 'p' => 1])) ?>" class="<?= $showAdult ? '' : 'active' ?>">FSK18 aus</a>
+                <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '1', 'p' => 1])) ?>" class="<?= $showAdult ? 'active' : '' ?>">FSK18 an</a>
+            </div>
+        <?php endif; ?>
         <div class="compact-status">
             <label>
                 <span>Modus:</span>
@@ -1183,16 +1195,16 @@ $filtersOpen = $filterChips !== [];
                                 <td>
                                     <div class="table-actions">
                                         <a class="btn btn--secondary btn--sm" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
+                                        <form method="post" class="inline-form">
+                                            <input type="hidden" name="action" value="vote_up">
+                                            <input type="hidden" name="media_id" value="<?= $id ?>">
+                                            <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
+                                        </form>
                                         <?php if ($hasInternalAccess): ?>
                                             <form method="post" class="inline-form">
                                                 <input type="hidden" name="action" value="rescan_job">
                                                 <input type="hidden" name="media_id" value="<?= $id ?>">
                                                 <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
-                                            </form>
-                                            <form method="post" class="inline-form">
-                                                <input type="hidden" name="action" value="vote_up">
-                                                <input type="hidden" name="media_id" value="<?= $id ?>">
-                                                <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
                                             </form>
                                             <form method="post" class="inline-form">
                                                 <input type="hidden" name="action" value="vote_down">
@@ -1218,9 +1230,11 @@ $filtersOpen = $filterChips !== [];
     </div>
 <?php endif; ?>
 
-<div class="meta-note">
-    FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Kacheln · Legacy-Grid ist nur noch per Direktaufruf erreichbar
-</div>
+<?php if ($hasInternalAccess): ?>
+    <div class="meta-note">
+        FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Kacheln · Legacy-Grid ist nur noch per Direktaufruf erreichbar
+    </div>
+<?php endif; ?>
 
 <div class="pager compact">
     <span>Seite <?= (int)$page ?> / <?= (int)$pages ?></span>

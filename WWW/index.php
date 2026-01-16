@@ -18,14 +18,16 @@ try {
 $configWarning = $config['_config_warning'] ?? null;
 $internalKey   = isset($_GET['internal_key']) && is_string($_GET['internal_key']) ? trim($_GET['internal_key']) : '';
 
-$isLocalRequest = sv_is_client_local($config);
-if (!$isLocalRequest) {
+$isLoopback = sv_is_loopback_remote_addr();
+if (!$isLoopback) {
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         header('Location: mediadb.php');
         exit;
     }
     sv_security_error(403, 'Forbidden.');
 }
+
+sv_require_internal_access($config, 'dashboard');
 
 $dbError = null;
 $pdo = null;

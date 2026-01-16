@@ -92,6 +92,7 @@ function sv_limit_string(string $value, int $maxLen): string
 }
 
 $showAdult = sv_normalize_adult_flag($_GET);
+$showAdult = $showAdult && $hasInternalAccess;
 
 $actionMessage = null;
 $actionSuccess = null;
@@ -221,8 +222,6 @@ if ($ajaxAction === 'forge_repair_start') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
-        sv_require_internal_access($config, 'media_action');
-
         $postId = isset($_POST['media_id']) ? (int)$_POST['media_id'] : 0;
         if ($postId !== $id) {
             throw new RuntimeException('Media-ID stimmt nicht überein.');
@@ -230,7 +229,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
 
-        if ($action === 'rebuild_prompt') {
+        if ($action === 'vote_up') {
+            $voteValue = 1;
+            sv_set_media_meta_value($pdo, $id, 'vote.state', $voteValue);
+            sv_audit_log($pdo, 'vote_set', 'media', $id, [
+                'state' => $voteValue,
+            ]);
+            $actionSuccess = true;
+            $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
+        } else {
+            sv_require_internal_access($config, 'media_action');
+            if ($action === 'rebuild_prompt') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'prompts_single', $actionLogs, 10);
             $result = sv_run_prompt_rebuild_single($pdo, $config, $id, $logger);
             $processed     = (int)($result['processed'] ?? 0);
@@ -244,7 +253,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $actionMessage = 'Prompt-Rebuild fehlgeschlagen.';
             }
-        } elseif ($action === 'forge_regen') {
+            } elseif ($action === 'forge_regen') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
             try {
                 $endpoint = sv_forge_endpoint_config($config, true);
@@ -384,15 +393,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'deduped'    => $deduped,
                 ]);
             }
-        } elseif ($action === 'vote_up' || $action === 'vote_down') {
-            $voteValue = $action === 'vote_up' ? 1 : -1;
+            } elseif ($action === 'vote_down') {
+                $voteValue = -1;
             sv_set_media_meta_value($pdo, $id, 'vote.state', $voteValue);
             sv_audit_log($pdo, 'vote_set', 'media', $id, [
                 'state' => $voteValue,
             ]);
             $actionSuccess = true;
             $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
-        } elseif ($action === 'checked_toggle') {
+            } elseif ($action === 'checked_toggle') {
             $checkedValue = isset($_POST['checked_value']) && (string)$_POST['checked_value'] === '1' ? 1 : 0;
             sv_set_media_meta_value($pdo, $id, 'curation.checked', $checkedValue);
             if ($checkedValue === 1) {
@@ -403,7 +412,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             $actionSuccess = true;
             $actionMessage = $checkedValue === 1 ? 'Checked gesetzt.' : 'Checked entfernt.';
-        } elseif (in_array($action, ['tag_add', 'tag_remove', 'tag_lock', 'tag_unlock'], true)) {
+            } elseif (in_array($action, ['tag_add', 'tag_remove', 'tag_lock', 'tag_unlock'], true)) {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'tag_edit', $actionLogs, 10);
             $payload = [
                 'name'       => $_POST['tag_name'] ?? '',
@@ -421,7 +430,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = sv_update_media_tags($pdo, $id, $tagAction, $payload, $logger);
             $actionSuccess = true;
             $actionMessage = 'Tag-Aktion: ' . $result['action'] . ' (' . ($payload['name'] ?? '') . ')';
-        } elseif ($action === 'quality_flag') {
+            } elseif ($action === 'quality_flag') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'quality_flag', $actionLogs, 5);
             $requested = sv_limit_string((string)($_POST['quality_status'] ?? ''), 32);
             $requested = sv_normalize_quality_status($requested, SV_QUALITY_REVIEW);
@@ -431,21 +440,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = sv_set_media_quality_status($pdo, $id, $requested, $score, $notes, $rule, 'internal', $logger);
             $actionSuccess = true;
             $actionMessage = 'Curation-Status gesetzt: ' . $result['previous'] . ' → ' . $result['current'];
-        } elseif ($action === 'request_delete') {
+            } elseif ($action === 'request_delete') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'request_delete', $actionLogs, 5);
             $reason = sv_limit_string((string)($_POST['delete_reason'] ?? ''), 240);
             $result = sv_set_media_lifecycle_status($pdo, $id, SV_LIFECYCLE_PENDING_DELETE, $reason, 'internal', $logger);
             $actionSuccess = true;
             $actionMessage = 'Lifecycle-Status aktualisiert: ' . $result['previous'] . ' → ' . $result['current'];
-        } elseif ($action === 'logical_delete') {
+            } elseif ($action === 'logical_delete') {
             $logger       = sv_operation_logger(null, $actionLogs);
             $result       = sv_mark_media_missing($pdo, $id, $logger);
             $actionSuccess = true;
             $actionMessage = $result['changed']
                 ? 'Medium als missing markiert.'
                 : 'Medium war bereits als missing markiert.';
-        } else {
-            throw new RuntimeException('Unbekannte Aktion.');
+            } else {
+                throw new RuntimeException('Unbekannte Aktion.');
+            }
         }
     } catch (Throwable $e) {
         $actionSuccess = false;
@@ -469,7 +479,7 @@ if (!$media) {
 
 if (!$showAdult && (int)($media['has_nsfw'] ?? 0) === 1) {
     http_response_code(403);
-    echo 'FSK18-Eintrag ausgeblendet. adult=1 anhängen, um anzuzeigen.';
+    echo 'FSK18-Eintrag ausgeblendet. Interner Zugriff erforderlich.';
     exit;
 }
 

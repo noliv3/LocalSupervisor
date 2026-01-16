@@ -159,6 +159,7 @@ function sv_stream_media(array $config, array $row, ?string $pathOverride = null
 }
 
 $showAdult = sv_normalize_adult_flag($_GET);
+$showAdult = $showAdult && $hasInternalAccess;
 
 $jobId   = isset($_GET['job_id']) ? sv_clamp_int((int)$_GET['job_id'], 1, 1_000_000_000, 0) : 0;
 $asset   = isset($_GET['asset']) && is_string($_GET['asset']) ? strtolower(trim((string)$_GET['asset'])) : null;
