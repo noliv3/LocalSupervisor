@@ -1,42 +1,40 @@
-# LocalSupervisor (SuperVisOr) – Projekt-Diagnose
+# LocalSupervisor (SuperVisOr)
 
-## Überblick
-Dieses Repository enthält ein lokales Medien-Management-System mit PHP-Weboberfläche, CLI-Workflows (Scan/Rescan/Jobs) und einem Node-basierten VA/VIDAX-Setup. Ziel ist die Verwaltung von Medien, Metadaten und Job-Flows ohne Cloud-Abhängigkeit.
+## Kurzüberblick
+LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche und CLI-Workflows für Scan/Rescan/Jobs. Ergänzend existiert ein Node-basiertes VA/VIDAX-Setup für Install/Diagnose und Serverbetrieb. Das Ziel ist eine konsistente Verwaltung von Medien, Metadaten und Job-Flows ohne Cloud-Abhängigkeit.
 
-## Vollständige Diagnose (Ist-Zustand)
-### Architektur & Komponenten
-- **Weboberfläche (PHP):** `WWW/` stellt Dashboard, Galerie und Detailansicht bereit. HTTP-Routen laufen über PHP-Skripte. 
-- **Kernel/CLI (PHP):** `SCRIPTS/` enthält die Kernlogik für Scan, Jobs, DB-Status, Backups und Konsistenz. 
-- **Datenbank:** Referenzschema liegt in `DB/schema.sql`. 
-- **VA/VIDAX (Node):** Node-Komponenten liegen in `src/` und `bin/`, Einstiegspunkte sind `src/vidax/server.js` und `bin/va.js`. 
-- **Konfiguration:** zentrale PHP-Config unter `CONFIG/`, Node-Example-Configs in `config/`. 
-- **Runtime-Artefakte:** Logs/Backups werden zur Laufzeit unter `LOGS/` und `BACKUPS/` erzeugt (nicht im Repo enthalten).
+## Kernfunktionen (hoch-level)
+- **Web-UI:** Dashboard, Galerie und Detailansicht für Medienverwaltung (PHP in `WWW/`).
+- **CLI-Kernlogik:** Scan/Rescan, Job-Queue, DB-Status, Backups und Konsistenz (PHP in `SCRIPTS/`).
+- **VA/VIDAX:** Setup-Utilities und VIDAX-Server (Node in `src/` und `bin/`).
 
-### Einstiegspunkte
-- **Windows-Start:** `start.bat` / `start.ps1`.
-- **Node-Start:** `npm run start:vidax` (VIDAX-Server).
+## Repository-Struktur
+- `WWW/` – PHP-Weboberfläche (Dashboard/Galerie/Detail/Stream/Thumb).
+- `SCRIPTS/` – PHP-CLI und Kernlogik (Scan/Jobs/DB/Backups/Konsistenz).
+- `DB/` – Referenzschema (`DB/schema.sql`).
+- `CONFIG/` – PHP-Konfiguration.
+- `config/` – Node-Example-Konfigurationen (`*.example.json`).
+- `src/` / `bin/` – Node-Komponenten und CLI-Tools.
+- `start.ps1` / `start.bat` – Start-/Update-Entry-Points.
+
+## Einstiegspunkte (lokal)
+- **Windows-Start:** `start.bat` oder `start.ps1`.
+- **VIDAX-Server:** `npm run start:vidax`.
 - **VA-Tools:** `npm run va:doctor` und `npm run va:install`.
 
-### Abhängigkeiten (implizit aus Code/Struktur)
+## Laufzeit-Artefakte
+- `LOGS/` und `BACKUPS/` werden zur Laufzeit erstellt und liegen nicht im Repository.
+
+## Abhängigkeiten (implizit aus Struktur)
 - **PHP** für `SCRIPTS/` und `WWW/`.
-- **Node.js (>= 18)** für VA/VIDAX (laut `package.json`).
+- **Node.js (>= 18)** für VA/VIDAX.
 - **SQLite** als Standardspeicher (Schema in `DB/schema.sql`).
-- **ffmpeg** optional für Video-Thumbs/Checks (CLI-Werkzeuge referenziert).
+- **ffmpeg** optional für Video-Checks/Thumbs (CLI-Tools referenziert).
 
-### Datenfluss (hoch-level)
-1. **Import/Scan** über CLI-Worker in `SCRIPTS/`.
-2. **Persistenz** in `DB/`-Schema (Media, Tags, Jobs, Prompts).
-3. **Anzeige/Steuerung** über `WWW/` (Dashboard, Galerie, Detail).
-4. **VA/VIDAX** für Setup/Assets und VIDAX-Serverbetrieb.
-
-### Dokumentationsstand
-Es gibt nun genau drei projektinterne Dokumente:
-- `README.md` (diese Diagnose & Überblick)
-- `AGENTS.MD` (Arbeitsregeln + bekannte Probleme)
-- `VERSIONSLOG.MD` (künstliches Funktions-Update-Log)
+## Dokumentation
+- **README.md** – Projektüberblick (dieses Dokument).
+- **AGENTS.MD** – Arbeitsregeln und Diagnose-Auffälligkeiten.
+- **VERSIONSLOG.MD** – rekonstruiertes Funktions-Update-Log.
 
 > Hinweis: Es wurden **keine Tests** ausgeführt.
-
-## Entfernte/Legacy-Dokumente
-Legacy-Dokumente und redundante Checklisten wurden entfernt, um die Dokumentation auf die drei Kerndateien zu konsolidieren.
 
