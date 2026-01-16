@@ -26,6 +26,7 @@ if (-not (Test-Path -Path $base)) {
     exit 1
 }
 $base = (Resolve-Path -Path $base).Path
+$script:SupervisorPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
 
 $phpExe = Join-Path $base "TOOLS\php\php.exe"
 if (-not (Test-Path -Path $phpExe)) {
@@ -179,7 +180,7 @@ function Acquire-Lock {
     }
 
     $payload = [ordered]@{
-        pid        = $PID
+        pid        = $script:SupervisorPid
         action     = $Label
         started_at = (Get-Date).ToString('o')
     }
@@ -274,11 +275,13 @@ function Get-GitStatus {
 
     $ahead = $null
     $behind = $null
+    $countsOk = $false
     if (-not [string]::IsNullOrWhiteSpace($upstream)) {
         $counts = Get-CommandOutput (& git rev-list --left-right --count HEAD...$upstream 2>$null)
         if ($counts -match '^(\d+)\s+(\d+)$') {
             $ahead = [int]$Matches[1]
             $behind = [int]$Matches[2]
+            $countsOk = $true
         }
     }
 
@@ -289,6 +292,7 @@ function Get-GitStatus {
         upstream    = $upstream
         ahead       = $ahead
         behind      = $behind
+        counts_ok   = $countsOk
         dirty       = $dirty
         dirty_count = $dirtyLines.Count
     }
@@ -364,7 +368,7 @@ function Start-PhpServer {
     if ($phpArgs.Count -gt 0) {
         $serverArgs += $phpArgs
     }
-    $serverArgs += @("-S", "127.0.0.1:8080", "-t", "WWW")
+    $serverArgs += @("-S", "0.0.0.0:8080", "-t", "WWW")
     Write-StartLog "Starte PHP-Server ($Reason)."
     $proc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
     if ($null -ne $proc) {
@@ -414,8 +418,176 @@ function Restart-PhpServer {
     return $true
 }
 
+function Should-AutoUpdate {
+    param([hashtable]$Status)
+
+    if ($null -eq $Status) { return $false }
+    if (-not $Status['fetch_ok']) { return $false }
+    if ([string]::IsNullOrWhiteSpace([string]$Status['upstream'])) { return $false }
+    if ($Status['dirty']) { return $false }
+    if (-not $Status['counts_ok']) { return $false }
+    if ($null -eq $Status['behind']) { return $false }
+    $behind = [int]$Status['behind']
+    $ahead = 0
+    if ($null -ne $Status['ahead']) {
+        $ahead = [int]$Status['ahead']
+    }
+    if ($behind -le 0) { return $false }
+    if ($ahead -gt 0 -and $behind -gt 0) { return $false }
+    return ($ahead -eq 0)
+}
+
+function Invoke-UpdateFlow {
+    param(
+        [string]$Mode,
+        [hashtable]$BeforeStatus
+    )
+
+    $script:Updating = $true
+    try {
+        $status = $BeforeStatus
+        if ($null -eq $status) {
+            $status = Update-GitStatus
+        }
+
+        $result = [ordered]@{
+            ok = $false
+            short_error = ''
+            steps = [ordered]@{}
+            before = [ordered]@{
+                commit = $status['head']
+                branch = $status['branch']
+                ahead  = $status['ahead']
+                behind = $status['behind']
+                dirty  = $status['dirty']
+            }
+            after = $null
+        }
+
+        $dirtyOutput = & git status --porcelain 2>$null
+        $dirtyText = Get-CommandOutput $dirtyOutput
+        if (-not [string]::IsNullOrWhiteSpace($dirtyText)) {
+            $result['short_error'] = 'Working tree dirty.'
+            return $result
+        }
+
+        $upstream = $status['upstream']
+        if ([string]::IsNullOrWhiteSpace($upstream)) {
+            $result['short_error'] = 'Kein Upstream-Branch gesetzt.'
+            return $result
+        }
+
+        $steps = [ordered]@{}
+
+        if ($Mode -eq 'update_ff_restart') {
+            $ahead = $status['ahead']
+            $behind = $status['behind']
+            if ($behind -eq $null) {
+                $result['short_error'] = 'Git-Status unvollständig.'
+                return $result
+            }
+            if ($ahead -gt 0 -and $behind -gt 0) {
+                $result['short_error'] = 'Branch divergiert, FF-Pull nicht möglich.'
+                return $result
+            }
+            if ($behind -gt 0) {
+                $pullOutput = & git pull --ff-only 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    $result['short_error'] = Sanitize-Message (Get-CommandOutput $pullOutput)
+                    Write-StartLog "Git Pull fehlgeschlagen, rollback auf $($status['head'])."
+                    & git reset --hard $status['head'] 2>$null
+                    return $result
+                }
+                $steps['pull'] = 'ff'
+            } else {
+                $steps['pull'] = 'noop'
+            }
+        } else {
+            $pullOutput = & git pull --no-edit 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $result['short_error'] = Sanitize-Message (Get-CommandOutput $pullOutput)
+                Write-StartLog "Git Pull fehlgeschlagen, rollback auf $($status['head'])."
+                & git reset --hard $status['head'] 2>$null
+                return $result
+            }
+            $conflicts = Get-CommandOutput (& git diff --name-only --diff-filter=U 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($conflicts)) {
+                & git merge --abort 2>$null
+                $result['short_error'] = 'Merge-Konflikt erkannt, Abbruch.'
+                & git reset --hard $status['head'] 2>$null
+                return $result
+            }
+            $steps['pull'] = 'merge'
+        }
+
+        $backupOutput = & $phpExe @phpArgs "SCRIPTS\db_backup.php" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $result['short_error'] = Sanitize-Message (Get-CommandOutput $backupOutput)
+            $steps['backup'] = 'error'
+            $result['steps'] = $steps
+            return $result
+        }
+        $steps['backup'] = 'ok'
+
+        $backupDir = Get-BackupDir
+        Rotate-Backups -BackupDir $backupDir -Keep $BackupKeep
+        $steps['backup_rotate'] = "keep=$BackupKeep"
+
+        $migrateOutput = & $phpExe @phpArgs "SCRIPTS\migrate.php" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $result['short_error'] = Sanitize-Message (Get-CommandOutput $migrateOutput)
+            $steps['migrate'] = 'error'
+            $result['steps'] = $steps
+            Write-StartLog "Migration fehlgeschlagen, starte Rollback."
+            $dbPath = Get-DatabasePath
+            if ($dbPath) {
+                $latestBackup = Get-ChildItem -Path $backupDir -File -Filter 'supervisor_*.sqlite' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestBackup) {
+                    try {
+                        Copy-Item -Path $latestBackup.FullName -Destination $dbPath -Force
+                        Write-StartLog "DB-Backup wiederhergestellt: $($latestBackup.Name)"
+                    } catch {
+                        Write-StartLog "DB-Restore fehlgeschlagen: $($_.Exception.Message)"
+                    }
+                }
+            }
+            & git reset --hard $status['head'] 2>$null
+            return $result
+        }
+        $steps['migrate'] = 'ok'
+
+        $restartOk = Restart-PhpServer -Reason 'update'
+        if ($restartOk) {
+            $steps['restart'] = 'php'
+        } else {
+            $steps['restart'] = 'php_failed'
+        }
+        if (-not $restartOk) {
+            $result['short_error'] = 'Healthcheck fehlgeschlagen.'
+            $result['steps'] = $steps
+            return $result
+        }
+
+        $afterStatus = Update-GitStatus
+        $result['after'] = [ordered]@{
+            commit = $afterStatus['head']
+            branch = $afterStatus['branch']
+            ahead  = $afterStatus['ahead']
+            behind = $afterStatus['behind']
+            dirty  = $afterStatus['dirty']
+        }
+        $result['steps'] = $steps
+        $result['ok'] = $true
+        return $result
+    } finally {
+        $script:Updating = $false
+    }
+}
+
 $logDir = Get-LogDir
 $script:StartLogPath = Join-Path $logDir 'start.log'
+$script:Updating = $false
 $startLockPath = Join-Path $logDir 'start.lock'
 $updateLockPath = Join-Path $logDir 'update.lock'
 $allowedUpdateActions = @('update_ff_restart', 'merge_restart')
@@ -449,160 +621,32 @@ if ($action -ne '') {
     }
 
     try {
-    $lastPath = Join-Path $logDir 'git_update.last.json'
-    $startedAt = (Get-Date).ToString('o')
-    $beforeStatus = Update-GitStatus
-    $result = [ordered]@{
-        action = $action
-        started_at = $startedAt
-        result = 'error'
-        before = [ordered]@{
-            commit = $beforeStatus['head']
-            branch = $beforeStatus['branch']
-            ahead  = $beforeStatus['ahead']
-            behind = $beforeStatus['behind']
-            dirty  = $beforeStatus['dirty']
+        $lastPath = Join-Path $logDir 'git_update.last.json'
+        $startedAt = (Get-Date).ToString('o')
+        $beforeStatus = Update-GitStatus
+        $flowResult = Invoke-UpdateFlow -Mode $action -BeforeStatus $beforeStatus
+        $payload = [ordered]@{
+            action = $action
+            started_at = $startedAt
+            result = 'error'
+            before = $flowResult['before']
+            steps = $flowResult['steps']
+            finished_at = (Get-Date).ToString('o')
         }
-    }
-
-    $dirtyOutput = & git status --porcelain 2>$null
-    $dirtyText = Get-CommandOutput $dirtyOutput
-    if (-not [string]::IsNullOrWhiteSpace($dirtyText)) {
-        $result['short_error'] = 'Working tree dirty.'
-        $result['finished_at'] = (Get-Date).ToString('o')
-        Write-JsonFile -Path $lastPath -Payload $result
-        exit 1
-    }
-
-    $upstream = $beforeStatus['upstream']
-    if ([string]::IsNullOrWhiteSpace($upstream)) {
-        $result['short_error'] = 'Kein Upstream-Branch gesetzt.'
-        $result['finished_at'] = (Get-Date).ToString('o')
-        Write-JsonFile -Path $lastPath -Payload $result
-        exit 1
-    }
-
-    $steps = [ordered]@{}
-
-    if ($action -eq 'update_ff_restart') {
-        $ahead = $beforeStatus['ahead']
-        $behind = $beforeStatus['behind']
-        if ($behind -eq $null) {
-            $result['short_error'] = 'Git-Status unvollständig.'
-            $result['finished_at'] = (Get-Date).ToString('o')
-            Write-JsonFile -Path $lastPath -Payload $result
+        if (-not [string]::IsNullOrWhiteSpace($flowResult['short_error'])) {
+            $payload['short_error'] = $flowResult['short_error']
+        }
+        if ($flowResult['after']) {
+            $payload['after'] = $flowResult['after']
+        }
+        if ($flowResult['ok']) {
+            $payload['result'] = 'ok'
+        }
+        Write-JsonFile -Path $lastPath -Payload $payload
+        if (-not $flowResult['ok']) {
             exit 1
         }
-        if ($ahead -gt 0 -and $behind -gt 0) {
-            $result['short_error'] = 'Branch divergiert, FF-Pull nicht möglich.'
-            $result['finished_at'] = (Get-Date).ToString('o')
-            Write-JsonFile -Path $lastPath -Payload $result
-            exit 1
-        }
-        if ($behind -gt 0) {
-            $pullOutput = & git pull --ff-only 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                $result['short_error'] = Sanitize-Message (Get-CommandOutput $pullOutput)
-                $result['finished_at'] = (Get-Date).ToString('o')
-                Write-JsonFile -Path $lastPath -Payload $result
-                Write-StartLog "Git Pull fehlgeschlagen, rollback auf $($beforeStatus['head'])."
-                & git reset --hard $beforeStatus['head'] 2>$null
-                exit 1
-            }
-            $steps['pull'] = 'ff'
-        } else {
-            $steps['pull'] = 'noop'
-        }
-    } else {
-        $pullOutput = & git pull --no-edit 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $result['short_error'] = Sanitize-Message (Get-CommandOutput $pullOutput)
-            $result['finished_at'] = (Get-Date).ToString('o')
-            Write-JsonFile -Path $lastPath -Payload $result
-            Write-StartLog "Git Pull fehlgeschlagen, rollback auf $($beforeStatus['head'])."
-            & git reset --hard $beforeStatus['head'] 2>$null
-            exit 1
-        }
-        $conflicts = Get-CommandOutput (& git diff --name-only --diff-filter=U 2>$null)
-        if (-not [string]::IsNullOrWhiteSpace($conflicts)) {
-            & git merge --abort 2>$null
-            $result['short_error'] = 'Merge-Konflikt erkannt, Abbruch.'
-            $result['finished_at'] = (Get-Date).ToString('o')
-            Write-JsonFile -Path $lastPath -Payload $result
-            & git reset --hard $beforeStatus['head'] 2>$null
-            exit 1
-        }
-        $steps['pull'] = 'merge'
-    }
-
-    $backupOutput = & $phpExe @phpArgs "SCRIPTS\db_backup.php" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $result['short_error'] = Sanitize-Message (Get-CommandOutput $backupOutput)
-        $result['finished_at'] = (Get-Date).ToString('o')
-        $steps['backup'] = 'error'
-        $result['steps'] = $steps
-        Write-JsonFile -Path $lastPath -Payload $result
-        exit 1
-    }
-    $steps['backup'] = 'ok'
-
-    $backupDir = Get-BackupDir
-    Rotate-Backups -BackupDir $backupDir -Keep $BackupKeep
-    $steps['backup_rotate'] = "keep=$BackupKeep"
-
-    $migrateOutput = & $phpExe @phpArgs "SCRIPTS\migrate.php" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $result['short_error'] = Sanitize-Message (Get-CommandOutput $migrateOutput)
-        $result['finished_at'] = (Get-Date).ToString('o')
-        $steps['migrate'] = 'error'
-        $result['steps'] = $steps
-        Write-JsonFile -Path $lastPath -Payload $result
-        Write-StartLog "Migration fehlgeschlagen, starte Rollback."
-        $dbPath = Get-DatabasePath
-        if ($dbPath) {
-            $latestBackup = Get-ChildItem -Path $backupDir -File -Filter 'supervisor_*.sqlite' -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($latestBackup) {
-                try {
-                    Copy-Item -Path $latestBackup.FullName -Destination $dbPath -Force
-                    Write-StartLog "DB-Backup wiederhergestellt: $($latestBackup.Name)"
-                } catch {
-                    Write-StartLog "DB-Restore fehlgeschlagen: $($_.Exception.Message)"
-                }
-            }
-        }
-        & git reset --hard $beforeStatus['head'] 2>$null
-        exit 1
-    }
-    $steps['migrate'] = 'ok'
-
-    $restartOk = Restart-PhpServer -Reason 'update'
-    if ($restartOk) {
-        $steps['restart'] = 'php'
-    } else {
-        $steps['restart'] = 'php_failed'
-    }
-    if (-not $restartOk) {
-        $result['short_error'] = 'Healthcheck fehlgeschlagen.'
-        $result['finished_at'] = (Get-Date).ToString('o')
-        $result['steps'] = $steps
-        Write-JsonFile -Path $lastPath -Payload $result
-        exit 1
-    }
-
-    $afterStatus = Update-GitStatus
-    $result['after'] = [ordered]@{
-        commit = $afterStatus['head']
-        branch = $afterStatus['branch']
-        ahead  = $afterStatus['ahead']
-        behind = $afterStatus['behind']
-        dirty  = $afterStatus['dirty']
-    }
-    $result['steps'] = $steps
-    $result['result'] = 'ok'
-    $result['finished_at'] = (Get-Date).ToString('o')
-    Write-JsonFile -Path $lastPath -Payload $result
-    exit 0
+        exit 0
     } finally {
         Release-Lock -Path $updateLockPath
     }
@@ -629,8 +673,49 @@ try {
     while ($true) {
         $now = Get-Date
         if ($now -ge $nextFetch) {
-            Update-GitStatus | Out-Null
+            $status = Update-GitStatus
+            if (Should-AutoUpdate -Status $status) {
+                Write-StartLog "Auto-Update erkannt: behind=$($status['behind'])"
+                if (Acquire-Lock -Path $updateLockPath -Label 'auto_ff_restart') {
+                    try {
+                        Write-StartLog 'Auto-Update gestartet'
+                        $startedAt = (Get-Date).ToString('o')
+                        $flowResult = Invoke-UpdateFlow -Mode 'update_ff_restart' -BeforeStatus $status
+                        $lastPath = Join-Path $logDir 'git_update.last.json'
+                        $payload = [ordered]@{
+                            action = 'auto_ff_restart'
+                            started_at = $startedAt
+                            result = 'error'
+                            before = $flowResult['before']
+                            steps = $flowResult['steps']
+                            finished_at = (Get-Date).ToString('o')
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace($flowResult['short_error'])) {
+                            $payload['short_error'] = $flowResult['short_error']
+                        }
+                        if ($flowResult['after']) {
+                            $payload['after'] = $flowResult['after']
+                        }
+                        if ($flowResult['ok']) {
+                            $payload['result'] = 'ok'
+                        }
+                        Write-JsonFile -Path $lastPath -Payload $payload
+                        if ($flowResult['ok']) {
+                            Write-StartLog "Auto-Update OK: $($flowResult['after']['commit'])"
+                        } else {
+                            Write-StartLog "Auto-Update fehlgeschlagen: $($flowResult['short_error'])"
+                        }
+                    } finally {
+                        Release-Lock -Path $updateLockPath
+                    }
+                }
+            }
             $nextFetch = $now.AddHours([double]$FetchIntervalHours)
+        }
+
+        if ($script:Updating) {
+            Start-Sleep -Seconds 5
+            continue
         }
 
         $currentProcessId = 0
