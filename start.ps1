@@ -364,11 +364,15 @@ function Stop-PhpServer {
 
     $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not ($pidValue -match '^\d+$')) {
+        Write-StartLog "Stop-PhpServer: ungültige PID-Datei ($pidPath)."
+        try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
         return
     }
 
     $phpPid = [int]$pidValue
+    Write-StartLog "Stop-PhpServer: pidfile=$pidPath pid=$phpPid reason=$Reason"
     if (-not (Test-PhpServerPid -PhpPid $phpPid)) {
+        Write-StartLog "Stop-PhpServer: PID $phpPid ist kein php.exe Prozess, PID-Datei wird entfernt."
         try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
         return
     }
@@ -379,6 +383,8 @@ function Stop-PhpServer {
     } catch {
     }
 
+    $stillAlive = Test-PhpServerPid -PhpPid $phpPid
+    Write-StartLog "Stop-PhpServer: PID $phpPid beendet=$(-not $stillAlive)"
     try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
 }
 
@@ -394,10 +400,29 @@ function Start-PhpServer {
         $serverArgs += $phpArgs
     }
     $serverArgs += @("-S", "0.0.0.0:8080", "-t", "WWW")
-    Write-StartLog "Starte PHP-Server ($Reason)."
+    if (Test-Path -Path $pidPath) {
+        $existingPidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($existingPidValue -match '^\d+$') {
+            $existingPid = [int]$existingPidValue
+            if (-not (Test-PhpServerPid -PhpPid $existingPid)) {
+                Write-StartLog "Stale php_server.pid gefunden (PID $existingPid). Entferne Datei."
+                try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
+            } else {
+                Write-StartLog "Vor-Start Cleanup: aktiver php.exe gefunden (PID $existingPid), stoppe vor Neustart."
+                Stop-PhpServer -Reason 'pre_start_cleanup'
+            }
+        } else {
+            Write-StartLog "Stale php_server.pid gefunden (ungültiger Inhalt). Entferne Datei."
+            try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+
+    $cmdLine = "$phpExe $($serverArgs -join ' ')"
+    Write-StartLog "Starte PHP-Server ($Reason). Cmd=$cmdLine CWD=$base"
     $proc = Start-Process -FilePath $phpExe -ArgumentList $serverArgs -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
     if ($null -ne $proc) {
         Set-Content -Path $pidPath -Value $proc.Id -Encoding UTF8
+        Write-StartLog "PHP-Server gestartet: PID=$($proc.Id) Cmd=$cmdLine CWD=$base"
     }
     return $proc
 }
@@ -419,6 +444,7 @@ function Restart-PhpServer {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         } catch {
         }
+        Write-StartLog "Healthcheck fehlgeschlagen, php.exe (PID $($proc.Id)) wurde gestoppt."
         Stop-PhpServer -Reason 'healthcheck_failed'
         return $false
     }
@@ -610,6 +636,7 @@ if (-not $isUpdateAction) {
 }
 
 $exitHookRegistered = $false
+$cancelHookRegistered = $false
 try {
     Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
         try {
@@ -617,7 +644,15 @@ try {
             if ([string]::IsNullOrWhiteSpace($base)) {
                 $base = (Get-Location).Path
             }
-            $logDir = Join-Path $base 'LOGS'
+            $logDir = $null
+            try {
+                $logDir = & $using:phpExe @($using:phpArgs) -r "require 'SCRIPTS/common.php'; \$cfg = sv_load_config(); \$val = \$cfg['paths']['logs'] ?? (sv_base_dir() . '/LOGS'); if (is_string(\$val) && \$val !== '') { echo \$val; }" 2>$null
+            } catch {
+                $logDir = $null
+            }
+            if ([string]::IsNullOrWhiteSpace($logDir)) {
+                $logDir = Join-Path $base 'LOGS'
+            }
             $pidPath = Join-Path $logDir 'php_server.pid'
             if (Test-Path -Path $pidPath) {
                 $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -631,6 +666,17 @@ try {
         }
     } | Out-Null
     $exitHookRegistered = $true
+} catch {
+}
+
+try {
+    Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -SourceIdentifier 'Console.CancelKeyPress' -Action {
+        try {
+            Stop-PhpServer -Reason 'console_cancel'
+        } catch {
+        }
+    } | Out-Null
+    $cancelHookRegistered = $true
 } catch {
 }
 
@@ -777,6 +823,12 @@ try {
     try {
         if ($exitHookRegistered) {
             Unregister-Event -SourceIdentifier PowerShell.Exiting -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+    try {
+        if ($cancelHookRegistered) {
+            Unregister-Event -SourceIdentifier 'Console.CancelKeyPress' -ErrorAction SilentlyContinue
         }
     } catch {
     }

@@ -14,6 +14,10 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 - FSK18-Inhalte bleiben für Public unsichtbar (Filter/Stream/Thumb blockiert) und können nicht per Query-Parameter aktiviert werden.
 - Session/Cookie-Speicherung des `internal_key` erfolgt nur bei Loopback-Requests.
 
+## Hinweis – Start.ps1 Cleanup
+- Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.
+- Exit-Hooks verwenden konfigurierten Log-Pfad (Fallback `LOGS/`) und stoppen verbliebene `php.exe`.
+
 ## Diagnose – bekannte Auffälligkeiten
 1. **Runtime-Verzeichnisse fehlen im Repo:** `LOGS/` und `BACKUPS/` sind im Arbeitsbaum nicht vorhanden und werden erst zur Laufzeit erzeugt. 
 2. **Beispiel-Konfigurationen ohne echte Instanz:** Unter `config/` liegen nur `*.example.json`-Dateien; echte produktive Konfigurationsdateien sind nicht enthalten. 
