@@ -131,7 +131,6 @@ function Write-StartLog {
         try {
             Add-Content -Path $script:StartLogPath -Value $line -Encoding UTF8
         } catch {
-            # Ignore logging failures.
         }
     }
 }
@@ -175,7 +174,6 @@ function Acquire-Lock {
         try {
             Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
         } catch {
-            # Ignore stale lock cleanup errors.
         }
     }
 
@@ -194,7 +192,6 @@ function Release-Lock {
         try {
             Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
         } catch {
-            # Ignore cleanup errors.
         }
     }
 }
@@ -226,7 +223,6 @@ function Invoke-HealthCheck {
                 return $true
             }
         } catch {
-            # ignore and retry
         }
         Start-Sleep -Seconds $DelaySeconds
     }
@@ -351,10 +347,39 @@ function Rotate-Backups {
             try {
                 Remove-Item -Path $item.FullName -Force -ErrorAction SilentlyContinue
             } catch {
-                # Ignore cleanup errors.
             }
         }
     }
+}
+
+function Stop-PhpServer {
+    param([string]$Reason)
+
+    $logDir = Get-LogDir
+    $pidPath = Join-Path $logDir 'php_server.pid'
+
+    if (-not (Test-Path -Path $pidPath)) {
+        return
+    }
+
+    $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not ($pidValue -match '^\d+$')) {
+        return
+    }
+
+    $phpPid = [int]$pidValue
+    if (-not (Test-PhpServerPid -PhpPid $phpPid)) {
+        try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
+        return
+    }
+
+    try {
+        Write-StartLog "Stoppe PHP-Server (PID $phpPid) wegen: $Reason"
+        Stop-Process -Id $phpPid -Force -ErrorAction SilentlyContinue
+    } catch {
+    }
+
+    try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
 }
 
 function Start-PhpServer {
@@ -379,24 +404,8 @@ function Start-PhpServer {
 
 function Restart-PhpServer {
     param([string]$Reason)
-    $logDir = Get-LogDir
-    $pidPath = Join-Path $logDir 'php_server.pid'
-    if (Test-Path -Path $pidPath) {
-        $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($pidValue -match '^\d+$') {
-            $phpPid = [int]$pidValue
-            if (Test-PhpServerPid -PhpPid $phpPid) {
-                try {
-                    Write-StartLog "Stoppe bestehenden PHP-Server (PID $phpPid)."
-                    Stop-Process -Id $phpPid -Force -ErrorAction SilentlyContinue
-                } catch {
-                    # Ignore stop errors.
-                }
-            } else {
-                Write-StartLog "PID $phpPid ist kein gültiger PHP-Server, ignoriert."
-            }
-        }
-    }
+
+    Stop-PhpServer -Reason "restart:$Reason"
 
     $proc = Start-PhpServer -Reason $Reason
     if ($null -eq $proc) {
@@ -409,8 +418,8 @@ function Restart-PhpServer {
         try {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         } catch {
-            # Ignore stop errors.
         }
+        Stop-PhpServer -Reason 'healthcheck_failed'
         return $false
     }
 
@@ -590,6 +599,7 @@ $script:StartLogPath = Join-Path $logDir 'start.log'
 $script:Updating = $false
 $startLockPath = Join-Path $logDir 'start.lock'
 $updateLockPath = Join-Path $logDir 'update.lock'
+
 $allowedUpdateActions = @('update_ff_restart', 'merge_restart')
 $isUpdateAction = $action -ne '' -and ($allowedUpdateActions -contains $action)
 if (-not $isUpdateAction) {
@@ -597,6 +607,31 @@ if (-not $isUpdateAction) {
         Write-Host "Start bereits aktiv (Lock: $startLockPath)."
         exit 1
     }
+}
+
+$exitHookRegistered = $false
+try {
+    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+        try {
+            $base = $env:SV_BASE
+            if ([string]::IsNullOrWhiteSpace($base)) {
+                $base = (Get-Location).Path
+            }
+            $logDir = Join-Path $base 'LOGS'
+            $pidPath = Join-Path $logDir 'php_server.pid'
+            if (Test-Path -Path $pidPath) {
+                $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($pidValue -match '^\d+$') {
+                    $pid = [int]$pidValue
+                    try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
+            }
+        } catch {
+        }
+    } | Out-Null
+    $exitHookRegistered = $true
+} catch {
 }
 
 if ($action -ne '') {
@@ -734,5 +769,17 @@ try {
         Start-Sleep -Seconds 5
     }
 } finally {
+    try {
+        Stop-PhpServer -Reason 'supervisor_exit'
+    } catch {
+    }
+
+    try {
+        if ($exitHookRegistered) {
+            Unregister-Event -SourceIdentifier PowerShell.Exiting -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+
     Release-Lock -Path $startLockPath
 }
