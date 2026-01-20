@@ -636,7 +636,6 @@ if (-not $isUpdateAction) {
 }
 
 $exitHookRegistered = $false
-$cancelHookRegistered = $false
 try {
     Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
         try {
@@ -644,39 +643,30 @@ try {
             if ([string]::IsNullOrWhiteSpace($base)) {
                 $base = (Get-Location).Path
             }
-            $logDir = $null
-            try {
-                $logDir = & $using:phpExe @($using:phpArgs) -r "require 'SCRIPTS/common.php'; \$cfg = sv_load_config(); \$val = \$cfg['paths']['logs'] ?? (sv_base_dir() . '/LOGS'); if (is_string(\$val) && \$val !== '') { echo \$val; }" 2>$null
-            } catch {
-                $logDir = $null
-            }
-            if ([string]::IsNullOrWhiteSpace($logDir)) {
-                $logDir = Join-Path $base 'LOGS'
-            }
-            $pidPath = Join-Path $logDir 'php_server.pid'
-            if (Test-Path -Path $pidPath) {
-                $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($pidValue -match '^\d+$') {
-                    $pid = [int]$pidValue
-                    try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
+            $pidCandidates = @(
+                (Join-Path (Join-Path $base 'LOGS') 'php_server.pid')
+            )
+
+            foreach ($pidPath in $pidCandidates) {
+                if (Test-Path -Path $pidPath) {
+                    $pidValue = Get-Content -Path $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($pidValue -match '^\d+$') {
+                        $pid = [int]$pidValue
+                        try {
+                            $p = Get-Process -Id $pid -ErrorAction Stop
+                            if ($p.ProcessName -ieq 'php') {
+                                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                            }
+                        } catch {
+                        }
+                    }
+                    try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
                 }
-                try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
             }
         } catch {
         }
     } | Out-Null
     $exitHookRegistered = $true
-} catch {
-}
-
-try {
-    Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -SourceIdentifier 'Console.CancelKeyPress' -Action {
-        try {
-            Stop-PhpServer -Reason 'console_cancel'
-        } catch {
-        }
-    } | Out-Null
-    $cancelHookRegistered = $true
 } catch {
 }
 
@@ -823,12 +813,6 @@ try {
     try {
         if ($exitHookRegistered) {
             Unregister-Event -SourceIdentifier PowerShell.Exiting -ErrorAction SilentlyContinue
-        }
-    } catch {
-    }
-    try {
-        if ($cancelHookRegistered) {
-            Unregister-Event -SourceIdentifier 'Console.CancelKeyPress' -ErrorAction SilentlyContinue
         }
     } catch {
     }

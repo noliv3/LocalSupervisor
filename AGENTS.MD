@@ -16,7 +16,7 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 
 ## Hinweis – Start.ps1 Cleanup
 - Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.
-- Exit-Hooks verwenden konfigurierten Log-Pfad (Fallback `LOGS/`) und stoppen verbliebene `php.exe`.
+- Exit-Hooks prüfen `LOGS/php_server.pid`, validieren `php` als Prozessnamen und entfernen die PID-Datei danach.
 
 ## Diagnose – bekannte Auffälligkeiten
 1. **Runtime-Verzeichnisse fehlen im Repo:** `LOGS/` und `BACKUPS/` sind im Arbeitsbaum nicht vorhanden und werden erst zur Laufzeit erzeugt. 
