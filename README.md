@@ -22,6 +22,10 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **VIDAX-Server:** `npm run start:vidax`.
 - **VA-Tools:** `npm run va:doctor` und `npm run va:install`.
 
+## Start-Workflow (start.ps1)
+- Start.ps1 protokolliert Start/Stop des PHP-Servers inkl. PID/Command/CWD und räumt `php_server.pid` beim Beenden zuverlässig auf.
+- Exit-Hooks nutzen die konfigurierten Log-Pfade (Fallback `LOGS/`) und stoppen verbliebene `php.exe`-Prozesse.
+
 ## Zugriff & Sicherheit (Web)
 - **Public (Remote):** Galerie/Detailansicht lesen, Metadaten sehen und `vote_up` via POST; keine Admin-/Scan-/Rescan-/Checked-/Downvote-Aktionen.
 - **FSK18-Inhalte:** Sichtbarkeit/Stream/Thumb nur bei internem Zugriff; Public kann `?adult=1` nicht erzwingen.
