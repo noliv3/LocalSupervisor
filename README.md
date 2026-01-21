@@ -30,7 +30,14 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **Public (Remote):** Galerie/Detailansicht lesen, Metadaten sehen und `vote_up` via POST; keine Admin-/Scan-/Rescan-/Checked-/Downvote-Aktionen.
 - **FSK18-Inhalte:** Sichtbarkeit/Stream/Thumb nur bei internem Zugriff; Public kann `?adult=1` nicht erzwingen.
 - **Intern (lokal):** Vollzugriff nur über Loopback (`127.0.0.1/::1/::ffff:127.0.0.1`) **und** `internal_api_key`; Dashboard und interne Aktionen sind geschützt.
-- **Key-Storage:** Session/Cookie für `internal_key` wird nur für Loopback-Requests gesetzt.
+- **Key-Storage:** `internal_key` wird nur bei HTTPS oder mit `security.allow_insecure_internal_cookie=true` persistiert; bei HTTP ist der Key pro Request im Header erforderlich.
+
+## Job-Queue-Guards (Konfiguration)
+- Limits für Queue-Größe können über `jobs.queue_max_total`, `jobs.queue_max_per_type_default`, `jobs.queue_max_per_type` und `jobs.queue_max_per_media` gesetzt werden.
+- Überschreitungen führen zu einer Ablehnung weiterer Enqueue-Versuche, damit keine Endlosschleifen entstehen.
+
+## SQLite-Tuning (optional)
+- `db.sqlite.busy_timeout_ms` und `db.sqlite.journal_mode` steuern Sperr-/WAL-Verhalten für SQLite.
 
 ## Laufzeit-Artefakte
 - `LOGS/` und `BACKUPS/` werden zur Laufzeit erstellt und liegen nicht im Repository.

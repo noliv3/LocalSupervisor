@@ -26,9 +26,22 @@ $user     = $config['db']['user']     ?? null;
 $password = $config['db']['password'] ?? null;
 $options  = $config['db']['options']  ?? [];
 
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+if (!in_array($method, ['GET', 'HEAD', 'POST'], true)) {
+    sv_security_error(405, 'Method not allowed.');
+}
+if ($method === 'POST' && !$hasInternalAccess) {
+    $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
+    if ($action !== 'vote_up') {
+        sv_security_error(403, 'Forbidden.');
+    }
+}
+
 try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    sv_apply_sqlite_pragmas($pdo, $config);
+    sv_db_ensure_runtime_indexes($pdo);
 } catch (Throwable $e) {
     sv_security_error(500, 'db');
 }

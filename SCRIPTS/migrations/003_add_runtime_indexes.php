@@ -16,6 +16,10 @@ $migration['run'] = function (PDO $pdo) use (&$migration): void {
         <<<SQL
 CREATE INDEX IF NOT EXISTS idx_media_type
     ON media(type);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_created
+    ON jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_media_tags_media_locked
+    ON media_tags(media_id, locked);
 SQL
     );
 };

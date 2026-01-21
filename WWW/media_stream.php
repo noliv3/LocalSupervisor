@@ -19,9 +19,16 @@ $user     = $config['db']['user']     ?? null;
 $password = $config['db']['password'] ?? null;
 $options  = $config['db']['options']  ?? [];
 
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+if (!in_array($method, ['GET', 'HEAD'], true)) {
+    sv_security_error(405, 'Method not allowed.');
+}
+
 try {
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    sv_apply_sqlite_pragmas($pdo, $config);
+    sv_db_ensure_runtime_indexes($pdo);
 } catch (Throwable $e) {
     sv_security_error(500, 'db');
 }
@@ -167,7 +174,7 @@ $id      = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000,
 $jobAsset = null;
 $usingJobAsset = false;
 
-if (!$hasInternalAccess && ($_SERVER['REQUEST_METHOD'] !== 'GET')) {
+if (!$hasInternalAccess && !in_array($method, ['GET', 'HEAD'], true)) {
     sv_security_error(403, 'Forbidden.');
 }
 

@@ -40,6 +40,8 @@ function sv_db_connect(array $config): array
     try {
         $pdo    = new PDO($dsn, $user, $password, $options);
         $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        sv_apply_sqlite_pragmas($pdo, $config);
+        sv_db_ensure_runtime_indexes($pdo);
     } catch (Throwable $e) {
         throw new RuntimeException(
             'DB-Verbindung fehlgeschlagen (' . $redactedDsn . '): ' . $e->getMessage(),
@@ -54,6 +56,46 @@ function sv_db_connect(array $config): array
         'dsn'           => $dsn,
         'redacted_dsn'  => $redactedDsn,
     ];
+}
+
+function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
+{
+    try {
+        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver !== 'sqlite') {
+            return;
+        }
+
+        $sqliteCfg = $config['db']['sqlite'] ?? [];
+        $busyTimeout = isset($sqliteCfg['busy_timeout_ms']) ? (int)$sqliteCfg['busy_timeout_ms'] : 5000;
+        if ($busyTimeout > 0) {
+            $pdo->exec('PRAGMA busy_timeout = ' . $busyTimeout);
+        }
+
+        $journalMode = isset($sqliteCfg['journal_mode']) && is_string($sqliteCfg['journal_mode'])
+            ? strtoupper(trim($sqliteCfg['journal_mode']))
+            : '';
+        if ($journalMode !== '') {
+            $pdo->exec('PRAGMA journal_mode = ' . $journalMode);
+        }
+    } catch (Throwable $e) {
+        // Pragmas sind optional; Fehler sollen den Verbindungsaufbau nicht blockieren.
+    }
+}
+
+function sv_db_ensure_runtime_indexes(PDO $pdo): void
+{
+    try {
+        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver !== 'sqlite') {
+            return;
+        }
+
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_media_tags_media_locked ON media_tags(media_id, locked)');
+    } catch (Throwable $e) {
+        // Index-Setup ist optional; Fehler sollen Runtime-Zugriff nicht blockieren.
+    }
 }
 
 function sv_db_redact_dsn(string $dsn): string

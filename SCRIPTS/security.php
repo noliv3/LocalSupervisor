@@ -167,22 +167,35 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
     }
 
     if (in_array($providedSource, ['header', 'get', 'post'], true) && sv_is_loopback_remote_addr()) {
-        $_SESSION['sv_internal_key'] = $expectedKey;
-        if (!headers_sent()) {
-            $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
-            setcookie('internal_key', $expectedKey, [
-                'expires'  => time() + 7 * 24 * 60 * 60,
-                'path'     => '/',
-                'samesite' => 'Lax',
-                'secure'   => $secureCookie,
-                'httponly' => true,
+        $security = $config['security'] ?? [];
+        $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+        $allowInsecure = !empty($security['allow_insecure_internal_cookie']);
+        $allowPersist = $secureCookie || $allowInsecure;
+
+        if ($allowPersist) {
+            $_SESSION['sv_internal_key'] = $expectedKey;
+            if (!headers_sent()) {
+                setcookie('internal_key', $expectedKey, [
+                    'expires'  => time() + 7 * 24 * 60 * 60,
+                    'path'     => '/',
+                    'samesite' => 'Lax',
+                    'secure'   => $secureCookie,
+                    'httponly' => true,
+                ]);
+            }
+            sv_security_log($config, 'Internal key stored for session', [
+                'action' => $action,
+                'ip'     => $clientIp,
+                'source' => $providedSource,
+                'secure' => $secureCookie,
+            ]);
+        } else {
+            sv_security_log($config, 'Internal key not persisted (insecure transport)', [
+                'action' => $action,
+                'ip'     => $clientIp,
+                'source' => $providedSource,
             ]);
         }
-        sv_security_log($config, 'Internal key stored for session', [
-            'action' => $action,
-            'ip'     => $clientIp,
-            'source' => $providedSource,
-        ]);
     }
 
     $GLOBALS['sv_last_internal_key_valid'] = true;

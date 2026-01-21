@@ -31,6 +31,7 @@ const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
 const SV_JOB_STATUS_CANCELED      = 'canceled';
 const SV_JOB_STUCK_MINUTES        = 30;
+const SV_JOB_QUEUE_STATUSES       = ['queued', 'pending', 'created'];
 const SV_LIFECYCLE_ACTIVE         = 'active';
 const SV_LIFECYCLE_REVIEW         = 'review';
 const SV_LIFECYCLE_PENDING_DELETE = 'pending_delete';
@@ -40,6 +41,68 @@ const SV_QUALITY_OK               = 'ok';
 const SV_QUALITY_REVIEW           = 'review';
 const SV_QUALITY_BLOCKED          = 'blocked';
 const SV_BACKFILL_MAX_ENQUEUE_PER_RUN = 200;
+
+function sv_job_queue_limits(array $config): array
+{
+    $jobsCfg = $config['jobs'] ?? [];
+    $perType = $jobsCfg['queue_max_per_type'] ?? [];
+    if (!is_array($perType)) {
+        $perType = [];
+    }
+
+    return [
+        'total' => isset($jobsCfg['queue_max_total']) ? (int)$jobsCfg['queue_max_total'] : 2000,
+        'per_type_default' => isset($jobsCfg['queue_max_per_type_default'])
+            ? (int)$jobsCfg['queue_max_per_type_default']
+            : 500,
+        'per_type' => $perType,
+        'per_media' => isset($jobsCfg['queue_max_per_media']) ? (int)$jobsCfg['queue_max_per_media'] : 2,
+    ];
+}
+
+function sv_enforce_job_queue_capacity(PDO $pdo, array $config, string $type, ?int $mediaId = null): void
+{
+    $limits = sv_job_queue_limits($config);
+    $queueStatuses = SV_JOB_QUEUE_STATUSES;
+    $placeholders = implode(',', array_fill(0, count($queueStatuses), '?'));
+
+    $maxTotal = $limits['total'];
+    if ($maxTotal > 0) {
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM jobs WHERE status IN (' . $placeholders . ')');
+        $stmt->execute($queueStatuses);
+        $total = (int)$stmt->fetchColumn();
+        if ($total >= $maxTotal) {
+            throw new RuntimeException('Job-Queue-Limit erreicht (gesamt).');
+        }
+    }
+
+    $maxPerType = $limits['per_type_default'];
+    if (isset($limits['per_type'][$type])) {
+        $maxPerType = (int)$limits['per_type'][$type];
+    }
+    if ($maxPerType > 0) {
+        $stmt = $pdo->prepare(
+            'SELECT COUNT(*) FROM jobs WHERE type = ? AND status IN (' . $placeholders . ')'
+        );
+        $stmt->execute(array_merge([$type], $queueStatuses));
+        $count = (int)$stmt->fetchColumn();
+        if ($count >= $maxPerType) {
+            throw new RuntimeException('Job-Queue-Limit erreicht (' . $type . ').');
+        }
+    }
+
+    $maxPerMedia = $limits['per_media'];
+    if ($mediaId !== null && $maxPerMedia > 0) {
+        $stmt = $pdo->prepare(
+            'SELECT COUNT(*) FROM jobs WHERE type = ? AND media_id = ? AND status IN (' . $placeholders . ')'
+        );
+        $stmt->execute(array_merge([$type, $mediaId], $queueStatuses));
+        $count = (int)$stmt->fetchColumn();
+        if ($count >= $maxPerMedia) {
+            throw new RuntimeException('Job-Queue-Limit erreicht (Media).');
+        }
+    }
+}
 
 function sv_is_sqlite_busy(Throwable $error): bool
 {
@@ -280,6 +343,8 @@ function sv_open_pdo(array $config): PDO
 
     $pdo = new PDO($dsn, $user, $password, $options);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    sv_apply_sqlite_pragmas($pdo, $config);
+    sv_db_ensure_runtime_indexes($pdo);
 
     return $pdo;
 }
@@ -847,10 +912,12 @@ function sv_fetch_prompt_snapshot(PDO $pdo, int $mediaId): ?array
     }
 }
 
-function sv_create_forge_job(PDO $pdo, int $mediaId, array $payload, ?int $promptId, callable $logger): int
+function sv_create_forge_job(PDO $pdo, array $config, int $mediaId, array $payload, ?int $promptId, callable $logger): int
 {
     $now = date('c');
     $requestJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+    sv_enforce_job_queue_capacity($pdo, $config, SV_FORGE_JOB_TYPE, $mediaId);
 
     $stmt = $pdo->prepare(
         'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
@@ -1650,6 +1717,7 @@ function sv_queue_forge_regeneration(PDO $pdo, array $config, int $mediaId, call
 
     $jobId = sv_create_forge_job(
         $pdo,
+        $config,
         $mediaId,
         $jobData['payload'],
         $jobData['prompt_id'],
@@ -1844,6 +1912,7 @@ function sv_queue_forge_repair_job(PDO $pdo, array $config, int $mediaId, array 
 
     $jobId = sv_create_forge_job(
         $pdo,
+        $config,
         $mediaId,
         $jobData['payload'],
         $jobData['prompt_id'],
@@ -2436,6 +2505,8 @@ function sv_create_scan_backfill_job(PDO $pdo, array $config, array $options, ca
         'created_at' => date('c'),
     ];
 
+    sv_enforce_job_queue_capacity($pdo, $config, SV_JOB_TYPE_SCAN_BACKFILL_TAGS);
+
     $now = date('c');
     $insert = $pdo->prepare(
         'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
@@ -2494,6 +2565,8 @@ function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $lim
         'nsfw_threshold'  => (float)(($config['scanner']['nsfw_threshold'] ?? 0.7)),
         'created_at'      => $now,
     ];
+
+    sv_enforce_job_queue_capacity($pdo, $config, SV_JOB_TYPE_SCAN_PATH);
 
     $stmt = $pdo->prepare(
         'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
@@ -2566,6 +2639,8 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
         'path'           => str_replace('\\', '/', $path),
         'nsfw_threshold' => (float)($config['scanner']['nsfw_threshold'] ?? 0.7),
     ];
+
+    sv_enforce_job_queue_capacity($pdo, $config, SV_JOB_TYPE_RESCAN_MEDIA, $mediaId);
 
     sv_db_exec_retry(static function () use ($pdo, $mediaId, $now, $payload): void {
         $insert = $pdo->prepare(
@@ -3828,6 +3903,13 @@ function sv_enqueue_library_rename_jobs(PDO $pdo, array $config, int $limit, int
         if ($checkJob->fetchColumn()) {
             $alreadyPresent++;
             continue;
+        }
+
+        try {
+            sv_enforce_job_queue_capacity($pdo, $config, SV_JOB_TYPE_LIBRARY_RENAME, (int)$row['id']);
+        } catch (Throwable $e) {
+            $logger('Library-Rename Queue-Limit erreicht: ' . sv_sanitize_error_message($e->getMessage()));
+            break;
         }
 
         $payload = [
