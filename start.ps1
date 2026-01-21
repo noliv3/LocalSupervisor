@@ -646,6 +646,12 @@ try {
             $pidCandidates = @(
                 (Join-Path (Join-Path $base 'LOGS') 'php_server.pid')
             )
+            try {
+                if ($using:logDir) {
+                    $pidCandidates += (Join-Path $using:logDir 'php_server.pid')
+                }
+            } catch {
+            }
 
             foreach ($pidPath in $pidCandidates) {
                 if (Test-Path -Path $pidPath) {

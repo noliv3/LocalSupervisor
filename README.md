@@ -24,7 +24,7 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 
 ## Start-Workflow (start.ps1)
 - Start.ps1 protokolliert Start/Stop des PHP-Servers inkl. PID/Command/CWD und räumt `php_server.pid` beim Beenden zuverlässig auf.
-- Exit-Hook prüft die PID-Datei unter `LOGS/`, validiert den Prozessnamen (`php`) und entfernt die PID-Datei danach.
+- Exit-Hook prüft die PID-Datei unter `LOGS/` sowie optional im konfigurierten Log-Dir, validiert den Prozessnamen (`php`) und entfernt die PID-Datei danach.
 
 ## Zugriff & Sicherheit (Web)
 - **Public (Remote):** Galerie/Detailansicht lesen, Metadaten sehen und `vote_up` via POST; keine Admin-/Scan-/Rescan-/Checked-/Downvote-Aktionen.
