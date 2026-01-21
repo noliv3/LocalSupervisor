@@ -12,7 +12,10 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 ## Hinweis – Web-Zugriff (Dokumentation)
 - Public ist auf Galerie/Detailansicht + Upvote beschränkt; alle internen Aktionen erfordern Loopback + `internal_api_key`.
 - FSK18-Inhalte bleiben für Public unsichtbar (Filter/Stream/Thumb blockiert) und können nicht per Query-Parameter aktiviert werden.
-- Session/Cookie-Speicherung des `internal_key` erfolgt nur bei Loopback-Requests.
+- Session/Cookie-Speicherung des `internal_key` erfolgt nur bei HTTPS oder expliziter Freigabe (`security.allow_insecure_internal_cookie=true`); bei HTTP ist der Key pro Request zu senden.
+
+## Hinweis – Job-Queue-Guards
+- Queue-Limits sind konfigurierbar (`jobs.queue_max_total`, `jobs.queue_max_per_type_default`, `jobs.queue_max_per_type`, `jobs.queue_max_per_media`), damit Enqueue-Schleifen begrenzt werden.
 
 ## Hinweis – Start.ps1 Cleanup
 - Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.

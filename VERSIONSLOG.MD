@@ -27,3 +27,22 @@
 - **Geänderte Stellen in `start.ps1`:** `Start-PhpServer`, `Stop-PhpServer`, `Restart-PhpServer`, Exit-Hook-Registrierung (`PowerShell.Exiting`), Ctrl+C Hook, Cleanup-Finally.
 - **Verhaltensgarantie:** Wenn `start.ps1` endet, endet `php.exe` (PID-File Cleanup + Exit-Hooks).
 - **Prüfkommandos (manuell):** `powershell ./start.ps1` starten/stoppen; `Get-Process php | Select-Object Id,Path,StartTime`; `Test-Path LOGS/php_server.pid`; Ctrl+C/Window-Close prüfen (php.exe sollte beendet sein).
+
+## 2026-03-15 — Repo-Checkup V25
+**Was gefunden**
+- `internal_key` wurde bei Loopback auch über HTTP persistiert; kein Opt-In für unsichere Cookie-Speicherung (`SCRIPTS/security.php`).
+- Öffentliche Read-Endpoints hatten keine explizite Method-Whitelist (GET/HEAD), wodurch default-allow für andere Methoden möglich war (`WWW/mediadb.php`, `WWW/media_view.php`, `WWW/media_stream.php`, `WWW/thumb.php`).
+- Job-Queue konnte ohne harte Limits weiter anwachsen; Index für `jobs(status, created_at)` fehlte; Locked-Tags-Filter ohne zusammengesetzten Index (`SCRIPTS/operations.php`, `DB/schema.sql`).
+- SQLite-Pragmas für `busy_timeout`/`journal_mode` waren nicht zentral gesetzt (`SCRIPTS/db_helpers.php`, `SCRIPTS/operations.php`).
+
+**Was geändert**
+- Persistenz des `internal_key` nur noch bei HTTPS oder explizitem Opt-In (`security.allow_insecure_internal_cookie`) (`SCRIPTS/security.php`, `CONFIG/config.example.php`).
+- Öffentliche Read-Endpoints whitelisten nur GET/HEAD/POST (vote_up), andere Methoden werden abgewiesen (`WWW/mediadb.php`, `WWW/media_view.php`, `WWW/media_stream.php`, `WWW/thumb.php`).
+- Queue-Limits und per-Media-Guards eingeführt, Enqueue-Paths prüfen Limits vor Insert (`SCRIPTS/operations.php`, `CONFIG/config.example.php`).
+- Runtime-Index-Setup ergänzt, Schema/ Migration aktualisiert (`SCRIPTS/db_helpers.php`, `SCRIPTS/migrations/003_add_runtime_indexes.php`, `DB/schema.sql`).
+- SQLite-Pragmas zentralisiert und bei DB-Connect angewendet (`SCRIPTS/db_helpers.php`, `SCRIPTS/operations.php`).
+
+**Warum**
+- Schutz vor unsicherer Key-Persistenz ohne TLS und klare Public-Read-Abgrenzung.
+- Queue-Overflow vermeiden und Performance für Job-/Tag-Filter verbessern.
+- Stabilere SQLite-Locks und konsistente Runtime-Optimierungen.

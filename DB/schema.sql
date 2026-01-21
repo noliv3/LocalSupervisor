@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS media_tags (
 CREATE INDEX IF NOT EXISTS idx_media_tags_media
     ON media_tags(media_id);
 
+CREATE INDEX IF NOT EXISTS idx_media_tags_media_locked
+    ON media_tags(media_id, locked);
+
 CREATE INDEX IF NOT EXISTS idx_media_tags_tag
     ON media_tags(tag_id);
 
@@ -185,6 +188,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status
     ON jobs(status);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status_created
+    ON jobs(status, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_jobs_media
     ON jobs(media_id);
