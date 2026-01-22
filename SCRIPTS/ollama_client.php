@@ -13,10 +13,18 @@ function sv_ollama_config(array $config): array
         $ollama = [];
     }
 
+    $enabled = !array_key_exists('enabled', $ollama) || (bool)$ollama['enabled'] === true;
+
     $model = $ollama['model'] ?? [];
     if (!is_array($model)) {
         $model = [];
     }
+
+    $modelDefault = isset($ollama['model_default']) && is_string($ollama['model_default']) && trim($ollama['model_default']) !== ''
+        ? trim($ollama['model_default'])
+        : (isset($model['default']) && is_string($model['default']) && trim($model['default']) !== ''
+            ? trim($model['default'])
+            : 'llava:latest');
 
     $retry = $ollama['retry'] ?? [];
     if (!is_array($retry)) {
@@ -28,21 +36,37 @@ function sv_ollama_config(array $config): array
         $deterministic = [];
     }
 
+    $worker = $ollama['worker'] ?? [];
+    if (!is_array($worker)) {
+        $worker = [];
+    }
+
     return [
+        'enabled' => $enabled,
         'base_url' => isset($ollama['base_url']) && is_string($ollama['base_url']) && trim($ollama['base_url']) !== ''
             ? trim($ollama['base_url'])
             : SV_OLLAMA_DEFAULT_BASE_URL,
+        'model_default' => $modelDefault,
         'model' => [
             'default' => isset($model['default']) && is_string($model['default']) && trim($model['default']) !== ''
                 ? trim($model['default'])
-                : 'llava:latest',
+                : $modelDefault,
             'vision' => isset($model['vision']) && is_string($model['vision']) && trim($model['vision']) !== ''
                 ? trim($model['vision'])
-                : 'llava:latest',
+                : $modelDefault,
             'text' => isset($model['text']) && is_string($model['text']) && trim($model['text']) !== ''
                 ? trim($model['text'])
                 : 'llama3:latest',
         ],
+        'caption_prompt_template' => isset($ollama['caption_prompt_template']) && is_string($ollama['caption_prompt_template']) && trim($ollama['caption_prompt_template']) !== ''
+            ? trim($ollama['caption_prompt_template'])
+            : "Beschreibe das Bild in 1-3 Sätzen. Antworte ausschließlich als JSON.\nFormat: {\"caption\":\"...\",\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}",
+        'title_prompt_template' => isset($ollama['title_prompt_template']) && is_string($ollama['title_prompt_template']) && trim($ollama['title_prompt_template']) !== ''
+            ? trim($ollama['title_prompt_template'])
+            : "Erzeuge einen kurzen, prägnanten Titel (max 80 Zeichen). Antworte ausschließlich als JSON.\nFormat: {\"title\":\"...\",\"rationale\":\"...\"}",
+        'prompt_eval_template' => isset($ollama['prompt_eval_template']) && is_string($ollama['prompt_eval_template']) && trim($ollama['prompt_eval_template']) !== ''
+            ? trim($ollama['prompt_eval_template'])
+            : "Bewerte, wie gut der folgende Prompt das Bild beschreibt (0-100). Nenne Widersprüche, fehlende Elemente und eine kurze Begründung. Antworte ausschließlich als JSON.\nFormat: {\"score\":0,\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}\nPrompt: {{prompt}}",
         'timeout_ms' => isset($ollama['timeout_ms']) ? max(1000, (int)$ollama['timeout_ms']) : 20000,
         'max_image_bytes' => isset($ollama['max_image_bytes']) ? max(0, (int)$ollama['max_image_bytes']) : 4194304,
         'retry' => [
@@ -55,6 +79,16 @@ function sv_ollama_config(array $config): array
             'top_p' => isset($deterministic['top_p']) ? (float)$deterministic['top_p'] : 1.0,
             'seed' => isset($deterministic['seed']) ? $deterministic['seed'] : 42,
         ],
+        'worker' => [
+            'batch_size' => isset($worker['batch_size']) ? max(1, (int)$worker['batch_size']) : 5,
+            'max_retries' => isset($worker['max_retries']) ? max(0, (int)$worker['max_retries']) : 2,
+        ],
+        'prompt_eval_fallback' => isset($ollama['prompt_eval_fallback']) && is_string($ollama['prompt_eval_fallback'])
+            ? strtolower(trim($ollama['prompt_eval_fallback']))
+            : 'tags',
+        'prompt_eval_fallback_separator' => isset($ollama['prompt_eval_fallback_separator']) && is_string($ollama['prompt_eval_fallback_separator'])
+            ? (string)$ollama['prompt_eval_fallback_separator']
+            : ', ',
     ];
 }
 
@@ -267,6 +301,9 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'ok' => false,
                 'model' => $model,
                 'response_json' => null,
+                'response_text' => null,
+                'raw_body' => $responseBody !== false ? (string)$responseBody : null,
+                'parse_error' => true,
                 'usage' => null,
                 'error' => 'Ungültige JSON-Antwort',
                 'latency_ms' => $latencyMs,
@@ -278,29 +315,29 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'ok' => false,
                 'model' => $model,
                 'response_json' => null,
+                'response_text' => null,
+                'raw_body' => $responseBody !== false ? (string)$responseBody : null,
+                'parse_error' => true,
                 'usage' => null,
                 'error' => sv_sanitize_error_message((string)$decoded['error'], 200),
                 'latency_ms' => $latencyMs,
             ];
         }
 
-        $responseJson = $decoded['response'] ?? null;
-        if (is_string($responseJson)) {
-            $parsed = json_decode($responseJson, true);
+        $responseText = $decoded['response'] ?? null;
+        $responseJson = null;
+        $parseError = false;
+        if (is_array($responseText)) {
+            $responseJson = $responseText;
+        } elseif (is_string($responseText)) {
+            $parsed = json_decode($responseText, true);
             if (is_array($parsed)) {
                 $responseJson = $parsed;
+            } else {
+                $parseError = true;
             }
-        }
-
-        if (!is_array($responseJson)) {
-            return [
-                'ok' => false,
-                'model' => $model,
-                'response_json' => null,
-                'usage' => null,
-                'error' => 'Antwort ist kein JSON-Objekt',
-                'latency_ms' => $latencyMs,
-            ];
+        } elseif ($responseText !== null) {
+            $parseError = true;
         }
 
         $usage = [];
@@ -315,6 +352,9 @@ function sv_ollama_request(array $config, array $input, array $options): array
             'ok' => true,
             'model' => $decoded['model'] ?? $model,
             'response_json' => $responseJson,
+            'response_text' => is_string($responseText) ? $responseText : null,
+            'raw_body' => $responseBody !== false ? (string)$responseBody : null,
+            'parse_error' => $parseError,
             'usage' => $usage !== [] ? $usage : null,
             'error' => null,
             'latency_ms' => $latencyMs,

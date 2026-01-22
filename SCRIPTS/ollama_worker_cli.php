@@ -74,11 +74,14 @@ $lockPayload = [
 
 $limit = null;
 $mediaId = null;
+$maxBatches = null;
 foreach (array_slice($argv, 1) as $arg) {
     if (strpos($arg, '--limit=') === 0) {
         $limit = (int)substr($arg, 8);
     } elseif (strpos($arg, '--media-id=') === 0) {
         $mediaId = (int)substr($arg, 11);
+    } elseif (strpos($arg, '--max-batches=') === 0) {
+        $maxBatches = (int)substr($arg, 14);
     }
 }
 
@@ -87,13 +90,38 @@ $logger = function (string $msg): void {
 };
 
 try {
-    $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, $mediaId);
+    $batchCount = 0;
+    $aggregate = [
+        'total' => 0,
+        'done' => 0,
+        'error' => 0,
+        'skipped' => 0,
+        'retried' => 0,
+    ];
+
+    while (true) {
+        $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, $mediaId);
+        foreach ($aggregate as $key => $value) {
+            $aggregate[$key] = $value + (int)($summary[$key] ?? 0);
+        }
+        $batchCount++;
+
+        if ((int)($summary['total'] ?? 0) === 0) {
+            break;
+        }
+        if ($maxBatches !== null && $batchCount >= $maxBatches) {
+            break;
+        }
+    }
+
     $line = sprintf(
-        'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Übersprungen: %d',
-        (int)($summary['total'] ?? 0),
-        (int)($summary['done'] ?? 0),
-        (int)($summary['error'] ?? 0),
-        (int)($summary['skipped'] ?? 0)
+        'Batches: %d | Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Retries: %d | Übersprungen: %d',
+        $batchCount,
+        (int)($aggregate['total'] ?? 0),
+        (int)($aggregate['done'] ?? 0),
+        (int)($aggregate['error'] ?? 0),
+        (int)($aggregate['retried'] ?? 0),
+        (int)($aggregate['skipped'] ?? 0)
     );
     fwrite(STDOUT, $line . PHP_EOL);
     exit(0);

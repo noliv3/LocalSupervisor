@@ -2,42 +2,44 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../paths.php';
-require_once __DIR__ . '/ollama_client.php';
+require_once __DIR__ . '/../ollama_client.php';
 require_once __DIR__ . '/ollama_result_normalize.php';
 
-const SV_OLLAMA_ANALYZE_PROMPT = "Erzeuge einen Titel, eine kurze Bildbeschreibung (max 3 Sätze)\n   und eine Qualitätswertung von 0–100.\n   Antworte ausschließlich als JSON mit Feldern:\n   title, description, quality_score.";
+const SV_OLLAMA_ANALYZE_PROMPT = "Erzeuge einen Titel, eine kurze Bildbeschreibung (max 3 Sätze)\nund eine Qualitätswertung von 0–100. Antworte ausschließlich als JSON mit Feldern:\ntitle, description, quality_score.";
 
 function sv_ollama_analyze_image(PDO $pdo, array $config, int $mediaId, ?string $modelOverride = null): array
 {
     $pathsCfg = $config['paths'] ?? [];
-    $ollamaCfg = $config['ollama'] ?? [];
-    $modelCfg = $ollamaCfg['model'] ?? [];
+    $ollamaCfg = sv_ollama_config($config);
 
     $model = $modelOverride !== null && trim($modelOverride) !== ''
         ? trim($modelOverride)
-        : (is_array($modelCfg) && isset($modelCfg['vision']) && is_string($modelCfg['vision']) && trim($modelCfg['vision']) !== ''
-            ? trim($modelCfg['vision'])
-            : 'llava:latest');
+        : ($ollamaCfg['model']['vision'] ?? $ollamaCfg['model_default']);
 
-    $baseUrl = isset($ollamaCfg['base_url']) && is_string($ollamaCfg['base_url']) && trim($ollamaCfg['base_url']) !== ''
-        ? trim($ollamaCfg['base_url'])
-        : SV_OLLAMA_BASE_URL_DEFAULT;
+    $timeoutMs = (int)$ollamaCfg['timeout_ms'];
 
-    $timeoutMs = isset($ollamaCfg['timeout_ms']) ? max(1000, (int)$ollamaCfg['timeout_ms']) : 20000;
-
-    $pathStmt = $pdo->prepare('SELECT path FROM media WHERE id = :id LIMIT 1');
+    $pathStmt = $pdo->prepare('SELECT path, type, filesize FROM media WHERE id = :id LIMIT 1');
     $pathStmt->execute([':id' => $mediaId]);
-    $path = $pathStmt->fetchColumn();
+    $row = $pathStmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!is_string($path) || trim($path) === '') {
+    if (!is_array($row) || !is_string($row['path'] ?? null) || trim((string)$row['path']) === '') {
         throw new RuntimeException('Media-Pfad nicht gefunden.');
     }
+    if (($row['type'] ?? '') !== 'image') {
+        throw new RuntimeException('Nur Bildmedien können analysiert werden.');
+    }
 
-    $path = str_replace('\\', '/', trim($path));
+    $path = (string)$row['path'];
     sv_assert_media_path_allowed($path, $pathsCfg, 'ollama_analyze');
 
     if (!is_file($path)) {
         throw new RuntimeException('Media-Datei fehlt.');
+    }
+
+    $fileSize = isset($row['filesize']) ? (int)$row['filesize'] : (int)@filesize($path);
+    $maxBytes = (int)$ollamaCfg['max_image_bytes'];
+    if ($maxBytes > 0 && $fileSize > $maxBytes) {
+        throw new RuntimeException('Bildgröße zu groß (' . $fileSize . ' > ' . $maxBytes . ' Bytes).');
     }
 
     $imageData = @file_get_contents($path);
@@ -47,19 +49,26 @@ function sv_ollama_analyze_image(PDO $pdo, array $config, int $mediaId, ?string 
 
     $imageBase64 = base64_encode($imageData);
 
-    $rawJson = sv_ollama_client_generate(
-        $model,
-        SV_OLLAMA_ANALYZE_PROMPT,
-        [$imageBase64],
-        $timeoutMs,
-        $baseUrl
-    );
+    $response = sv_ollama_request($config, [
+        'prompt' => SV_OLLAMA_ANALYZE_PROMPT,
+        'images' => [$imageBase64],
+    ], [
+        'model' => $model,
+        'timeout_ms' => $timeoutMs,
+    ]);
 
-    $normalized = sv_ollama_normalize_result($rawJson);
+    if (empty($response['ok'])) {
+        $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
+        throw new RuntimeException($error);
+    }
+
+    $responseJson = is_array($response['response_json'] ?? null) ? $response['response_json'] : null;
+    $normalized = $responseJson !== null ? $responseJson : sv_ollama_normalize_result((string)($response['response_text'] ?? ''));
 
     return [
-        'model' => $model,
-        'raw_json' => $rawJson,
+        'model' => $response['model'] ?? $model,
+        'raw_json' => $responseJson,
         'normalized' => $normalized,
+        'parse_error' => !empty($response['parse_error']),
     ];
 }

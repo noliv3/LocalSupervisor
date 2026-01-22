@@ -17,34 +17,32 @@ try {
 }
 
 $limit = 50;
-$offset = 0;
-$mediaId = null;
-$force = false;
-$typeArg = 'both';
+$modeArg = 'all';
+$since = null;
+$allFlag = false;
+$missingTitle = false;
+$missingCaption = false;
 
 foreach (array_slice($argv, 1) as $arg) {
     if (strpos($arg, '--limit=') === 0) {
         $limit = (int)substr($arg, 8);
-    } elseif (strpos($arg, '--offset=') === 0) {
-        $offset = (int)substr($arg, 9);
-    } elseif (strpos($arg, '--media-id=') === 0) {
-        $mediaId = (int)substr($arg, 11);
-    } elseif (strpos($arg, '--force=') === 0) {
-        $force = (int)substr($arg, 8) === 1;
-    } elseif (strpos($arg, '--type=') === 0) {
-        $typeArg = trim(substr($arg, 7));
+    } elseif (strpos($arg, '--since=') === 0) {
+        $since = trim(substr($arg, 8));
+    } elseif ($arg === '--all') {
+        $allFlag = true;
+    } elseif ($arg === '--missing-title') {
+        $missingTitle = true;
+    } elseif ($arg === '--missing-caption') {
+        $missingCaption = true;
+    } elseif (strpos($arg, '--mode=') === 0) {
+        $modeArg = trim(substr($arg, 7));
     }
 }
 
-$types = [];
-if ($typeArg === 'caption') {
-    $types = [SV_JOB_TYPE_OLLAMA_CAPTION];
-} elseif ($typeArg === 'title') {
-    $types = [SV_JOB_TYPE_OLLAMA_TITLE];
-} elseif ($typeArg === 'both' || $typeArg === '') {
-    $types = [SV_JOB_TYPE_OLLAMA_CAPTION, SV_JOB_TYPE_OLLAMA_TITLE];
-} else {
-    fwrite(STDERR, "Ungültiger --type-Wert. Erlaubt: caption|title|both\n");
+$modeArg = $modeArg === '' ? 'all' : $modeArg;
+$allowedModes = ['caption', 'title', 'prompt_eval', 'all'];
+if (!in_array($modeArg, $allowedModes, true)) {
+    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|all\n");
     exit(1);
 }
 
@@ -52,92 +50,113 @@ $logger = function (string $msg): void {
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
-$findCandidates = static function (PDO $pdo, string $metaKey, ?int $limit, ?int $offset, ?int $mediaId, bool $force): array {
-    if ($mediaId !== null && $mediaId > 0) {
-        $stmt = $pdo->prepare('SELECT id FROM media WHERE id = :id');
-        $stmt->execute([':id' => $mediaId]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!$row) {
-            return [];
-        }
+if ($limit <= 0) {
+    $limit = 50;
+}
 
-        if ($force) {
-            return [$mediaId];
-        }
+$buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $since) use ($pdo, $limit): PDOStatement {
+    $sql = 'SELECT m.id FROM media m';
+    $params = [];
 
-        $metaStmt = $pdo->prepare('SELECT 1 FROM media_meta WHERE media_id = :media_id AND meta_key = :meta_key LIMIT 1');
-        $metaStmt->execute([
-            ':media_id' => $mediaId,
-            ':meta_key' => $metaKey,
-        ]);
-        if ($metaStmt->fetchColumn()) {
-            return [];
-        }
-
-        return [$mediaId];
+    if (!$allFlag) {
+        $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
+        $params[':mode'] = $mode;
     }
 
-    if ($limit === null || $limit <= 0) {
-        $limit = 50;
+    $conditions = [];
+    if (!$allFlag) {
+        $conditions[] = 'o.id IS NULL';
     }
-    if ($offset === null || $offset < 0) {
-        $offset = 0;
-    }
-
-    if ($force) {
-        $stmt = $pdo->prepare('SELECT id FROM media ORDER BY id ASC LIMIT :limit OFFSET :offset');
-        $stmt->bindValue(':limit', (int)$limit, PDO::PARAM_INT);
-        $stmt->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
-        $stmt->execute();
-        return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
+    if ($since !== null && $since !== '') {
+        $conditions[] = 'm.imported_at >= :since';
+        $params[':since'] = $since;
     }
 
-    $stmt = $pdo->prepare(
-        'SELECT m.id FROM media m '
-        . 'LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key '
-        . 'WHERE mm.id IS NULL '
-        . 'ORDER BY m.id ASC LIMIT :limit OFFSET :offset'
-    );
-    $stmt->bindValue(':meta_key', $metaKey, PDO::PARAM_STR);
-    $stmt->bindValue(':limit', (int)$limit, PDO::PARAM_INT);
-    $stmt->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
+    if ($conditions !== []) {
+        $sql .= ' WHERE ' . implode(' AND ', $conditions);
+    }
+
+    $sql .= ' ORDER BY m.id ASC LIMIT :limit';
+
+    $stmt = $pdo->prepare($sql);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value, PDO::PARAM_STR);
+    }
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+
+    return $stmt;
+};
+
+$selectCandidates = static function (string $mode) use ($buildCandidateQuery, $allFlag, $missingTitle, $missingCaption, $since): array {
+    $modeMissing = true;
+    $hasMissingFilters = $missingTitle || $missingCaption;
+
+    if ($allFlag) {
+        $modeMissing = false;
+    } elseif ($mode === 'title') {
+        $modeMissing = $hasMissingFilters ? $missingTitle : true;
+    } elseif ($mode === 'caption') {
+        $modeMissing = $hasMissingFilters ? $missingCaption : true;
+    } elseif ($mode === 'prompt_eval') {
+        $modeMissing = true;
+    }
+
+    $stmt = $buildCandidateQuery($mode, !$modeMissing ? true : false, $since);
     $stmt->execute();
     return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
 };
 
-$total = 0;
-$enqueued = 0;
-$deduped = 0;
+$modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval'] : [$modeArg];
 
-foreach ($types as $jobType) {
-    $metaKey = sv_ollama_job_meta_key($jobType);
-    $candidateIds = $findCandidates($pdo, $metaKey, $limit, $offset, $mediaId, $force);
+$summary = [
+    'candidates' => 0,
+    'enqueued' => 0,
+    'skipped' => 0,
+    'already' => 0,
+];
+
+foreach ($modes as $mode) {
+    $candidateIds = $selectCandidates($mode);
 
     foreach ($candidateIds as $candidateId) {
         $candidateId = (int)$candidateId;
         if ($candidateId <= 0) {
             continue;
         }
-        $total++;
+        $summary['candidates']++;
+
+        $payload = [];
+        if ($mode === 'prompt_eval') {
+            $promptInfo = sv_ollama_fetch_prompt($pdo, $config, $candidateId);
+            $prompt = $promptInfo['prompt'] ?? null;
+            if (!is_string($prompt) || trim($prompt) === '') {
+                $logger('Prompt-Eval übersprungen (kein Prompt): Media ' . $candidateId . '.');
+                $summary['skipped']++;
+                continue;
+            }
+            $payload['prompt'] = $prompt;
+            $payload['prompt_source'] = $promptInfo['source'] ?? null;
+        }
+
         try {
-            $result = sv_enqueue_ollama_job($pdo, $config, $candidateId, $jobType, [
-                'force' => $force ? 1 : 0,
-            ], $logger);
+            $result = sv_enqueue_ollama_job($pdo, $config, $candidateId, $mode, $payload, $logger);
             if (!empty($result['deduped'])) {
-                $deduped++;
+                $summary['already']++;
             } else {
-                $enqueued++;
+                $summary['enqueued']++;
             }
         } catch (Throwable $e) {
             $logger('Enqueue-Fehler (Media ' . $candidateId . '): ' . $e->getMessage());
+            $summary['skipped']++;
         }
     }
 }
 
 $line = sprintf(
-    'Kandidaten: %d | Enqueued: %d | Dedupe: %d',
-    $total,
-    $enqueued,
-    $deduped
+    'Kandidaten: %d | Enqueued: %d | Bereits: %d | Übersprungen: %d',
+    $summary['candidates'],
+    $summary['enqueued'],
+    $summary['already'],
+    $summary['skipped']
 );
 $logger($line);
