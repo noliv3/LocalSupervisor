@@ -53,11 +53,11 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **README.md** – Projektüberblick (dieses Dokument).
 - **AGENTS.MD** – Arbeitsregeln und Diagnose-Auffälligkeiten.
 - **VERSIONSLOG.MD** – rekonstruiertes Funktions-Update-Log.
-- **AUDIT_OLLAMA.md** – Ist-Zustand/Audit für die geplante Ollama-Integration.
-- **INTERFACES_OLLAMA.md** – Schnittstellenliste für das Ollama-Modul.
-- **DATA_CONTRACTS_OLLAMA.md** – JSON-Schemas für Ollama-Requests/Responses/DTOs.
-- **pipeline_ollama.md** – Stufenplan für die Ollama-Pipeline (MVP → Erweiterungen).
-- **docs/agents/agents_ollama.md** – Agenten-Dokumentation inkl. Versioned Prompt Library.
+- **DOCS/AUDIT_OLLAMA.md** – Ist-Zustand/Audit für die geplante Ollama-Integration.
+- **DOCS/INTERFACES_OLLAMA.md** – Schnittstellenliste für das Ollama-Modul.
+- **DOCS/DATA_CONTRACTS_OLLAMA.md** – JSON-Schemas für Ollama-Requests/Responses/DTOs.
+- **DOCS/pipeline_ollama.md** – Stufenplan für die Ollama-Pipeline (MVP → Erweiterungen).
+- **DOCS/agents_ollama.md** – Agenten-Dokumentation inkl. Prompt/Logging-Regeln.
 - **Ollama Stage 1 (CLI):** `SCRIPTS/ollama_enqueue_cli.php`, `SCRIPTS/ollama_worker_cli.php` (Caption/Title).
 
 > Hinweis: Es wurden **keine Tests** ausgeführt.

@@ -18,7 +18,7 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 - Queue-Limits sind konfigurierbar (`jobs.queue_max_total`, `jobs.queue_max_per_type_default`, `jobs.queue_max_per_type`, `jobs.queue_max_per_media`), damit Enqueue-Schleifen begrenzt werden.
 
 ## Hinweis – Ollama-Planung (Dokumentation)
-- Für die geplante Ollama-Integration existieren separate Audit-/Interface-/Contract-Dokumente sowie eine Agentenbeschreibung unter `docs/agents/agents_ollama.md`.
+- Für die geplante Ollama-Integration existieren separate Audit-/Interface-/Contract-Dokumente unter `DOCS/` sowie eine Agentenbeschreibung in `DOCS/agents_ollama.md`.
 - Implementierungen erfolgen erst nach Abschluss der Audit-Dokumentation und unter Beachtung der Idempotenz- und Logging-Regeln (keine Base64/Secrets in Logs).
 - Stage-1 CLI (Caption/Title) nutzt `SCRIPTS/ollama_enqueue_cli.php` und `SCRIPTS/ollama_worker_cli.php` mit JSONL-Logs unter `LOGS/ollama_jobs.jsonl` und `LOGS/ollama_errors.jsonl`.
 
