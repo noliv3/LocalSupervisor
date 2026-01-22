@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     media_id            INTEGER NOT NULL,
     prompt_id           INTEGER,
     type                TEXT NOT NULL,        -- regenerate, variation, upscale, other
-    status              TEXT NOT NULL,        -- queued, running, done, error
+    status              TEXT NOT NULL,        -- pending, running, done, error
     created_at          TEXT NOT NULL,
     updated_at          TEXT,
     forge_request_json  TEXT,
@@ -199,15 +199,31 @@ CREATE INDEX IF NOT EXISTS idx_jobs_media
 CREATE TABLE IF NOT EXISTS ollama_results (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id    INTEGER NOT NULL,
+    mode        TEXT NOT NULL,
     model       TEXT NOT NULL,
-    result_json TEXT NOT NULL,
+    title       TEXT,
+    caption     TEXT,
+    score       INTEGER,
+    contradictions TEXT,
+    missing     TEXT,
+    rationale   TEXT,
+    raw_json    TEXT,
+    raw_text    TEXT,
+    parse_error INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
+    meta        TEXT,
 
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_ollama_results_media
     ON ollama_results(media_id);
+
+CREATE INDEX IF NOT EXISTS idx_ollama_results_mode
+    ON ollama_results(mode);
+
+CREATE INDEX IF NOT EXISTS idx_ollama_results_media_mode
+    ON ollama_results(media_id, mode);
 
 
 CREATE TABLE IF NOT EXISTS media_lifecycle_events (

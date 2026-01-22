@@ -21,7 +21,10 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **Windows-Start:** `start.bat` oder `start.ps1`.
 - **VIDAX-Server:** `npm run start:vidax`.
 - **VA-Tools:** `npm run va:doctor` und `npm run va:install`.
-- **Ollama Stage 1 (CLI):** `php SCRIPTS/ollama_enqueue_cli.php` (Jobs anlegen) und `php SCRIPTS/ollama_worker_cli.php` (Jobs verarbeiten).
+- **Ollama (CLI):**
+  - Enqueue: `php SCRIPTS/ollama_enqueue_cli.php --mode=caption|title|prompt_eval|all --all --missing-title --missing-caption --since=YYYY-MM-DD --limit=N`
+  - Worker: `php SCRIPTS/ollama_worker_cli.php --limit=N --max-batches=N`
+  - Smoke-Test: `php SCRIPTS/ollama_smoke.php --media-id=123`
 
 ## Start-Workflow (start.ps1)
 - Start.ps1 protokolliert Start/Stop des PHP-Servers inkl. PID/Command/CWD und räumt `php_server.pid` beim Beenden zuverlässig auf.
@@ -32,6 +35,7 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **FSK18-Inhalte:** Sichtbarkeit/Stream/Thumb nur bei internem Zugriff; Public kann `?adult=1` nicht erzwingen.
 - **Intern (lokal):** Vollzugriff nur über Loopback (`127.0.0.1/::1/::ffff:127.0.0.1`) **und** `internal_api_key`; Dashboard und interne Aktionen sind geschützt.
 - **Key-Storage:** `internal_key` wird nur bei HTTPS oder mit `security.allow_insecure_internal_cookie=true` persistiert; bei HTTP ist der Key pro Request im Header erforderlich.
+- **Interne Ollama-API:** `POST /internal_ollama.php` (actions: `enqueue`, `status`, `run_once`) ist strikt intern (Loopback + `internal_api_key`).
 
 ## Job-Queue-Guards (Konfiguration)
 - Limits für Queue-Größe können über `jobs.queue_max_total`, `jobs.queue_max_per_type_default`, `jobs.queue_max_per_type` und `jobs.queue_max_per_media` gesetzt werden.
@@ -59,5 +63,6 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **DOCS/pipeline_ollama.md** – Stufenplan für die Ollama-Pipeline (MVP → Erweiterungen).
 - **DOCS/agents_ollama.md** – Agenten-Dokumentation inkl. Prompt/Logging-Regeln.
 - **Ollama Stage 1 (CLI):** `SCRIPTS/ollama_enqueue_cli.php`, `SCRIPTS/ollama_worker_cli.php` (Caption/Title).
+- **Ollama Stage 2 (CLI/API):** `SCRIPTS/ollama_smoke.php` + `WWW/internal_ollama.php` + `ollama_results`-Pipeline.
 
 > Hinweis: Es wurden **keine Tests** ausgeführt.

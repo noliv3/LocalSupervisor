@@ -8,21 +8,45 @@ require_once __DIR__ . '/ollama_analyze_image.php';
 
 const SV_JOB_TYPE_OLLAMA_ANALYZE = 'ollama_analyze';
 
-function sv_ollama_store_result(PDO $pdo, int $mediaId, string $model, array $normalized): void
+function sv_ollama_store_result(PDO $pdo, int $mediaId, string $model, array $normalized, bool $parseError = false): void
 {
-    $resultJson = json_encode($normalized, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    if ($resultJson === false) {
-        throw new RuntimeException('Ollama-Ergebnis konnte nicht serialisiert werden.');
+    $title = isset($normalized['title']) ? (string)$normalized['title'] : null;
+    $caption = isset($normalized['description']) ? (string)$normalized['description'] : null;
+    $score = isset($normalized['quality_score']) ? (int)$normalized['quality_score'] : null;
+
+    $rawJson = json_encode($normalized, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($rawJson === false) {
+        $rawJson = null;
+    }
+
+    $meta = json_encode([
+        'source' => 'ollama_job_runner',
+        'mode' => 'analyze',
+        'parse_error' => $parseError,
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($meta === false) {
+        $meta = null;
     }
 
     $stmt = $pdo->prepare(
-        'INSERT INTO ollama_results (media_id, model, result_json, created_at) VALUES (:media_id, :model, :result_json, :created_at)'
+        'INSERT INTO ollama_results (media_id, mode, model, title, caption, score, contradictions, missing, rationale, raw_json, raw_text, parse_error, created_at, meta) '
+        . 'VALUES (:media_id, :mode, :model, :title, :caption, :score, :contradictions, :missing, :rationale, :raw_json, :raw_text, :parse_error, :created_at, :meta)'
     );
     $stmt->execute([
         ':media_id' => $mediaId,
+        ':mode' => 'analyze',
         ':model' => $model,
-        ':result_json' => $resultJson,
+        ':title' => $title,
+        ':caption' => $caption,
+        ':score' => $score,
+        ':contradictions' => null,
+        ':missing' => null,
+        ':rationale' => null,
+        ':raw_json' => $rawJson,
+        ':raw_text' => null,
+        ':parse_error' => $parseError ? 1 : 0,
         ':created_at' => date('c'),
+        ':meta' => $meta,
     ]);
 }
 
@@ -37,7 +61,7 @@ function sv_ollama_job_running_exists(PDO $pdo): bool
 function sv_ollama_fetch_next_job(PDO $pdo): ?array
 {
     $stmt = $pdo->prepare(
-        'SELECT * FROM jobs WHERE type = :type AND status = "queued" ORDER BY id ASC LIMIT 1'
+        'SELECT * FROM jobs WHERE type = :type AND status = "pending" ORDER BY id ASC LIMIT 1'
     );
     $stmt->execute([':type' => SV_JOB_TYPE_OLLAMA_ANALYZE]);
 
@@ -117,17 +141,19 @@ function sv_process_ollama_analyze_job(PDO $pdo, array $config): array
         $result = sv_ollama_analyze_image($pdo, $config, $mediaId, $modelOverride);
         $modelUsed = $result['model'] ?? ($modelOverride ?? '');
         $normalized = $result['normalized'] ?? [];
+        $parseError = !empty($result['parse_error']);
 
         if (!is_array($normalized)) {
             throw new RuntimeException('Ollama-Ergebnis konnte nicht normalisiert werden.');
         }
 
-        sv_ollama_store_result($pdo, $mediaId, (string)$modelUsed, $normalized);
+        sv_ollama_store_result($pdo, $mediaId, (string)$modelUsed, $normalized, $parseError);
 
         $responseJson = json_encode([
             'media_id' => $mediaId,
             'model' => (string)$modelUsed,
             'result' => $normalized,
+            'parse_error' => $parseError,
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         sv_update_job_status($pdo, $jobId, 'done', $responseJson, null);
