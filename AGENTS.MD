@@ -17,6 +17,10 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 ## Hinweis – Job-Queue-Guards
 - Queue-Limits sind konfigurierbar (`jobs.queue_max_total`, `jobs.queue_max_per_type_default`, `jobs.queue_max_per_type`, `jobs.queue_max_per_media`), damit Enqueue-Schleifen begrenzt werden.
 
+## Hinweis – Ollama-Planung (Dokumentation)
+- Für die geplante Ollama-Integration existieren separate Audit-/Interface-/Contract-Dokumente sowie eine Agentenbeschreibung unter `docs/agents/agents_ollama.md`.
+- Implementierungen erfolgen erst nach Abschluss der Audit-Dokumentation und unter Beachtung der Idempotenz- und Logging-Regeln (keine Base64/Secrets in Logs).
+
 ## Hinweis – Start.ps1 Cleanup
 - Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.
 - Exit-Hooks prüfen `LOGS/php_server.pid` sowie optional das konfigurierte Log-Verzeichnis, validieren `php` als Prozessnamen und entfernen die PID-Datei danach.
