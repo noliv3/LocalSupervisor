@@ -27,6 +27,12 @@
 - Einträge: Audit-Dokumente, Schnittstellenliste, Datenverträge, Pipeline-Plan, Agenten-Dokumentation erstellt (keine Implementierung).
 - Ref: n/a
 
+## 2026-01-22 — Ollama MVP Stage 1 (caption/title) — implemented
+- Neue Jobtypen: `ollama_caption`, `ollama_title`.
+- Neue CLI-Tools: `SCRIPTS/ollama_enqueue_cli.php`, `SCRIPTS/ollama_worker_cli.php`.
+- Neue Pipeline-Dateien: `SCRIPTS/ollama_client.php`, `SCRIPTS/ollama_prompts.php`, `SCRIPTS/ollama_jobs.php`.
+- Config-Erweiterung: `CONFIG/config.example.php` (Ollama-Block + Queue-Limits).
+
 ## 2026-02-05 — Start-Checkup
 - **Ursachenanalyse:** `start.ps1` startete `php.exe` ohne erweiterte Start/Stop-Logs; `php_server.pid` wurde bei ungültigem Inhalt/fehlendem Prozess nicht immer bereinigt. Exit-Hook nutzte fest `LOGS/` statt Config-Pfad. Keine server-startenden Aufrufe in `SCRIPTS/common.php`, `SCRIPTS/operations.php`, `SCRIPTS/init_db.php` gefunden (nur generische `shell_exec`-Aufrufe). Externe Windows-Tasks/Services/Run-Keys liegen außerhalb des Repos und wurden nicht verändert.
 - **Fixes:** `php_server.pid` wird vor Start auf stale geprüft/aufgeräumt, bestehende php.exe-Prozesse werden vor Neustart gestoppt. Start/Stop-Protokollierung erweitert (PID, Commandline, CWD, Stop-Ergebnis). Exit-Hook liest LogDir via `sv_load_config` (Fallback `LOGS/`) und räumt PID-Datei. Zusätzlich Ctrl+C-Handler setzt Stop-PhpServer als Backup.

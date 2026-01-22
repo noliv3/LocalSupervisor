@@ -21,6 +21,7 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **Windows-Start:** `start.bat` oder `start.ps1`.
 - **VIDAX-Server:** `npm run start:vidax`.
 - **VA-Tools:** `npm run va:doctor` und `npm run va:install`.
+- **Ollama Stage 1 (CLI):** `php SCRIPTS/ollama_enqueue_cli.php` (Jobs anlegen) und `php SCRIPTS/ollama_worker_cli.php` (Jobs verarbeiten).
 
 ## Start-Workflow (start.ps1)
 - Start.ps1 protokolliert Start/Stop des PHP-Servers inkl. PID/Command/CWD und räumt `php_server.pid` beim Beenden zuverlässig auf.
@@ -57,5 +58,6 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
 - **DATA_CONTRACTS_OLLAMA.md** – JSON-Schemas für Ollama-Requests/Responses/DTOs.
 - **pipeline_ollama.md** – Stufenplan für die Ollama-Pipeline (MVP → Erweiterungen).
 - **docs/agents/agents_ollama.md** – Agenten-Dokumentation inkl. Versioned Prompt Library.
+- **Ollama Stage 1 (CLI):** `SCRIPTS/ollama_enqueue_cli.php`, `SCRIPTS/ollama_worker_cli.php` (Caption/Title).
 
 > Hinweis: Es wurden **keine Tests** ausgeführt.
