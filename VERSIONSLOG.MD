@@ -2,6 +2,13 @@
 
 > Dieses Log wurde neu aufgebaut, um Funktionsupdates nachvollziehbar zu machen.
 
+## Ollama Modul – Audit & Spec (unreleased)
+- Repository-Audit für Ollama-Vision-Modul dokumentiert (DOCS/AUDIT_OLLAMA.md).
+- Schnittstellen-Analyse inkl. Input/Output-Mapping festgehalten (DOCS/INTERFACES_OLLAMA.md).
+- JSON-Datenverträge für Vision-Requests & normalisierte Responses definiert (DOCS/DATA_CONTRACTS_OLLAMA.md).
+- Prompt-/Logging-/Versionierungsregeln für Ollama-Agenten festgelegt (DOCS/agents_ollama.md).
+- Batch-Pipeline-Konzept inkl. Idempotenz- und Error-Klassen beschrieben (DOCS/pipeline_ollama.md).
+
 ## 2025-02-14
 - Job-Queue-Flow vereinheitlicht: Statuswechsel von `queued` → `running` → `done/error` als Standard beschrieben.
 - Konsistenz-/Health-Snapshot als zentrales Diagnoseformat etabliert (DB/Jobs/Scans zusammengefasst).
