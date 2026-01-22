@@ -20,6 +20,7 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 ## Hinweis – Ollama-Planung (Dokumentation)
 - Für die geplante Ollama-Integration existieren separate Audit-/Interface-/Contract-Dokumente sowie eine Agentenbeschreibung unter `docs/agents/agents_ollama.md`.
 - Implementierungen erfolgen erst nach Abschluss der Audit-Dokumentation und unter Beachtung der Idempotenz- und Logging-Regeln (keine Base64/Secrets in Logs).
+- Stage-1 CLI (Caption/Title) nutzt `SCRIPTS/ollama_enqueue_cli.php` und `SCRIPTS/ollama_worker_cli.php` mit JSONL-Logs unter `LOGS/ollama_jobs.jsonl` und `LOGS/ollama_errors.jsonl`.
 
 ## Hinweis – Start.ps1 Cleanup
 - Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.
