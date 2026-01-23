@@ -40,9 +40,9 @@ foreach (array_slice($argv, 1) as $arg) {
 }
 
 $modeArg = $modeArg === '' ? 'all' : $modeArg;
-$allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'all'];
+$allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'all'];
 if (!in_array($modeArg, $allowedModes, true)) {
-    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|all\n");
+    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|quality|all\n");
     exit(1);
 }
 
@@ -59,9 +59,9 @@ $buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $si
     $params = [];
 
     if (!$allFlag) {
-        if ($mode === 'tags_normalize') {
+        if ($mode === 'tags_normalize' || $mode === 'quality') {
             $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
-            $params[':meta_key'] = 'ollama.tags_normalized';
+            $params[':meta_key'] = $mode === 'quality' ? 'ollama.quality.score' : 'ollama.tags_normalized';
         } else {
             $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
             $params[':mode'] = $mode;
@@ -70,7 +70,7 @@ $buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $si
 
     $conditions = [];
     if (!$allFlag) {
-        $conditions[] = $mode === 'tags_normalize' ? 'mm.id IS NULL' : 'o.id IS NULL';
+        $conditions[] = $mode === 'tags_normalize' || $mode === 'quality' ? 'mm.id IS NULL' : 'o.id IS NULL';
     }
     if ($since !== null && $since !== '') {
         $conditions[] = 'm.imported_at >= :since';
@@ -106,6 +106,8 @@ $selectCandidates = static function (string $mode) use ($buildCandidateQuery, $a
         $modeMissing = true;
     } elseif ($mode === 'tags_normalize') {
         $modeMissing = true;
+    } elseif ($mode === 'quality') {
+        $modeMissing = true;
     }
 
     $stmt = $buildCandidateQuery($mode, !$modeMissing ? true : false, $since);
@@ -113,7 +115,7 @@ $selectCandidates = static function (string $mode) use ($buildCandidateQuery, $a
     return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
 };
 
-$modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize'] : [$modeArg];
+$modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality'] : [$modeArg];
 
 $summary = [
     'candidates' => 0,

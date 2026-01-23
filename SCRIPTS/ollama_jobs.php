@@ -11,7 +11,34 @@ const SV_JOB_TYPE_OLLAMA_CAPTION     = 'ollama_caption';
 const SV_JOB_TYPE_OLLAMA_TITLE       = 'ollama_title';
 const SV_JOB_TYPE_OLLAMA_PROMPT_EVAL = 'ollama_prompt_eval';
 const SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE = 'ollama_tags_normalize';
-const SV_OLLAMA_STAGE_VERSION        = 'stage2_v1';
+const SV_JOB_TYPE_OLLAMA_QUALITY     = 'ollama_quality';
+const SV_OLLAMA_STAGE_VERSION        = 'stage3_v1';
+
+const SV_OLLAMA_QUALITY_FLAGS = [
+    'blur',
+    'out_of_focus',
+    'motion_blur',
+    'lowres',
+    'jpeg_artifacts',
+    'noise',
+    'overexposed',
+    'underexposed',
+    'watermark',
+    'text_overlay',
+    'signature',
+    'cropped_subject',
+    'distorted',
+    'glitch',
+];
+
+const SV_OLLAMA_DOMAIN_TYPES = [
+    'anime',
+    'photo',
+    'illustration',
+    '3d_render',
+    'screenshot',
+    'other',
+];
 
 function sv_ollama_job_types(): array
 {
@@ -20,6 +47,7 @@ function sv_ollama_job_types(): array
         SV_JOB_TYPE_OLLAMA_TITLE,
         SV_JOB_TYPE_OLLAMA_PROMPT_EVAL,
         SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE,
+        SV_JOB_TYPE_OLLAMA_QUALITY,
     ];
 }
 
@@ -38,6 +66,9 @@ function sv_ollama_job_type_for_mode(string $mode): string
     if ($mode === 'tags_normalize') {
         return SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE;
     }
+    if ($mode === 'quality') {
+        return SV_JOB_TYPE_OLLAMA_QUALITY;
+    }
 
     throw new InvalidArgumentException('Unbekannter Ollama-Modus: ' . $mode);
 }
@@ -55,6 +86,9 @@ function sv_ollama_mode_for_job_type(string $jobType): string
     }
     if ($jobType === SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE) {
         return 'tags_normalize';
+    }
+    if ($jobType === SV_JOB_TYPE_OLLAMA_QUALITY) {
+        return 'quality';
     }
 
     throw new InvalidArgumentException('Unbekannter Ollama-Jobtyp: ' . $jobType);
@@ -358,6 +392,28 @@ function sv_ollama_normalize_tag_map($value): ?array
     return $normalized === [] ? null : $normalized;
 }
 
+function sv_ollama_normalize_quality_flags($value): ?array
+{
+    if (!is_array($value)) {
+        return null;
+    }
+
+    $allowed = array_fill_keys(SV_OLLAMA_QUALITY_FLAGS, true);
+    $normalized = [];
+    foreach ($value as $flag) {
+        if (!is_string($flag)) {
+            continue;
+        }
+        $flag = trim($flag);
+        if ($flag === '' || !isset($allowed[$flag])) {
+            continue;
+        }
+        $normalized[$flag] = true;
+    }
+
+    return array_keys($normalized);
+}
+
 function sv_ollama_encode_json($value): ?string
 {
     $json = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -444,10 +500,11 @@ function sv_ollama_build_tags_normalize_meta(int $resultId, string $model, bool 
     return $metaJson === false ? '{}' : $metaJson;
 }
 
-function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, array $values): void
+function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, array $values, array $options = []): void
 {
     $source = 'ollama';
     $lastRunAt = $values['last_run_at'] ?? date('c');
+    $setCommonMeta = !array_key_exists('set_common_meta', $options) || (bool)$options['set_common_meta'] === true;
 
     if ($mode === 'caption' && isset($values['caption']) && $values['caption'] !== null) {
         sv_set_media_meta_value($pdo, $mediaId, 'ollama.caption', $values['caption'], $source);
@@ -469,9 +526,25 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.tags_map', $values['tags_map'], $source);
         }
     }
+    if ($mode === 'quality') {
+        if (isset($values['quality_score']) && $values['quality_score'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.quality.score', $values['quality_score'], $source);
+        }
+        if (isset($values['quality_flags']) && $values['quality_flags'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.quality.flags', $values['quality_flags'], $source);
+        }
+        if (isset($values['domain_type']) && $values['domain_type'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.domain.type', $values['domain_type'], $source);
+        }
+        if (isset($values['domain_confidence']) && $values['domain_confidence'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.domain.confidence', $values['domain_confidence'], $source);
+        }
+    }
 
-    sv_set_media_meta_value($pdo, $mediaId, 'ollama.last_run_at', $lastRunAt, $source);
-    sv_set_media_meta_value($pdo, $mediaId, 'ollama.stage_version', SV_OLLAMA_STAGE_VERSION, $source);
+    if ($setCommonMeta) {
+        sv_set_media_meta_value($pdo, $mediaId, 'ollama.last_run_at', $lastRunAt, $source);
+        sv_set_media_meta_value($pdo, $mediaId, 'ollama.stage_version', SV_OLLAMA_STAGE_VERSION, $source);
+    }
 
     if (isset($values['meta']) && is_string($values['meta']) && trim($values['meta']) !== '') {
         sv_set_media_meta_value($pdo, $mediaId, 'ollama.' . $mode . '.meta', $values['meta'], $source);
@@ -671,6 +744,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
     $ollamaCfg = sv_ollama_config($config);
     $maxRetries = (int)$ollamaCfg['worker']['max_retries'];
     $attempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
+    $imageLoadError = null;
 
     try {
         if (!$ollamaCfg['enabled']) {
@@ -710,7 +784,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'context' => $contextText,
             ];
         } else {
-            $imageData = sv_ollama_load_image_source($pdo, $config, $mediaId, $payload);
+            try {
+                $imageData = sv_ollama_load_image_source($pdo, $config, $mediaId, $payload);
+            } catch (Throwable $e) {
+                $imageLoadError = $e;
+                throw $e;
+            }
             $imageBase64 = $imageData['base64'] ?? null;
             if (!is_string($imageBase64) || $imageBase64 === '') {
                 throw new RuntimeException('Bilddaten fehlen.');
@@ -758,6 +837,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $rationale = null;
         $tagsNormalized = null;
         $tagsMap = null;
+        $qualityScore = null;
+        $qualityFlags = null;
+        $domainType = null;
+        $domainConfidence = null;
         if (is_array($responseJson)) {
             $title = sv_ollama_normalize_text_value($responseJson['title'] ?? null);
             $caption = sv_ollama_normalize_text_value($responseJson['caption'] ?? ($responseJson['description'] ?? null));
@@ -768,6 +851,22 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             if ($mode === 'tags_normalize') {
                 $tagsNormalized = sv_ollama_normalize_tag_list($responseJson['tags_normalized'] ?? null);
                 $tagsMap = sv_ollama_normalize_tag_map($responseJson['tags_map'] ?? null);
+            }
+            if ($mode === 'quality') {
+                if (isset($responseJson['quality_score']) && is_numeric($responseJson['quality_score'])) {
+                    $qualityScore = (float)$responseJson['quality_score'];
+                }
+                $qualityFlags = sv_ollama_normalize_quality_flags($responseJson['quality_flags'] ?? null);
+                $domainTypeRaw = sv_ollama_normalize_text_value($responseJson['domain_type'] ?? null);
+                if ($domainTypeRaw !== null) {
+                    $candidate = strtolower($domainTypeRaw);
+                    if (in_array($candidate, SV_OLLAMA_DOMAIN_TYPES, true)) {
+                        $domainType = $candidate;
+                    }
+                }
+                if (isset($responseJson['domain_confidence']) && is_numeric($responseJson['domain_confidence'])) {
+                    $domainConfidence = (float)$responseJson['domain_confidence'];
+                }
             }
         }
 
@@ -780,10 +879,34 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             }
         }
 
-        $rawJson = null;
-        if (is_array($responseJson)) {
-            $rawJson = sv_ollama_encode_json($responseJson);
+        $qualityErrorType = null;
+        $qualityErrorDetail = null;
+        if ($mode === 'quality') {
+            if ($parseError) {
+                $qualityErrorType = 'parse_error';
+                $qualityErrorDetail = 'Ollama-Antwort für quality konnte nicht geparst werden.';
+            } else {
+                if ($qualityScore === null || $qualityScore < 0 || $qualityScore > 100) {
+                    $qualityErrorType = 'parse_error';
+                    $qualityErrorDetail = 'Ollama-Antwort für quality enthält keinen gültigen quality_score.';
+                } elseif ($qualityFlags === null) {
+                    $qualityErrorType = 'parse_error';
+                    $qualityErrorDetail = 'Ollama-Antwort für quality enthält keine gültigen quality_flags.';
+                } elseif ($domainType === null) {
+                    $qualityErrorType = 'parse_error';
+                    $qualityErrorDetail = 'Ollama-Antwort für quality enthält keinen gültigen domain_type.';
+                } elseif ($domainConfidence === null || $domainConfidence < 0 || $domainConfidence > 1) {
+                    $qualityErrorType = 'parse_error';
+                    $qualityErrorDetail = 'Ollama-Antwort für quality enthält keine gültige domain_confidence.';
+                }
+            }
         }
+
+        if ($qualityErrorType !== null) {
+            $parseError = true;
+        }
+
+        $rawJson = is_array($responseJson) ? sv_ollama_encode_json($responseJson) : null;
 
         $meta = [
             'job_id' => $jobId,
@@ -795,7 +918,47 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'parse_error' => $parseError,
             'image_source' => is_array($imageData) ? ($imageData['source'] ?? null) : null,
         ];
+        if ($qualityErrorType !== null) {
+            $meta['error_type'] = $qualityErrorType;
+        }
         $metaJson = sv_ollama_encode_json($meta);
+
+        if ($mode === 'quality' && $qualityErrorType !== null) {
+            $resultId = sv_ollama_insert_result($pdo, [
+                'media_id' => $mediaId,
+                'mode' => $mode,
+                'model' => (string)($response['model'] ?? $options['model']),
+                'title' => null,
+                'caption' => null,
+                'score' => $qualityScore !== null && $qualityScore >= 0 && $qualityScore <= 100 ? $qualityScore : null,
+                'contradictions' => null,
+                'missing' => null,
+                'rationale' => $rationale,
+                'raw_json' => $rawJson,
+                'raw_text' => $responseText,
+                'parse_error' => true,
+                'created_at' => date('c'),
+                'meta' => $metaJson,
+            ]);
+
+            $metaSnapshot = sv_ollama_build_meta_snapshot(
+                $resultId,
+                (string)($response['model'] ?? $options['model']),
+                true,
+                null,
+                null,
+                null
+            );
+
+            sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
+                'meta' => $metaSnapshot,
+            ], [
+                'set_common_meta' => false,
+            ]);
+
+            $detail = $qualityErrorDetail ?? 'Ollama-Antwort für quality ist ungültig.';
+            throw new RuntimeException('parse_error: ' . $detail);
+        }
 
         $resultId = sv_ollama_insert_result($pdo, [
             'media_id' => $mediaId,
@@ -803,7 +966,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'model' => (string)($response['model'] ?? $options['model']),
             'title' => $title,
             'caption' => $caption,
-            'score' => $score,
+            'score' => $mode === 'quality'
+                ? ($qualityScore !== null && $qualityScore >= 0 && $qualityScore <= 100 ? $qualityScore : null)
+                : $score,
             'contradictions' => $contradictions,
             'missing' => $missing,
             'rationale' => $rationale,
@@ -828,9 +993,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 $resultId,
                 (string)($response['model'] ?? $options['model']),
                 $parseError,
-                $contradictions,
-                $missing,
-                $rationale
+                $mode === 'quality' ? null : $contradictions,
+                $mode === 'quality' ? null : $missing,
+                $mode === 'quality' ? null : $rationale
             );
 
         sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
@@ -842,6 +1007,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'tags_raw' => $mode === 'tags_normalize' ? sv_ollama_encode_json($rawTags ?? []) : null,
             'tags_normalized' => $mode === 'tags_normalize' ? sv_ollama_encode_json($tagsNormalized ?? []) : null,
             'tags_map' => $mode === 'tags_normalize' ? sv_ollama_encode_json($tagsMap ?? []) : null,
+            'quality_score' => $mode === 'quality' ? $qualityScore : null,
+            'quality_flags' => $mode === 'quality' ? sv_ollama_encode_json($qualityFlags ?? []) : null,
+            'domain_type' => $mode === 'quality' ? $domainType : null,
+            'domain_confidence' => $mode === 'quality' ? $domainConfidence : null,
         ]);
 
         $responseLog = $rawJson ? sv_ollama_truncate_for_log($rawJson, 300) : ($responseText ? sv_ollama_truncate_for_log($responseText, 300) : '');
@@ -887,6 +1056,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         ];
     } catch (Throwable $e) {
         $errorMessage = sv_sanitize_error_message($e->getMessage(), 240);
+        if ($mode === 'quality' && $imageLoadError !== null) {
+            $errorMessage = 'invalid_image: ' . $errorMessage;
+        }
         $attempts++;
         $payload['attempts'] = $attempts;
         $payload['last_error_at'] = date('c');
