@@ -67,6 +67,9 @@ function sv_ollama_config(array $config): array
         'prompt_eval_template' => isset($ollama['prompt_eval_template']) && is_string($ollama['prompt_eval_template']) && trim($ollama['prompt_eval_template']) !== ''
             ? trim($ollama['prompt_eval_template'])
             : "Bewerte, wie gut der folgende Prompt das Bild beschreibt (0-100). Nenne Widersprüche, fehlende Elemente und eine kurze Begründung. Antworte ausschließlich als JSON.\nFormat: {\"score\":0,\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}\nPrompt: {{prompt}}",
+        'tags_normalize_template' => isset($ollama['tags_normalize_template']) && is_string($ollama['tags_normalize_template']) && trim($ollama['tags_normalize_template']) !== ''
+            ? trim($ollama['tags_normalize_template'])
+            : "Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Antworte ausschließlich als JSON.\nFormat: {\"tags_normalized\":[],\"tags_map\":[{\"raw\":\"\",\"normalized\":\"\",\"confidence\":0.0,\"type\":\"\"}],\"rationale\":\"...\"}\nTags: {{tags}}\nKontext: {{context}}",
         'timeout_ms' => isset($ollama['timeout_ms']) ? max(1000, (int)$ollama['timeout_ms']) : 20000,
         'max_image_bytes' => isset($ollama['max_image_bytes']) ? max(0, (int)$ollama['max_image_bytes']) : 4194304,
         'retry' => [
