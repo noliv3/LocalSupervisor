@@ -46,6 +46,7 @@ return [
             'ollama_caption'     => 200,
             'ollama_title'       => 200,
             'ollama_prompt_eval' => 200,
+            'ollama_tags_normalize' => 200,
         ],
         'queue_max_per_media'        => 2,
     ],
@@ -61,6 +62,7 @@ return [
         'caption_prompt_template' => "Beschreibe das Bild in 1-3 Sätzen. Antworte ausschließlich als JSON.\nFormat: {\"caption\":\"...\",\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}",
         'title_prompt_template' => "Erzeuge einen kurzen, prägnanten Titel (max 80 Zeichen). Antworte ausschließlich als JSON.\nFormat: {\"title\":\"...\",\"rationale\":\"...\"}",
         'prompt_eval_template' => "Bewerte, wie gut der folgende Prompt das Bild beschreibt (0-100). Nenne Widersprüche, fehlende Elemente und eine kurze Begründung. Antworte ausschließlich als JSON.\nFormat: {\"score\":0,\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}\nPrompt: {{prompt}}",
+        'tags_normalize_template' => "Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Antworte ausschließlich als JSON.\nFormat: {\"tags_normalized\":[],\"tags_map\":[{\"raw\":\"\",\"normalized\":\"\",\"confidence\":0.0,\"type\":\"\"}],\"rationale\":\"...\"}\nTags: {{tags}}\nKontext: {{context}}",
         'timeout_ms' => 20000,
         'max_image_bytes' => 4194304,
         'worker' => [

@@ -22,7 +22,7 @@ Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **
 - Implementierungen erfolgen erst nach Abschluss der Audit-Dokumentation und unter Beachtung der Idempotenz- und Logging-Regeln (keine Base64/Secrets in Logs).
 - Stage-1 CLI (Caption/Title/Prompt-Eval) nutzt `SCRIPTS/ollama_enqueue_cli.php` und `SCRIPTS/ollama_worker_cli.php` mit JSONL-Logs unter `LOGS/ollama_jobs.jsonl` und `LOGS/ollama_errors.jsonl`.
 - Interne Steuerung läuft über `WWW/internal_ollama.php` (Loopback + internal_api_key) und schreibt Ergebnisse nach `ollama_results`.
-- Enqueue-Status ist `queued`; der Worker konsumiert `queued`/`pending` und persistiert erfolgreiche Resultate zusätzlich in `media_meta` (u. a. `ollama.caption`, `ollama.title`, `ollama.prompt_eval.score`, `ollama.<mode>.meta`, `ollama.last_run_at`, `ollama.stage_version`).
+- Enqueue-Status ist `queued`; der Worker konsumiert `queued`/`pending` und persistiert erfolgreiche Resultate zusätzlich in `media_meta` (u. a. `ollama.caption`, `ollama.title`, `ollama.prompt_eval.score`, `ollama.tags_normalized`, `ollama.<mode>.meta`, `ollama.last_run_at`, `ollama.stage_version`).
 
 ## Hinweis – Start.ps1 Cleanup
 - Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.
