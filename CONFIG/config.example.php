@@ -47,6 +47,7 @@ return [
             'ollama_title'       => 200,
             'ollama_prompt_eval' => 200,
             'ollama_tags_normalize' => 200,
+            'ollama_quality'     => 200,
         ],
         'queue_max_per_media'        => 2,
     ],
@@ -63,6 +64,7 @@ return [
         'title_prompt_template' => "Erzeuge einen kurzen, prägnanten Titel (max 80 Zeichen). Antworte ausschließlich als JSON.\nFormat: {\"title\":\"...\",\"rationale\":\"...\"}",
         'prompt_eval_template' => "Bewerte, wie gut der folgende Prompt das Bild beschreibt (0-100). Nenne Widersprüche, fehlende Elemente und eine kurze Begründung. Antworte ausschließlich als JSON.\nFormat: {\"score\":0,\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}\nPrompt: {{prompt}}",
         'tags_normalize_template' => "Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Antworte ausschließlich als JSON.\nFormat: {\"tags_normalized\":[],\"tags_map\":[{\"raw\":\"\",\"normalized\":\"\",\"confidence\":0.0,\"type\":\"\"}],\"rationale\":\"...\"}\nTags: {{tags}}\nKontext: {{context}}",
+        'quality_template' => "Bewerte die technische Bildqualität (0-100) und klassifiziere die Domäne. Antworte ausschließlich als JSON.\nFormat: {\"quality_score\":0,\"quality_flags\":[],\"domain_type\":\"other\",\"domain_confidence\":0.0,\"rationale\":\"...\"}",
         'timeout_ms' => 20000,
         'max_image_bytes' => 4194304,
         'worker' => [

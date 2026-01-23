@@ -70,6 +70,9 @@ function sv_ollama_config(array $config): array
         'tags_normalize_template' => isset($ollama['tags_normalize_template']) && is_string($ollama['tags_normalize_template']) && trim($ollama['tags_normalize_template']) !== ''
             ? trim($ollama['tags_normalize_template'])
             : "Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Antworte ausschließlich als JSON.\nFormat: {\"tags_normalized\":[],\"tags_map\":[{\"raw\":\"\",\"normalized\":\"\",\"confidence\":0.0,\"type\":\"\"}],\"rationale\":\"...\"}\nTags: {{tags}}\nKontext: {{context}}",
+        'quality_template' => isset($ollama['quality_template']) && is_string($ollama['quality_template']) && trim($ollama['quality_template']) !== ''
+            ? trim($ollama['quality_template'])
+            : "Bewerte die technische Bildqualität (0-100) und klassifiziere die Domäne. Antworte ausschließlich als JSON.\nFormat: {\"quality_score\":0,\"quality_flags\":[],\"domain_type\":\"other\",\"domain_confidence\":0.0,\"rationale\":\"...\"}",
         'timeout_ms' => isset($ollama['timeout_ms']) ? max(1000, (int)$ollama['timeout_ms']) : 20000,
         'max_image_bytes' => isset($ollama['max_image_bytes']) ? max(0, (int)$ollama['max_image_bytes']) : 4194304,
         'retry' => [

@@ -25,6 +25,10 @@ function sv_ollama_prompt_definitions(array $config): array
             'prompt' => $ollamaCfg['tags_normalize_template'],
             'output_key' => 'tags_normalized',
         ],
+        'quality' => [
+            'prompt' => $ollamaCfg['quality_template'],
+            'output_key' => 'quality_score',
+        ],
     ];
 }
 
