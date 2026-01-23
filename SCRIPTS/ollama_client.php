@@ -57,6 +57,9 @@ function sv_ollama_config(array $config): array
             'text' => isset($model['text']) && is_string($model['text']) && trim($model['text']) !== ''
                 ? trim($model['text'])
                 : 'llama3:latest',
+            'embed' => isset($model['embed']) && is_string($model['embed']) && trim($model['embed']) !== ''
+                ? trim($model['embed'])
+                : 'nomic-embed-text:latest',
         ],
         'caption_prompt_template' => isset($ollama['caption_prompt_template']) && is_string($ollama['caption_prompt_template']) && trim($ollama['caption_prompt_template']) !== ''
             ? trim($ollama['caption_prompt_template'])
@@ -178,6 +181,13 @@ function sv_ollama_analyze_image(array $config, string $imageBase64, string $pro
     return sv_ollama_request($config, [
         'prompt' => $prompt,
         'images' => [$imageBase64],
+    ], $options);
+}
+
+function sv_ollama_embed_text(array $config, string $input, array $options): array
+{
+    return sv_ollama_embeddings_request($config, [
+        'prompt' => $input,
     ], $options);
 }
 
@@ -371,6 +381,168 @@ function sv_ollama_request(array $config, array $input, array $options): array
         'ok' => false,
         'model' => $model,
         'response_json' => null,
+        'usage' => null,
+        'error' => 'Unbekannter Fehler',
+        'latency_ms' => null,
+    ];
+}
+
+function sv_ollama_embeddings_request(array $config, array $input, array $options): array
+{
+    $cfg = sv_ollama_config($config);
+    $baseUrl = rtrim($cfg['base_url'], '/');
+    $url = $baseUrl . '/api/embeddings';
+
+    $prompt = isset($input['prompt']) ? (string)$input['prompt'] : '';
+
+    $model = isset($options['model']) && is_string($options['model']) && trim($options['model']) !== ''
+        ? trim($options['model'])
+        : $cfg['model']['embed'];
+
+    $payloadOptions = [];
+    if (isset($options['temperature'])) {
+        $payloadOptions['temperature'] = (float)$options['temperature'];
+    }
+    if (isset($options['top_p'])) {
+        $payloadOptions['top_p'] = (float)$options['top_p'];
+    }
+    if (array_key_exists('seed', $options)) {
+        $payloadOptions['seed'] = $options['seed'];
+    }
+    if (($cfg['deterministic']['enabled'] ?? false) && (!isset($options['deterministic']) || $options['deterministic'] !== false)) {
+        $payloadOptions['temperature'] = (float)($cfg['deterministic']['temperature'] ?? 0.0);
+        $payloadOptions['top_p'] = (float)($cfg['deterministic']['top_p'] ?? 1.0);
+        $payloadOptions['seed'] = $cfg['deterministic']['seed'] ?? null;
+    }
+
+    $timeoutMs = isset($options['timeout_ms']) ? max(1000, (int)$options['timeout_ms']) : (int)$cfg['timeout_ms'];
+    $maxAttempts = max(1, (int)($cfg['retry']['max_attempts'] ?? 1));
+    $backoffMs = max(0, (int)($cfg['retry']['backoff_ms'] ?? 0));
+
+    $requestPayload = [
+        'model' => $model,
+        'prompt' => $prompt,
+    ];
+    if ($payloadOptions !== []) {
+        $requestPayload['options'] = $payloadOptions;
+    }
+
+    $attempt = 0;
+    $lastError = null;
+    while ($attempt < $maxAttempts) {
+        $attempt++;
+        $start = microtime(true);
+        $context = stream_context_create([
+            'http' => [
+                'method'  => 'POST',
+                'header'  => "Content-Type: application/json\r\nAccept: application/json\r\n",
+                'content' => json_encode($requestPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                'timeout' => $timeoutMs / 1000,
+            ],
+        ]);
+
+        $lastError = null;
+        set_error_handler(static function ($severity, $message) use (&$lastError): bool {
+            $lastError = $message;
+            return false;
+        });
+        try {
+            $responseBody = @file_get_contents($url, false, $context);
+        } catch (Throwable $e) {
+            restore_error_handler();
+            $lastError = $e->getMessage();
+            $responseBody = false;
+        }
+        restore_error_handler();
+
+        $latencyMs = (int)round((microtime(true) - $start) * 1000);
+
+        $httpCode = null;
+        if (isset($http_response_header) && is_array($http_response_header)) {
+            foreach ($http_response_header as $headerLine) {
+                if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
+                    $httpCode = (int)$matches[1];
+                    break;
+                }
+            }
+        }
+
+        if ($responseBody === false) {
+            $message = $lastError ? sv_sanitize_error_message((string)$lastError, 200) : 'Transportfehler';
+            if ($attempt < $maxAttempts) {
+                if ($backoffMs > 0) {
+                    $sleepMs = (int)round($backoffMs * pow(2, $attempt - 1));
+                    usleep($sleepMs * 1000);
+                }
+                continue;
+            }
+
+            return [
+                'ok' => false,
+                'model' => $model,
+                'vector' => null,
+                'usage' => null,
+                'error' => $message,
+                'latency_ms' => $latencyMs,
+            ];
+        }
+
+        if ($httpCode !== null && ($httpCode < 200 || $httpCode >= 300)) {
+            return [
+                'ok' => false,
+                'model' => $model,
+                'vector' => null,
+                'usage' => null,
+                'error' => 'HTTP ' . $httpCode,
+                'latency_ms' => $latencyMs,
+            ];
+        }
+
+        $decoded = json_decode($responseBody, true);
+        if (!is_array($decoded)) {
+            return [
+                'ok' => false,
+                'model' => $model,
+                'vector' => null,
+                'usage' => null,
+                'parse_error' => true,
+                'error' => 'Ungültige JSON-Antwort',
+                'latency_ms' => $latencyMs,
+            ];
+        }
+
+        if (isset($decoded['error'])) {
+            return [
+                'ok' => false,
+                'model' => $model,
+                'vector' => null,
+                'usage' => null,
+                'parse_error' => true,
+                'error' => sv_sanitize_error_message((string)$decoded['error'], 200),
+                'latency_ms' => $latencyMs,
+            ];
+        }
+
+        $vector = $decoded['embedding'] ?? null;
+        $usage = [];
+        if (isset($decoded['prompt_eval_count'])) {
+            $usage['input_tokens'] = (int)$decoded['prompt_eval_count'];
+        }
+
+        return [
+            'ok' => true,
+            'model' => $decoded['model'] ?? $model,
+            'vector' => $vector,
+            'usage' => $usage !== [] ? $usage : null,
+            'error' => null,
+            'latency_ms' => $latencyMs,
+        ];
+    }
+
+    return [
+        'ok' => false,
+        'model' => $model,
+        'vector' => null,
         'usage' => null,
         'error' => 'Unbekannter Fehler',
         'latency_ms' => null,

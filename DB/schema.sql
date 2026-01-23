@@ -225,6 +225,26 @@ CREATE INDEX IF NOT EXISTS idx_ollama_results_mode
 CREATE INDEX IF NOT EXISTS idx_ollama_results_media_mode
     ON ollama_results(media_id, mode);
 
+CREATE TABLE IF NOT EXISTS ollama_vectors (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id    INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    dims        INTEGER NOT NULL,
+    vector_json TEXT NOT NULL,
+    input_hash  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ollama_vectors_media
+    ON ollama_vectors(media_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ollama_vectors_unique
+    ON ollama_vectors(media_id, kind, model, input_hash);
+
 
 CREATE TABLE IF NOT EXISTS media_lifecycle_events (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
