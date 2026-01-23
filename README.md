@@ -25,6 +25,7 @@ LocalSupervisor ist ein lokales Medien-Management-System mit PHP-Weboberfläche 
   - Enqueue: `php SCRIPTS/ollama_enqueue_cli.php --mode=caption|title|prompt_eval|all --all --missing-title --missing-caption --since=YYYY-MM-DD --limit=N`
   - Worker: `php SCRIPTS/ollama_worker_cli.php --limit=N --max-batches=N`
   - Smoke-Test: `php SCRIPTS/ollama_smoke.php --media-id=123`
+  - Jobs werden initial mit Status `queued` erstellt; der Worker verarbeitet `queued` und `pending` und schreibt bei Erfolg Meta-Keys wie `ollama.caption`, `ollama.title`, `ollama.prompt_eval.score` sowie `ollama.<mode>.meta`.
 
 ## Start-Workflow (start.ps1)
 - Start.ps1 protokolliert Start/Stop des PHP-Servers inkl. PID/Command/CWD und räumt `php_server.pid` beim Beenden zuverlässig auf.

@@ -110,7 +110,7 @@ function sv_enqueue_ollama_job(PDO $pdo, array $config, int $mediaId, string $mo
     ]);
     $presentId = $existing->fetchColumn();
     if ($presentId) {
-        $logger('Ollama-Job existiert bereits (#' . (int)$presentId . ', pending/running).');
+        $logger('Ollama-Job existiert bereits (#' . (int)$presentId . ', queued/pending/running).');
         return [
             'job_id' => (int)$presentId,
             'deduped' => true,
@@ -136,7 +136,7 @@ function sv_enqueue_ollama_job(PDO $pdo, array $config, int $mediaId, string $mo
     $stmt->execute([
         ':media_id' => $mediaId,
         ':type' => $jobType,
-        ':status' => 'pending',
+        ':status' => 'queued',
         ':created_at' => $now,
         ':updated_at' => $now,
         ':payload' => $payloadJson,
@@ -238,7 +238,7 @@ function sv_ollama_fetch_pending_jobs(PDO $pdo, array $jobTypes, int $limit, ?in
     if (sv_jobs_supports_payload_json($pdo)) {
         $sql .= ', payload_json';
     }
-    $sql .= ' FROM jobs WHERE type IN (' . $placeholders . ') AND status = "pending"';
+    $sql .= ' FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("pending","queued")';
     if ($mediaId !== null && $mediaId > 0) {
         $sql .= ' AND media_id = ?';
         $params[] = $mediaId;
@@ -326,6 +326,50 @@ function sv_ollama_insert_result(PDO $pdo, array $data): int
     ]);
 
     return (int)$pdo->lastInsertId();
+}
+
+function sv_ollama_build_meta_snapshot(int $resultId, string $model, bool $parseError, ?string $contradictions, ?string $missing, ?string $rationale): string
+{
+    $meta = [
+        'result_id' => $resultId,
+        'model' => $model,
+        'parse_error' => $parseError,
+    ];
+    if ($contradictions !== null) {
+        $meta['contradictions'] = $contradictions;
+    }
+    if ($missing !== null) {
+        $meta['missing'] = $missing;
+    }
+    if ($rationale !== null) {
+        $meta['rationale'] = $rationale;
+    }
+
+    $metaJson = json_encode($meta, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    return $metaJson === false ? '{}' : $metaJson;
+}
+
+function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, array $values): void
+{
+    $source = 'ollama';
+    $lastRunAt = $values['last_run_at'] ?? date('c');
+
+    if ($mode === 'caption' && isset($values['caption']) && $values['caption'] !== null) {
+        sv_set_media_meta_value($pdo, $mediaId, 'ollama.caption', $values['caption'], $source);
+    }
+    if ($mode === 'title' && isset($values['title']) && $values['title'] !== null) {
+        sv_set_media_meta_value($pdo, $mediaId, 'ollama.title', $values['title'], $source);
+    }
+    if ($mode === 'prompt_eval' && isset($values['score']) && $values['score'] !== null) {
+        sv_set_media_meta_value($pdo, $mediaId, 'ollama.prompt_eval.score', $values['score'], $source);
+    }
+
+    sv_set_media_meta_value($pdo, $mediaId, 'ollama.last_run_at', $lastRunAt, $source);
+    sv_set_media_meta_value($pdo, $mediaId, 'ollama.stage_version', SV_OLLAMA_STAGE_VERSION, $source);
+
+    if (isset($values['meta']) && is_string($values['meta']) && trim($values['meta']) !== '') {
+        sv_set_media_meta_value($pdo, $mediaId, 'ollama.' . $mode . '.meta', $values['meta'], $source);
+    }
 }
 
 function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, array $payload): array
@@ -435,14 +479,6 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
 {
     $jobTypes = sv_ollama_job_types();
     sv_mark_stuck_jobs($pdo, $jobTypes, SV_JOB_STUCK_MINUTES, $logger);
-
-    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
-    sv_db_exec_retry(static function () use ($pdo, $placeholders, $jobTypes): void {
-        $stmt = $pdo->prepare(
-            'UPDATE jobs SET status = \"pending\" WHERE status = \"queued\" AND type IN (' . $placeholders . ')'
-        );
-        $stmt->execute($jobTypes);
-    });
 
     $ollamaCfg = sv_ollama_config($config);
     $limit = $limit !== null ? (int)$limit : (int)$ollamaCfg['worker']['batch_size'];
@@ -623,8 +659,26 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'meta' => $metaJson,
         ]);
 
-        $payload['last_success_at'] = date('c');
+        $lastSuccessAt = date('c');
+        $payload['last_success_at'] = $lastSuccessAt;
         sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+
+        $metaSnapshot = sv_ollama_build_meta_snapshot(
+            $resultId,
+            (string)($response['model'] ?? $options['model']),
+            $parseError,
+            $contradictions,
+            $missing,
+            $rationale
+        );
+
+        sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
+            'caption' => $caption,
+            'title' => $title,
+            'score' => $score,
+            'last_run_at' => $lastSuccessAt,
+            'meta' => $metaSnapshot,
+        ]);
 
         $responseLog = $rawJson ? sv_ollama_truncate_for_log($rawJson, 300) : ($responseText ? sv_ollama_truncate_for_log($responseText, 300) : '');
         $promptLog = sv_ollama_truncate_for_log($prompt, 200);
