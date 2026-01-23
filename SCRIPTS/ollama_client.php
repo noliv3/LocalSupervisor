@@ -73,6 +73,9 @@ function sv_ollama_config(array $config): array
         'quality_template' => isset($ollama['quality_template']) && is_string($ollama['quality_template']) && trim($ollama['quality_template']) !== ''
             ? trim($ollama['quality_template'])
             : "Bewerte die technische Bildqualität (0-100) und klassifiziere die Domäne. Antworte ausschließlich als JSON.\nFormat: {\"quality_score\":0,\"quality_flags\":[],\"domain_type\":\"other\",\"domain_confidence\":0.0,\"rationale\":\"...\"}",
+        'prompt_recon_template' => isset($ollama['prompt_recon_template']) && is_string($ollama['prompt_recon_template']) && trim($ollama['prompt_recon_template']) !== ''
+            ? trim($ollama['prompt_recon_template'])
+            : "Rekonstruiere den wahrscheinlichsten Prompt aus den Metadaten. Antworte ausschließlich als JSON.\nFormat: {\"prompt\":\"...\",\"negative_prompt\":\"...\",\"confidence\":0.0,\"style_tokens\":[],\"subject_tokens\":[],\"rationale\":\"...\"}\nCaption: {{caption}}\nTitle: {{title}}\nTags: {{tags_normalized}}\nDomain: {{domain_type}}\nQuality flags: {{quality_flags}}\nOriginal prompt: {{original_prompt}}",
         'timeout_ms' => isset($ollama['timeout_ms']) ? max(1000, (int)$ollama['timeout_ms']) : 20000,
         'max_image_bytes' => isset($ollama['max_image_bytes']) ? max(0, (int)$ollama['max_image_bytes']) : 4194304,
         'retry' => [
