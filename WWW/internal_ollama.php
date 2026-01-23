@@ -89,7 +89,7 @@ if ($action === 'run_once') {
 if ($action === 'enqueue') {
     $modeArg = $_POST['mode'] ?? ($jsonBody['mode'] ?? 'all');
     $modeArg = is_string($modeArg) ? trim($modeArg) : 'all';
-    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'all'];
+    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'all'];
     if (!in_array($modeArg, $allowedModes, true)) {
         $respond(400, ['ok' => false, 'error' => 'Invalid mode.']);
     }
@@ -119,7 +119,14 @@ if ($action === 'enqueue') {
         $sql = 'SELECT m.id FROM media m';
         $params = [];
 
-        if (!$allFlag) {
+        if ($mode === 'prompt_recon') {
+            $sql .= ' LEFT JOIN media_meta mm_prompt ON mm_prompt.media_id = m.id AND mm_prompt.meta_key = :prompt_key';
+            $sql .= ' LEFT JOIN media_meta mm_caption ON mm_caption.media_id = m.id AND mm_caption.meta_key = :caption_key';
+            $sql .= ' LEFT JOIN media_meta mm_tags ON mm_tags.media_id = m.id AND mm_tags.meta_key = :tags_key';
+            $params[':prompt_key'] = 'ollama.prompt_recon.prompt';
+            $params[':caption_key'] = 'ollama.caption';
+            $params[':tags_key'] = 'ollama.tags_normalized';
+        } elseif (!$allFlag) {
             if ($mode === 'tags_normalize' || $mode === 'quality') {
                 $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
                 $params[':meta_key'] = $mode === 'quality' ? 'ollama.quality.score' : 'ollama.tags_normalized';
@@ -130,7 +137,10 @@ if ($action === 'enqueue') {
         }
 
         $conditions = [];
-        if (!$allFlag) {
+        if ($mode === 'prompt_recon') {
+            $conditions[] = 'mm_prompt.id IS NULL';
+            $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
+        } elseif (!$allFlag) {
             $conditions[] = $mode === 'tags_normalize' || $mode === 'quality' ? 'mm.id IS NULL' : 'o.id IS NULL';
         }
         if ($since !== null && $since !== '') {
@@ -169,6 +179,8 @@ if ($action === 'enqueue') {
             $modeMissing = true;
         } elseif ($mode === 'quality') {
             $modeMissing = true;
+        } elseif ($mode === 'prompt_recon') {
+            $modeMissing = true;
         }
 
         $stmt = $buildCandidateQuery($mode, !$modeMissing ? true : false, $since);
@@ -176,7 +188,7 @@ if ($action === 'enqueue') {
         return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
     };
 
-    $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality'] : [$modeArg];
+    $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon'] : [$modeArg];
     $summary = [
         'candidates' => 0,
         'enqueued' => 0,
