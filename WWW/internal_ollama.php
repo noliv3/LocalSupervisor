@@ -44,6 +44,7 @@ if ($action === 'status') {
     $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY status');
     $stmt->execute($jobTypes);
     $counts = [
+        'queued' => 0,
         'pending' => 0,
         'running' => 0,
         'done' => 0,
