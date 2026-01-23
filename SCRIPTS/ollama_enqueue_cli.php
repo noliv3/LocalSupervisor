@@ -40,6 +40,9 @@ foreach (array_slice($argv, 1) as $arg) {
 }
 
 $modeArg = $modeArg === '' ? 'all' : $modeArg;
+$allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed', 'all'];
+if (!in_array($modeArg, $allowedModes, true)) {
+    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|quality|embed|all\n");
 $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'all'];
 if (!in_array($modeArg, $allowedModes, true)) {
     fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|quality|prompt_recon|all\n");
@@ -69,13 +72,19 @@ $buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $si
         if ($mode === 'tags_normalize' || $mode === 'quality') {
             $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
             $params[':meta_key'] = $mode === 'quality' ? 'ollama.quality.score' : 'ollama.tags_normalized';
-        } else {
+        } elseif ($mode !== 'embed') {
             $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
             $params[':mode'] = $mode;
         }
     }
 
     $conditions = [];
+    if (!$allFlag) {
+        if ($mode === 'tags_normalize' || $mode === 'quality') {
+            $conditions[] = 'mm.id IS NULL';
+        } elseif ($mode !== 'embed') {
+            $conditions[] = 'o.id IS NULL';
+        }
     if ($mode === 'prompt_recon') {
         $conditions[] = 'mm_prompt.id IS NULL';
         $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
@@ -118,6 +127,7 @@ $selectCandidates = static function (string $mode) use ($buildCandidateQuery, $a
         $modeMissing = true;
     } elseif ($mode === 'quality') {
         $modeMissing = true;
+    } elseif ($mode === 'embed') {
     } elseif ($mode === 'prompt_recon') {
         $modeMissing = true;
     }
@@ -127,6 +137,7 @@ $selectCandidates = static function (string $mode) use ($buildCandidateQuery, $a
     return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
 };
 
+$modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed'] : [$modeArg];
 $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon'] : [$modeArg];
 
 $summary = [
@@ -157,6 +168,15 @@ foreach ($modes as $mode) {
             }
             $payload['prompt'] = $prompt;
             $payload['prompt_source'] = $promptInfo['source'] ?? null;
+        }
+        if ($mode === 'embed') {
+            $candidate = sv_ollama_embed_candidate($pdo, $config, $candidateId, $allFlag);
+            if (empty($candidate['eligible'])) {
+                $reason = isset($candidate['reason']) ? (string)$candidate['reason'] : 'Embed übersprungen.';
+                $logger('Embed übersprungen (Media ' . $candidateId . '): ' . $reason);
+                $summary['skipped']++;
+                continue;
+            }
         }
 
         try {

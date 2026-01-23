@@ -89,6 +89,7 @@ if ($action === 'run_once') {
 if ($action === 'enqueue') {
     $modeArg = $_POST['mode'] ?? ($jsonBody['mode'] ?? 'all');
     $modeArg = is_string($modeArg) ? trim($modeArg) : 'all';
+    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed', 'all'];
     $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'all'];
     if (!in_array($modeArg, $allowedModes, true)) {
         $respond(400, ['ok' => false, 'error' => 'Invalid mode.']);
@@ -130,13 +131,19 @@ if ($action === 'enqueue') {
             if ($mode === 'tags_normalize' || $mode === 'quality') {
                 $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
                 $params[':meta_key'] = $mode === 'quality' ? 'ollama.quality.score' : 'ollama.tags_normalized';
-            } else {
+            } elseif ($mode !== 'embed') {
                 $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
                 $params[':mode'] = $mode;
             }
         }
 
         $conditions = [];
+        if (!$allFlag) {
+            if ($mode === 'tags_normalize' || $mode === 'quality') {
+                $conditions[] = 'mm.id IS NULL';
+            } elseif ($mode !== 'embed') {
+                $conditions[] = 'o.id IS NULL';
+            }
         if ($mode === 'prompt_recon') {
             $conditions[] = 'mm_prompt.id IS NULL';
             $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
@@ -179,6 +186,7 @@ if ($action === 'enqueue') {
             $modeMissing = true;
         } elseif ($mode === 'quality') {
             $modeMissing = true;
+        } elseif ($mode === 'embed') {
         } elseif ($mode === 'prompt_recon') {
             $modeMissing = true;
         }
@@ -188,6 +196,7 @@ if ($action === 'enqueue') {
         return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
     };
 
+    $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed'] : [$modeArg];
     $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon'] : [$modeArg];
     $summary = [
         'candidates' => 0,
@@ -222,6 +231,15 @@ if ($action === 'enqueue') {
                 }
                 $payload['prompt'] = $prompt;
                 $payload['prompt_source'] = $promptInfo['source'] ?? null;
+            }
+            if ($mode === 'embed') {
+                $candidate = sv_ollama_embed_candidate($pdo, $config, $candidateId, $allFlag);
+                if (empty($candidate['eligible'])) {
+                    $reason = isset($candidate['reason']) ? (string)$candidate['reason'] : 'Embed übersprungen.';
+                    $logger('Embed übersprungen (Media ' . $candidateId . '): ' . $reason);
+                    $summary['skipped']++;
+                    continue;
+                }
             }
 
             try {

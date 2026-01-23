@@ -12,6 +12,9 @@ const SV_JOB_TYPE_OLLAMA_TITLE       = 'ollama_title';
 const SV_JOB_TYPE_OLLAMA_PROMPT_EVAL = 'ollama_prompt_eval';
 const SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE = 'ollama_tags_normalize';
 const SV_JOB_TYPE_OLLAMA_QUALITY     = 'ollama_quality';
+const SV_JOB_TYPE_OLLAMA_EMBED       = 'ollama_embed';
+const SV_OLLAMA_STAGE_VERSION        = 'stage5_v1';
+const SV_OLLAMA_EMBED_VERSION        = 'embed_v1';
 const SV_JOB_TYPE_OLLAMA_PROMPT_RECON = 'ollama_prompt_recon';
 const SV_OLLAMA_STAGE_VERSION        = 'stage4_v1';
 
@@ -49,6 +52,7 @@ function sv_ollama_job_types(): array
         SV_JOB_TYPE_OLLAMA_PROMPT_EVAL,
         SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE,
         SV_JOB_TYPE_OLLAMA_QUALITY,
+        SV_JOB_TYPE_OLLAMA_EMBED,
         SV_JOB_TYPE_OLLAMA_PROMPT_RECON,
     ];
 }
@@ -71,6 +75,8 @@ function sv_ollama_job_type_for_mode(string $mode): string
     if ($mode === 'quality') {
         return SV_JOB_TYPE_OLLAMA_QUALITY;
     }
+    if ($mode === 'embed') {
+        return SV_JOB_TYPE_OLLAMA_EMBED;
     if ($mode === 'prompt_recon') {
         return SV_JOB_TYPE_OLLAMA_PROMPT_RECON;
     }
@@ -95,6 +101,8 @@ function sv_ollama_mode_for_job_type(string $jobType): string
     if ($jobType === SV_JOB_TYPE_OLLAMA_QUALITY) {
         return 'quality';
     }
+    if ($jobType === SV_JOB_TYPE_OLLAMA_EMBED) {
+        return 'embed';
     if ($jobType === SV_JOB_TYPE_OLLAMA_PROMPT_RECON) {
         return 'prompt_recon';
     }
@@ -456,6 +464,145 @@ function sv_ollama_normalize_quality_flags($value): ?array
     return array_keys($normalized);
 }
 
+function sv_ollama_parse_json_list(?string $value): ?array
+{
+    if (!is_string($value) || trim($value) === '') {
+        return null;
+    }
+
+    $decoded = json_decode($value, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    $list = array_values(array_filter(array_map('strval', $decoded), static fn ($v) => trim($v) !== ''));
+    return $list === [] ? null : $list;
+}
+
+function sv_ollama_build_embedding_input(PDO $pdo, int $mediaId): ?string
+{
+    $parts = [];
+
+    $caption = sv_ollama_normalize_text_value(sv_get_media_meta_value($pdo, $mediaId, 'ollama.caption'));
+    if ($caption !== null) {
+        $parts[] = 'caption: ' . $caption;
+    }
+
+    $title = sv_ollama_normalize_text_value(sv_get_media_meta_value($pdo, $mediaId, 'ollama.title'));
+    if ($title !== null) {
+        $parts[] = 'title: ' . $title;
+    }
+
+    $tagsRaw = sv_get_media_meta_value($pdo, $mediaId, 'ollama.tags_normalized');
+    $tags = sv_ollama_parse_json_list(is_string($tagsRaw) ? $tagsRaw : null);
+    if ($tags === null && is_string($tagsRaw) && trim($tagsRaw) !== '') {
+        $tags = array_values(array_filter(array_map('trim', explode(',', $tagsRaw)), static fn ($v) => $v !== ''));
+    }
+    if ($tags !== null) {
+        sort($tags, SORT_STRING);
+        $parts[] = 'tags_normalized: ' . implode(', ', $tags);
+    }
+
+    $domainType = sv_ollama_normalize_text_value(sv_get_media_meta_value($pdo, $mediaId, 'ollama.domain.type'));
+    if ($domainType !== null) {
+        $parts[] = 'domain_type: ' . $domainType;
+    }
+
+    $flagsRaw = sv_get_media_meta_value($pdo, $mediaId, 'ollama.quality.flags');
+    $flags = sv_ollama_parse_json_list(is_string($flagsRaw) ? $flagsRaw : null);
+    if ($flags !== null) {
+        sort($flags, SORT_STRING);
+        $parts[] = 'quality_flags: ' . implode(', ', $flags);
+    }
+
+    $promptRecon = sv_ollama_normalize_text_value(sv_get_media_meta_value($pdo, $mediaId, 'ollama.prompt_recon.prompt'));
+    if ($promptRecon !== null) {
+        $parts[] = 'prompt_recon: ' . $promptRecon;
+    }
+
+    if ($parts === []) {
+        return null;
+    }
+
+    return implode("\n", $parts);
+}
+
+function sv_ollama_has_embedding_seed(PDO $pdo, int $mediaId): bool
+{
+    $caption = sv_ollama_normalize_text_value(sv_get_media_meta_value($pdo, $mediaId, 'ollama.caption'));
+    if ($caption !== null) {
+        return true;
+    }
+
+    $tagsRaw = sv_get_media_meta_value($pdo, $mediaId, 'ollama.tags_normalized');
+    $tags = sv_ollama_parse_json_list(is_string($tagsRaw) ? $tagsRaw : null);
+    if ($tags !== null) {
+        return true;
+    }
+    if (is_string($tagsRaw) && trim($tagsRaw) !== '') {
+        return true;
+    }
+
+    $promptRecon = sv_ollama_normalize_text_value(sv_get_media_meta_value($pdo, $mediaId, 'ollama.prompt_recon.prompt'));
+    return $promptRecon !== null;
+}
+
+function sv_ollama_embed_input_hash(string $input, string $model, string $kind, string $version): string
+{
+    return hash('sha256', $input . "\n" . $model . "\n" . $kind . "\n" . $version);
+}
+
+function sv_ollama_fetch_vector_id(PDO $pdo, int $mediaId, string $kind, string $model, string $inputHash): ?int
+{
+    $stmt = $pdo->prepare(
+        'SELECT id FROM ollama_vectors WHERE media_id = :media_id AND kind = :kind AND model = :model AND input_hash = :input_hash ORDER BY id DESC LIMIT 1'
+    );
+    $stmt->execute([
+        ':media_id' => $mediaId,
+        ':kind' => $kind,
+        ':model' => $model,
+        ':input_hash' => $inputHash,
+    ]);
+    $vectorId = $stmt->fetchColumn();
+    return $vectorId ? (int)$vectorId : null;
+}
+
+function sv_ollama_upsert_vector(PDO $pdo, array $data): int
+{
+    $stmt = $pdo->prepare(
+        'INSERT INTO ollama_vectors (media_id, kind, model, dims, vector_json, input_hash, created_at, updated_at) '
+        . 'VALUES (:media_id, :kind, :model, :dims, :vector_json, :input_hash, :created_at, :updated_at) '
+        . 'ON CONFLICT(media_id, kind, model, input_hash) DO UPDATE SET dims = excluded.dims, vector_json = excluded.vector_json, updated_at = excluded.updated_at'
+    );
+    $stmt->execute([
+        ':media_id' => (int)$data['media_id'],
+        ':kind' => (string)$data['kind'],
+        ':model' => (string)$data['model'],
+        ':dims' => (int)$data['dims'],
+        ':vector_json' => (string)$data['vector_json'],
+        ':input_hash' => (string)$data['input_hash'],
+        ':created_at' => (string)$data['created_at'],
+        ':updated_at' => (string)$data['updated_at'],
+    ]);
+
+    $vectorId = (int)$pdo->lastInsertId();
+    if ($vectorId > 0) {
+        return $vectorId;
+    }
+
+    $lookup = $pdo->prepare(
+        'SELECT id FROM ollama_vectors WHERE media_id = :media_id AND kind = :kind AND model = :model AND input_hash = :input_hash ORDER BY id DESC LIMIT 1'
+    );
+    $lookup->execute([
+        ':media_id' => (int)$data['media_id'],
+        ':kind' => (string)$data['kind'],
+        ':model' => (string)$data['model'],
+        ':input_hash' => (string)$data['input_hash'],
+    ]);
+    $vectorId = $lookup->fetchColumn();
+    return $vectorId ? (int)$vectorId : 0;
+}
+
 function sv_ollama_encode_json($value): ?string
 {
     $json = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -582,6 +729,18 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.domain.confidence', $values['domain_confidence'], $source);
         }
     }
+    if ($mode === 'embed') {
+        if (isset($values['embed_model']) && $values['embed_model'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.embed.text.model', $values['embed_model'], $source);
+        }
+        if (isset($values['embed_dims']) && $values['embed_dims'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.embed.text.dims', $values['embed_dims'], $source);
+        }
+        if (isset($values['embed_hash']) && $values['embed_hash'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.embed.text.hash', $values['embed_hash'], $source);
+        }
+        if (isset($values['embed_vector_id']) && $values['embed_vector_id'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.embed.text.vector_id', $values['embed_vector_id'], $source);
     if ($mode === 'prompt_recon') {
         if (isset($values['prompt']) && $values['prompt'] !== null) {
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.prompt_recon.prompt', $values['prompt'], $source);
@@ -608,6 +767,50 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
     if (isset($values['meta']) && is_string($values['meta']) && trim($values['meta']) !== '') {
         sv_set_media_meta_value($pdo, $mediaId, 'ollama.' . $mode . '.meta', $values['meta'], $source);
     }
+}
+
+function sv_ollama_embed_candidate(PDO $pdo, array $config, int $mediaId, bool $allFlag): array
+{
+    if (!sv_ollama_has_embedding_seed($pdo, $mediaId)) {
+        return [
+            'eligible' => false,
+            'reason' => 'Keine Embedding-Quelle verfügbar.',
+        ];
+    }
+
+    $input = sv_ollama_build_embedding_input($pdo, $mediaId);
+    if ($input === null) {
+        return [
+            'eligible' => false,
+            'reason' => 'Kein Embedding-Input vorhanden.',
+        ];
+    }
+
+    $ollamaCfg = sv_ollama_config($config);
+    $model = $ollamaCfg['model']['embed'] ?? $ollamaCfg['model_default'];
+    $kind = 'text';
+    $hash = sv_ollama_embed_input_hash($input, $model, $kind, SV_OLLAMA_EMBED_VERSION);
+
+    if (!$allFlag) {
+        $existingHash = sv_get_media_meta_value($pdo, $mediaId, 'ollama.embed.text.hash');
+        if (is_string($existingHash) && $existingHash === $hash) {
+            $vectorId = sv_ollama_fetch_vector_id($pdo, $mediaId, $kind, $model, $hash);
+            if ($vectorId !== null) {
+                return [
+                    'eligible' => false,
+                    'reason' => 'Embedding bereits vorhanden.',
+                    'hash' => $hash,
+                    'model' => $model,
+                ];
+            }
+        }
+    }
+
+    return [
+        'eligible' => true,
+        'hash' => $hash,
+        'model' => $model,
+    ];
 }
 
 function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, array $payload): array
@@ -808,6 +1011,200 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
     try {
         if (!$ollamaCfg['enabled']) {
             throw new RuntimeException('Ollama ist deaktiviert.');
+        }
+
+        if ($mode === 'embed') {
+            if (!sv_ollama_has_embedding_seed($pdo, $mediaId)) {
+                throw new RuntimeException('Keine Embedding-Quelle verfügbar.');
+            }
+
+            $embedInput = sv_ollama_build_embedding_input($pdo, $mediaId);
+            if ($embedInput === null) {
+                throw new RuntimeException('Kein Embedding-Input vorhanden.');
+            }
+
+            $options = isset($payload['options']) && is_array($payload['options']) ? $payload['options'] : [];
+            if (isset($payload['model']) && is_string($payload['model']) && trim($payload['model']) !== '') {
+                $options['model'] = trim($payload['model']);
+            }
+            if (!isset($options['model']) || trim((string)$options['model']) === '') {
+                $options['model'] = $ollamaCfg['model']['embed'] ?? $ollamaCfg['model_default'];
+            }
+            if (!isset($options['timeout_ms'])) {
+                $options['timeout_ms'] = $ollamaCfg['timeout_ms'];
+            }
+            if (!array_key_exists('deterministic', $options)) {
+                $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
+            }
+
+            $embedModel = (string)$options['model'];
+            $embedKind = 'text';
+            $inputHash = sv_ollama_embed_input_hash($embedInput, $embedModel, $embedKind, SV_OLLAMA_EMBED_VERSION);
+
+            $existingHash = sv_get_media_meta_value($pdo, $mediaId, 'ollama.embed.text.hash');
+            if (is_string($existingHash) && $existingHash === $inputHash) {
+                $vectorId = sv_ollama_fetch_vector_id($pdo, $mediaId, $embedKind, $embedModel, $inputHash);
+                if ($vectorId !== null) {
+                    sv_update_job_status($pdo, $jobId, 'done', json_encode([
+                        'job_type' => $jobType,
+                        'media_id' => $mediaId,
+                        'mode' => $mode,
+                        'vector_id' => $vectorId,
+                        'model' => $embedModel,
+                        'input_hash' => $inputHash,
+                        'deduped' => true,
+                    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+                    sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                        'ts' => date('c'),
+                        'event' => 'success',
+                        'job_id' => $jobId,
+                        'media_id' => $mediaId,
+                        'job_type' => $jobType,
+                        'mode' => $mode,
+                        'model' => $embedModel,
+                        'input_hash' => $inputHash,
+                        'deduped' => true,
+                    ]);
+
+                    return [
+                        'job_id' => $jobId,
+                        'media_id' => $mediaId,
+                        'job_type' => $jobType,
+                        'status' => 'done',
+                        'vector_id' => $vectorId,
+                        'deduped' => true,
+                    ];
+                }
+            }
+
+            $response = sv_ollama_embed_text($config, $embedInput, $options);
+            if (empty($response['ok'])) {
+                $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
+                throw new RuntimeException($error);
+            }
+
+            $vector = $response['vector'] ?? null;
+            if (!is_array($vector) || $vector === []) {
+                throw new RuntimeException('Ungültige Embedding-Antwort.');
+            }
+
+            $cleanVector = [];
+            foreach ($vector as $entry) {
+                if (!is_numeric($entry)) {
+                    throw new RuntimeException('Embedding enthält ungültige Werte.');
+                }
+                $cleanVector[] = (float)$entry;
+            }
+
+            $dims = count($cleanVector);
+            if ($dims <= 0) {
+                throw new RuntimeException('Embedding-Dimensionen fehlen.');
+            }
+
+            $vectorJson = json_encode($cleanVector, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if ($vectorJson === false) {
+                throw new RuntimeException('Embedding konnte nicht serialisiert werden.');
+            }
+
+            $now = date('c');
+            $vectorId = sv_ollama_upsert_vector($pdo, [
+                'media_id' => $mediaId,
+                'kind' => $embedKind,
+                'model' => $embedModel,
+                'dims' => $dims,
+                'vector_json' => $vectorJson,
+                'input_hash' => $inputHash,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            $rawJson = sv_ollama_encode_json([
+                'input_hash' => $inputHash,
+                'dims' => $dims,
+                'kind' => $embedKind,
+            ]);
+
+            $meta = [
+                'job_id' => $jobId,
+                'job_type' => $jobType,
+                'mode' => $mode,
+                'latency_ms' => $response['latency_ms'] ?? null,
+                'usage' => $response['usage'] ?? null,
+                'parse_error' => false,
+            ];
+            $metaJson = sv_ollama_encode_json($meta);
+
+            $resultId = sv_ollama_insert_result($pdo, [
+                'media_id' => $mediaId,
+                'mode' => $mode,
+                'model' => $embedModel,
+                'title' => null,
+                'caption' => null,
+                'score' => null,
+                'contradictions' => null,
+                'missing' => null,
+                'rationale' => null,
+                'raw_json' => $rawJson,
+                'raw_text' => null,
+                'parse_error' => false,
+                'created_at' => $now,
+                'meta' => $metaJson,
+            ]);
+
+            $payload['last_success_at'] = $now;
+            sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+
+            $metaSnapshot = sv_ollama_build_meta_snapshot($resultId, $embedModel, false, null, null, null);
+
+            sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
+                'embed_model' => $embedModel,
+                'embed_dims' => $dims,
+                'embed_hash' => $inputHash,
+                'embed_vector_id' => $vectorId,
+                'last_run_at' => $now,
+                'meta' => $metaSnapshot,
+            ]);
+
+            sv_update_job_status($pdo, $jobId, 'done', json_encode([
+                'job_type' => $jobType,
+                'media_id' => $mediaId,
+                'mode' => $mode,
+                'vector_id' => $vectorId,
+                'model' => $embedModel,
+                'input_hash' => $inputHash,
+                'result_id' => $resultId,
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+            sv_audit_log($pdo, 'ollama_done', 'jobs', $jobId, [
+                'media_id' => $mediaId,
+                'job_type' => $jobType,
+                'mode' => $mode,
+                'result_id' => $resultId,
+                'model' => $embedModel,
+                'parse_error' => false,
+            ]);
+
+            sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                'ts' => date('c'),
+                'event' => 'success',
+                'job_id' => $jobId,
+                'media_id' => $mediaId,
+                'job_type' => $jobType,
+                'mode' => $mode,
+                'model' => $embedModel,
+                'input_hash' => $inputHash,
+                'dims' => $dims,
+            ]);
+
+            return [
+                'job_id' => $jobId,
+                'media_id' => $mediaId,
+                'job_type' => $jobType,
+                'status' => 'done',
+                'result_id' => $resultId,
+                'vector_id' => $vectorId,
+            ];
         }
 
         $imageData = null;
