@@ -29,6 +29,10 @@ function sv_ollama_prompt_definitions(array $config): array
             'prompt' => $ollamaCfg['quality_template'],
             'output_key' => 'quality_score',
         ],
+        'prompt_recon' => [
+            'prompt' => $ollamaCfg['prompt_recon_template'],
+            'output_key' => 'prompt',
+        ],
     ];
 }
 
@@ -74,6 +78,43 @@ function sv_ollama_build_prompt(string $mode, array $config, array $payload = []
         $prompt = str_replace('{tags}', $tags, $prompt);
         $prompt = str_replace('{{context}}', $context, $prompt);
         $prompt = str_replace('{context}', $context, $prompt);
+    }
+    if ($mode === 'prompt_recon') {
+        $caption = isset($payload['caption']) ? trim((string)$payload['caption']) : '';
+        $title = isset($payload['title']) ? trim((string)$payload['title']) : '';
+        $tags = $payload['tags_normalized'] ?? null;
+        if (is_array($tags)) {
+            $tags = array_values(array_filter(array_map('strval', $tags), static fn ($v) => trim($v) !== ''));
+            $tags = implode(', ', $tags);
+        } elseif (is_string($tags)) {
+            $tags = trim($tags);
+        } else {
+            $tags = '';
+        }
+        $domainType = isset($payload['domain_type']) ? trim((string)$payload['domain_type']) : '';
+        $qualityFlags = $payload['quality_flags'] ?? null;
+        if (is_array($qualityFlags)) {
+            $qualityFlags = array_values(array_filter(array_map('strval', $qualityFlags), static fn ($v) => trim($v) !== ''));
+            $qualityFlags = implode(', ', $qualityFlags);
+        } elseif (is_string($qualityFlags)) {
+            $qualityFlags = trim($qualityFlags);
+        } else {
+            $qualityFlags = '';
+        }
+        $originalPrompt = isset($payload['original_prompt']) ? trim((string)$payload['original_prompt']) : '';
+
+        $prompt = str_replace('{{caption}}', $caption, $prompt);
+        $prompt = str_replace('{caption}', $caption, $prompt);
+        $prompt = str_replace('{{title}}', $title, $prompt);
+        $prompt = str_replace('{title}', $title, $prompt);
+        $prompt = str_replace('{{tags_normalized}}', $tags, $prompt);
+        $prompt = str_replace('{tags_normalized}', $tags, $prompt);
+        $prompt = str_replace('{{domain_type}}', $domainType, $prompt);
+        $prompt = str_replace('{domain_type}', $domainType, $prompt);
+        $prompt = str_replace('{{quality_flags}}', $qualityFlags, $prompt);
+        $prompt = str_replace('{quality_flags}', $qualityFlags, $prompt);
+        $prompt = str_replace('{{original_prompt}}', $originalPrompt, $prompt);
+        $prompt = str_replace('{original_prompt}', $originalPrompt, $prompt);
     }
 
     return [
