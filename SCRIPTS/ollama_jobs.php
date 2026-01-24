@@ -13,10 +13,9 @@ const SV_JOB_TYPE_OLLAMA_PROMPT_EVAL = 'ollama_prompt_eval';
 const SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE = 'ollama_tags_normalize';
 const SV_JOB_TYPE_OLLAMA_QUALITY     = 'ollama_quality';
 const SV_JOB_TYPE_OLLAMA_EMBED       = 'ollama_embed';
+const SV_JOB_TYPE_OLLAMA_PROMPT_RECON = 'ollama_prompt_recon';
 const SV_OLLAMA_STAGE_VERSION        = 'stage5_v1';
 const SV_OLLAMA_EMBED_VERSION        = 'embed_v1';
-const SV_JOB_TYPE_OLLAMA_PROMPT_RECON = 'ollama_prompt_recon';
-const SV_OLLAMA_STAGE_VERSION        = 'stage4_v1';
 
 const SV_OLLAMA_QUALITY_FLAGS = [
     'blur',
@@ -77,6 +76,7 @@ function sv_ollama_job_type_for_mode(string $mode): string
     }
     if ($mode === 'embed') {
         return SV_JOB_TYPE_OLLAMA_EMBED;
+    }
     if ($mode === 'prompt_recon') {
         return SV_JOB_TYPE_OLLAMA_PROMPT_RECON;
     }
@@ -103,6 +103,7 @@ function sv_ollama_mode_for_job_type(string $jobType): string
     }
     if ($jobType === SV_JOB_TYPE_OLLAMA_EMBED) {
         return 'embed';
+    }
     if ($jobType === SV_JOB_TYPE_OLLAMA_PROMPT_RECON) {
         return 'prompt_recon';
     }
@@ -741,6 +742,8 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
         }
         if (isset($values['embed_vector_id']) && $values['embed_vector_id'] !== null) {
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.embed.text.vector_id', $values['embed_vector_id'], $source);
+        }
+    }
     if ($mode === 'prompt_recon') {
         if (isset($values['prompt']) && $values['prompt'] !== null) {
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.prompt_recon.prompt', $values['prompt'], $source);
