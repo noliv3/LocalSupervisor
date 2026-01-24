@@ -40,12 +40,9 @@ foreach (array_slice($argv, 1) as $arg) {
 }
 
 $modeArg = $modeArg === '' ? 'all' : $modeArg;
-$allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed', 'all'];
+$allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'all'];
 if (!in_array($modeArg, $allowedModes, true)) {
-    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|quality|embed|all\n");
-$allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'all'];
-if (!in_array($modeArg, $allowedModes, true)) {
-    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|quality|prompt_recon|all\n");
+    fwrite(STDERR, "Ungültiger --mode-Wert. Erlaubt: caption|title|prompt_eval|tags_normalize|quality|prompt_recon|embed|all\n");
     exit(1);
 }
 
@@ -79,17 +76,15 @@ $buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $si
     }
 
     $conditions = [];
-    if (!$allFlag) {
+    if ($mode === 'prompt_recon') {
+        $conditions[] = 'mm_prompt.id IS NULL';
+        $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
+    } elseif (!$allFlag) {
         if ($mode === 'tags_normalize' || $mode === 'quality') {
             $conditions[] = 'mm.id IS NULL';
         } elseif ($mode !== 'embed') {
             $conditions[] = 'o.id IS NULL';
         }
-    if ($mode === 'prompt_recon') {
-        $conditions[] = 'mm_prompt.id IS NULL';
-        $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
-    } elseif (!$allFlag) {
-        $conditions[] = $mode === 'tags_normalize' || $mode === 'quality' ? 'mm.id IS NULL' : 'o.id IS NULL';
     }
     if ($since !== null && $since !== '') {
         $conditions[] = 'm.imported_at >= :since';
@@ -137,8 +132,9 @@ $selectCandidates = static function (string $mode) use ($buildCandidateQuery, $a
     return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
 };
 
-$modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed'] : [$modeArg];
-$modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon'] : [$modeArg];
+$modes = $modeArg === 'all'
+    ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed']
+    : [$modeArg];
 
 $summary = [
     'candidates' => 0,

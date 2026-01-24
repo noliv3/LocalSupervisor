@@ -89,8 +89,7 @@ if ($action === 'run_once') {
 if ($action === 'enqueue') {
     $modeArg = $_POST['mode'] ?? ($jsonBody['mode'] ?? 'all');
     $modeArg = is_string($modeArg) ? trim($modeArg) : 'all';
-    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed', 'all'];
-    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'all'];
+    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'all'];
     if (!in_array($modeArg, $allowedModes, true)) {
         $respond(400, ['ok' => false, 'error' => 'Invalid mode.']);
     }
@@ -138,17 +137,15 @@ if ($action === 'enqueue') {
         }
 
         $conditions = [];
-        if (!$allFlag) {
+        if ($mode === 'prompt_recon') {
+            $conditions[] = 'mm_prompt.id IS NULL';
+            $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
+        } elseif (!$allFlag) {
             if ($mode === 'tags_normalize' || $mode === 'quality') {
                 $conditions[] = 'mm.id IS NULL';
             } elseif ($mode !== 'embed') {
                 $conditions[] = 'o.id IS NULL';
             }
-        if ($mode === 'prompt_recon') {
-            $conditions[] = 'mm_prompt.id IS NULL';
-            $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
-        } elseif (!$allFlag) {
-            $conditions[] = $mode === 'tags_normalize' || $mode === 'quality' ? 'mm.id IS NULL' : 'o.id IS NULL';
         }
         if ($since !== null && $since !== '') {
             $conditions[] = 'm.imported_at >= :since';
@@ -196,8 +193,9 @@ if ($action === 'enqueue') {
         return $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
     };
 
-    $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'embed'] : [$modeArg];
-    $modes = $modeArg === 'all' ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon'] : [$modeArg];
+    $modes = $modeArg === 'all'
+        ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed']
+        : [$modeArg];
     $summary = [
         'candidates' => 0,
         'enqueued' => 0,
