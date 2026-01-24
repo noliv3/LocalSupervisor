@@ -116,6 +116,171 @@ function sv_ollama_payload_column(PDO $pdo): string
     return sv_jobs_supports_payload_json($pdo) ? 'payload_json' : 'forge_request_json';
 }
 
+function sv_ollama_jobs_columns(PDO $pdo): array
+{
+    static $columns = null;
+    if (is_array($columns)) {
+        return $columns;
+    }
+
+    $columns = [];
+    $stmt = $pdo->query('PRAGMA table_info(jobs)');
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        if (isset($row['name'])) {
+            $columns[(string)$row['name']] = true;
+        }
+    }
+
+    return $columns;
+}
+
+function sv_ollama_job_has_column(PDO $pdo, string $column): bool
+{
+    $columns = sv_ollama_jobs_columns($pdo);
+    return isset($columns[$column]);
+}
+
+function sv_ollama_update_job_columns(PDO $pdo, int $jobId, array $fields, bool $touchUpdatedAt = true): void
+{
+    if ($jobId <= 0 || $fields === []) {
+        return;
+    }
+
+    $columns = sv_ollama_jobs_columns($pdo);
+    $setParts = [];
+    $params = [':id' => $jobId];
+    foreach ($fields as $column => $value) {
+        if (!isset($columns[$column])) {
+            continue;
+        }
+        $setParts[] = $column . ' = :' . $column;
+        $params[':' . $column] = $value;
+    }
+
+    if ($touchUpdatedAt && isset($columns['updated_at'])) {
+        $setParts[] = 'updated_at = :updated_at';
+        $params[':updated_at'] = date('c');
+    }
+
+    if ($setParts === []) {
+        return;
+    }
+
+    $stmt = $pdo->prepare('UPDATE jobs SET ' . implode(', ', $setParts) . ' WHERE id = :id');
+    $stmt->execute($params);
+}
+
+function sv_ollama_touch_job_progress(PDO $pdo, int $jobId, int $progressBits, ?int $progressTotal, ?string $errorCode = null): void
+{
+    $fields = [
+        'heartbeat_at' => date('c'),
+        'progress_bits' => max(0, $progressBits),
+    ];
+    if ($progressTotal !== null) {
+        $fields['progress_bits_total'] = max(0, $progressTotal);
+    }
+    if ($errorCode !== null) {
+        $fields['last_error_code'] = $errorCode;
+    }
+
+    sv_ollama_update_job_columns($pdo, $jobId, $fields, true);
+}
+
+function sv_ollama_progress_bits_total(string $mode): int
+{
+    $mode = trim($mode);
+    $defaults = [
+        'caption' => 1000,
+        'title' => 1000,
+        'prompt_eval' => 1000,
+        'tags_normalize' => 1000,
+        'quality' => 1000,
+        'prompt_recon' => 1000,
+        'embed' => 1000,
+    ];
+
+    return $defaults[$mode] ?? 1000;
+}
+
+function sv_ollama_fetch_job_control(PDO $pdo, int $jobId): array
+{
+    $columns = ['id', 'status'];
+    $optional = ['cancel_requested', 'progress_bits', 'progress_bits_total', 'heartbeat_at', 'last_error_code'];
+    foreach ($optional as $column) {
+        if (sv_ollama_job_has_column($pdo, $column)) {
+            $columns[] = $column;
+        }
+    }
+
+    $stmt = $pdo->prepare('SELECT ' . implode(', ', $columns) . ' FROM jobs WHERE id = :id');
+    $stmt->execute([':id' => $jobId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return is_array($row) ? $row : [];
+}
+
+function sv_ollama_request_cancel(PDO $pdo, int $jobId): bool
+{
+    if ($jobId <= 0) {
+        return false;
+    }
+
+    sv_ollama_update_job_columns($pdo, $jobId, [
+        'cancel_requested' => 1,
+        'heartbeat_at' => date('c'),
+    ], true);
+
+    return true;
+}
+
+function sv_ollama_is_cancelled(array $jobRow): bool
+{
+    $status = isset($jobRow['status']) ? (string)$jobRow['status'] : '';
+    $cancelRequested = isset($jobRow['cancel_requested']) ? (int)$jobRow['cancel_requested'] : 0;
+    return $cancelRequested === 1 || $status === 'cancelled';
+}
+
+function sv_ollama_mark_cancelled(PDO $pdo, int $jobId, array $context, callable $logger): array
+{
+    $now = date('c');
+    sv_update_job_status($pdo, $jobId, 'cancelled', null, 'cancelled');
+    sv_ollama_update_job_columns($pdo, $jobId, [
+        'cancel_requested' => 1,
+        'cancelled_at' => $now,
+        'heartbeat_at' => $now,
+        'last_error_code' => 'cancelled',
+    ], true);
+
+    $logger('Ollama-Job #' . $jobId . ' abgebrochen.');
+    sv_ollama_log_jsonl($context['config'], 'ollama_jobs.jsonl', [
+        'ts' => $now,
+        'event' => 'cancelled',
+        'job_id' => $jobId,
+        'media_id' => $context['media_id'] ?? null,
+        'job_type' => $context['job_type'] ?? null,
+        'mode' => $context['mode'] ?? null,
+    ]);
+
+    return [
+        'job_id' => $jobId,
+        'media_id' => $context['media_id'] ?? null,
+        'job_type' => $context['job_type'] ?? null,
+        'status' => 'cancelled',
+    ];
+}
+
+function sv_ollama_error_code_for_message(string $message, ?Throwable $imageLoadError): string
+{
+    $normalized = strtolower($message);
+    if (strpos($normalized, 'parse_error:') === 0 || strpos($normalized, 'parse_error') !== false) {
+        return 'parse_error';
+    }
+    if ($imageLoadError !== null || strpos($normalized, 'invalid_image') === 0) {
+        return 'invalid_image';
+    }
+
+    return 'transport_error';
+}
+
 function sv_ollama_decode_job_payload(array $jobRow): array
 {
     $payloadJson = null;
@@ -149,6 +314,174 @@ function sv_ollama_normalize_payload(int $mediaId, string $mode, array $payload)
     }
 
     return $payload;
+}
+
+function sv_ollama_mode_meta_keys(string $mode): array
+{
+    $mode = trim($mode);
+    if ($mode === 'caption') {
+        return ['ollama.caption', 'ollama.caption.meta'];
+    }
+    if ($mode === 'title') {
+        return ['ollama.title', 'ollama.title.meta'];
+    }
+    if ($mode === 'prompt_eval') {
+        return ['ollama.prompt_eval.score', 'ollama.prompt_eval.meta'];
+    }
+    if ($mode === 'tags_normalize') {
+        return ['ollama.tags_raw', 'ollama.tags_normalized', 'ollama.tags_map', 'ollama.tags_normalize.meta'];
+    }
+    if ($mode === 'quality') {
+        return [
+            'ollama.quality.score',
+            'ollama.quality.flags',
+            'ollama.domain.type',
+            'ollama.domain.confidence',
+            'ollama.quality.meta',
+        ];
+    }
+    if ($mode === 'embed') {
+        return [
+            'ollama.embed.text.model',
+            'ollama.embed.text.dims',
+            'ollama.embed.text.hash',
+            'ollama.embed.text.vector_id',
+            'ollama.embed.meta',
+        ];
+    }
+    if ($mode === 'prompt_recon') {
+        return [
+            'ollama.prompt_recon.prompt',
+            'ollama.prompt_recon.negative',
+            'ollama.prompt_recon.confidence',
+            'ollama.prompt_recon.style_tokens',
+            'ollama.prompt_recon.subject_tokens',
+            'ollama.prompt_recon.meta',
+        ];
+    }
+    if ($mode === 'dupe_hints') {
+        return [
+            'ollama.dupe_hints.top',
+            'ollama.dupe_hints.threshold',
+            'ollama.dupe_hints.meta',
+        ];
+    }
+
+    throw new InvalidArgumentException('Unbekannter Ollama-Modus: ' . $mode);
+}
+
+function sv_ollama_delete_results(PDO $pdo, int $mediaId, string $mode): array
+{
+    $deletedResults = 0;
+    $deletedMeta = 0;
+    $deletedVectors = 0;
+
+    $resultStmt = $pdo->prepare('DELETE FROM ollama_results WHERE media_id = :media_id AND mode = :mode');
+    $resultStmt->execute([
+        ':media_id' => $mediaId,
+        ':mode' => $mode,
+    ]);
+    $deletedResults = $resultStmt->rowCount();
+
+    $metaKeys = sv_ollama_mode_meta_keys($mode);
+    if ($metaKeys !== []) {
+        $placeholders = implode(',', array_fill(0, count($metaKeys), '?'));
+        $metaStmt = $pdo->prepare(
+            'DELETE FROM media_meta WHERE media_id = ? AND meta_key IN (' . $placeholders . ')'
+        );
+        $metaStmt->execute(array_merge([$mediaId], $metaKeys));
+        $deletedMeta = $metaStmt->rowCount();
+    }
+
+    if ($mode === 'embed') {
+        $vectorId = sv_get_media_meta_value($pdo, $mediaId, 'ollama.embed.text.vector_id');
+        if ($vectorId !== null && ctype_digit((string)$vectorId)) {
+            $vectorStmt = $pdo->prepare('DELETE FROM ollama_vectors WHERE id = :id');
+            $vectorStmt->execute([':id' => (int)$vectorId]);
+            $deletedVectors += $vectorStmt->rowCount();
+        } else {
+            $model = sv_get_media_meta_value($pdo, $mediaId, 'ollama.embed.text.model');
+            $hash = sv_get_media_meta_value($pdo, $mediaId, 'ollama.embed.text.hash');
+            if (is_string($model) && $model !== '' && is_string($hash) && $hash !== '') {
+                $vectorStmt = $pdo->prepare(
+                    'DELETE FROM ollama_vectors WHERE media_id = :media_id AND kind = :kind AND model = :model AND input_hash = :hash'
+                );
+                $vectorStmt->execute([
+                    ':media_id' => $mediaId,
+                    ':kind' => 'text',
+                    ':model' => $model,
+                    ':hash' => $hash,
+                ]);
+                $deletedVectors += $vectorStmt->rowCount();
+            }
+        }
+    }
+
+    return [
+        'deleted_results' => $deletedResults,
+        'deleted_meta' => $deletedMeta,
+        'deleted_vectors' => $deletedVectors,
+    ];
+}
+
+function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null): array
+{
+    $jobTypes = $mode !== null ? [sv_ollama_job_type_for_mode($mode)] : sv_ollama_job_types();
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $params = $jobTypes;
+    $params[] = $mediaId;
+
+    $stmt = $pdo->prepare(
+        'SELECT id, status, type' . (sv_ollama_job_has_column($pdo, 'cancel_requested') ? ', cancel_requested' : '')
+        . ' FROM jobs WHERE type IN (' . $placeholders . ') AND media_id = ?'
+    );
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $blocked = [];
+    $canceledSet = 0;
+    $deleted = 0;
+
+    foreach ($rows as $row) {
+        $status = (string)($row['status'] ?? '');
+        $jobId = (int)($row['id'] ?? 0);
+        if ($status === 'running') {
+            if (!empty($row['cancel_requested'])) {
+                $blocked[] = $jobId;
+            } else {
+                sv_ollama_request_cancel($pdo, $jobId);
+                $canceledSet++;
+                $blocked[] = $jobId;
+            }
+            continue;
+        }
+        if (!in_array($status, ['done', 'error', 'cancelled'], true)) {
+            $blocked[] = $jobId;
+            continue;
+        }
+    }
+
+    if ($blocked !== []) {
+        return [
+            'deleted' => 0,
+            'blocked' => $blocked,
+            'cancel_requested_set' => $canceledSet,
+        ];
+    }
+
+    $statusPlaceholders = implode(',', array_fill(0, 3, '?'));
+    $deleteParams = array_merge($jobTypes, [$mediaId], ['done', 'error', 'cancelled']);
+    $deleteStmt = $pdo->prepare(
+        'DELETE FROM jobs WHERE type IN (' . $placeholders . ') AND media_id = ? AND status IN (' . $statusPlaceholders . ')'
+    );
+    $deleteStmt->execute($deleteParams);
+    $deleted = $deleteStmt->rowCount();
+
+    return [
+        'deleted' => $deleted,
+        'blocked' => [],
+        'cancel_requested_set' => $canceledSet,
+    ];
 }
 
 function sv_ollama_log_jsonl(array $config, string $filename, array $payload): void
@@ -1044,6 +1377,20 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         : sv_ollama_mode_for_job_type($jobType);
     $payload['mode'] = $mode;
 
+    $context = [
+        'config' => $config,
+        'media_id' => $mediaId,
+        'job_type' => $jobType,
+        'mode' => $mode,
+    ];
+    $progressTotal = sv_ollama_progress_bits_total($mode);
+    $progressBits = 0;
+
+    $cancelState = sv_ollama_fetch_job_control($pdo, $jobId);
+    if (sv_ollama_is_cancelled($cancelState)) {
+        return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+    }
+
     $payload['last_started_at'] = date('c');
     sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
 
@@ -1052,6 +1399,8 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         'media_id' => $mediaId,
         'mode' => $mode,
     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+    sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
 
     sv_audit_log($pdo, 'ollama_start', 'jobs', $jobId, [
         'media_id' => $mediaId,
@@ -1102,6 +1451,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
             }
 
+            $progressBits = 50;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+            if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            }
+
             $embedModel = (string)$options['model'];
             $embedKind = 'text';
             $inputHash = sv_ollama_embed_input_hash($embedInput, $embedModel, $embedKind, SV_OLLAMA_EMBED_VERSION);
@@ -1119,6 +1474,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                         'input_hash' => $inputHash,
                         'deduped' => true,
                     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+                    $progressBits = 1000;
+                    sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
 
                     sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
                         'ts' => date('c'),
@@ -1143,10 +1501,22 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 }
             }
 
+            $progressBits = 150;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+            if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            }
+
             $response = sv_ollama_embed_text($config, $embedInput, $options);
             if (empty($response['ok'])) {
                 $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
                 throw new RuntimeException($error);
+            }
+
+            $progressBits = 500;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+            if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
             }
 
             $vector = $response['vector'] ?? null;
@@ -1165,6 +1535,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $dims = count($cleanVector);
             if ($dims <= 0) {
                 throw new RuntimeException('Embedding-Dimensionen fehlen.');
+            }
+
+            $progressBits = 800;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+            if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
             }
 
             $vectorJson = json_encode($cleanVector, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -1231,6 +1607,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'meta' => $metaSnapshot,
             ]);
 
+            $progressBits = 950;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+
             sv_update_job_status($pdo, $jobId, 'done', json_encode([
                 'job_type' => $jobType,
                 'media_id' => $mediaId,
@@ -1240,6 +1619,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'input_hash' => $inputHash,
                 'result_id' => $resultId,
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+            $progressBits = 1000;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
 
             sv_audit_log($pdo, 'ollama_done', 'jobs', $jobId, [
                 'media_id' => $mediaId,
@@ -1324,6 +1706,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             }
         }
 
+        $progressBits = 50;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+        }
+
         $promptData = sv_ollama_build_prompt($mode, $config, $promptPayload);
         $prompt = $promptData['prompt'];
 
@@ -1343,6 +1731,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
         }
 
+        $progressBits = 150;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+        }
+
         if ($mode === 'tags_normalize' || $mode === 'prompt_recon') {
             $response = sv_ollama_generate_text($config, $prompt, $options);
         } else {
@@ -1351,6 +1745,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         if (empty($response['ok'])) {
             $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
             throw new RuntimeException($error);
+        }
+
+        $progressBits = 500;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
         }
 
         $responseJson = is_array($response['response_json'] ?? null) ? $response['response_json'] : null;
@@ -1414,9 +1814,13 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
         if ($mode === 'tags_normalize') {
             if ($parseError) {
+                $progressBits = 800;
+                sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, 'parse_error');
                 throw new RuntimeException('Ollama-Antwort für tags_normalize konnte nicht geparst werden.');
             }
             if ($tagsNormalized === null || $tagsMap === null) {
+                $progressBits = 800;
+                sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, 'parse_error');
                 throw new RuntimeException('Ollama-Antwort für tags_normalize unvollständig.');
             }
         }
@@ -1466,6 +1870,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
         if ($promptReconErrorType !== null) {
             $parseError = true;
+        }
+
+        $progressBits = 800;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, $parseError ? 'parse_error' : null);
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
         }
 
         $rawJson = is_array($responseJson) ? sv_ollama_encode_json($responseJson) : null;
@@ -1623,6 +2033,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 : null,
         ]);
 
+        $progressBits = 950;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+
         $responseLog = $rawJson ? sv_ollama_truncate_for_log($rawJson, 300) : ($responseText ? sv_ollama_truncate_for_log($responseText, 300) : '');
         $promptLog = sv_ollama_truncate_for_log($prompt, 200);
 
@@ -1634,6 +2047,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'model' => $response['model'] ?? $options['model'],
             'parse_error' => $parseError,
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+        $progressBits = 1000;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, $parseError ? 'parse_error' : null);
 
         sv_audit_log($pdo, 'ollama_done', 'jobs', $jobId, [
             'media_id' => $mediaId,
@@ -1665,15 +2081,22 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'result_id' => $resultId,
         ];
     } catch (Throwable $e) {
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+        }
+
         $errorMessage = sv_sanitize_error_message($e->getMessage(), 240);
         if ($mode === 'quality' && $imageLoadError !== null) {
             $errorMessage = 'invalid_image: ' . $errorMessage;
         }
+        $errorCode = sv_ollama_error_code_for_message($errorMessage, $imageLoadError);
         $attempts++;
         $payload['attempts'] = $attempts;
         $payload['last_error_at'] = date('c');
         $payload['last_error'] = $errorMessage;
         sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, $errorCode);
 
         if ($attempts <= $maxRetries) {
             sv_update_job_status($pdo, $jobId, 'pending', null, $errorMessage);
@@ -1701,6 +2124,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
 
         sv_update_job_status($pdo, $jobId, 'error', null, $errorMessage);
+        sv_ollama_update_job_columns($pdo, $jobId, [
+            'last_error_code' => $errorCode,
+            'heartbeat_at' => date('c'),
+        ], true);
 
         sv_audit_log($pdo, 'ollama_error', 'jobs', $jobId, [
             'media_id' => $mediaId,
