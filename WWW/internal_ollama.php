@@ -49,6 +49,7 @@ if ($action === 'status') {
         'running' => 0,
         'done' => 0,
         'error' => 0,
+        'cancelled' => 0,
     ];
     foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
         $status = (string)($row['status'] ?? '');
@@ -67,6 +68,109 @@ if ($action === 'status') {
         'ok' => true,
         'counts' => $counts,
         'last_errors' => $errors,
+    ]);
+}
+
+if ($action === 'cancel') {
+    $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
+    $jobId = $jobId !== null ? (int)$jobId : 0;
+    if ($jobId <= 0) {
+        $respond(400, ['ok' => false, 'error' => 'Invalid job_id.']);
+    }
+
+    $job = sv_ollama_fetch_job_control($pdo, $jobId);
+    if ($job === []) {
+        $respond(404, ['ok' => false, 'error' => 'Job not found.']);
+    }
+
+    sv_ollama_request_cancel($pdo, $jobId);
+    $job = sv_ollama_fetch_job_control($pdo, $jobId);
+
+    $respond(200, [
+        'ok' => true,
+        'job' => [
+            'id' => $jobId,
+            'status' => $job['status'] ?? null,
+            'cancel_requested' => isset($job['cancel_requested']) ? (int)$job['cancel_requested'] : 0,
+        ],
+    ]);
+}
+
+if ($action === 'delete') {
+    $mediaId = $_POST['media_id'] ?? ($jsonBody['media_id'] ?? null);
+    $mode = $_POST['mode'] ?? ($jsonBody['mode'] ?? null);
+    $mediaId = $mediaId !== null ? (int)$mediaId : 0;
+    $mode = is_string($mode) ? trim($mode) : '';
+    if ($mediaId <= 0) {
+        $respond(400, ['ok' => false, 'error' => 'Invalid media_id.']);
+    }
+    if ($mode === '') {
+        $respond(400, ['ok' => false, 'error' => 'Missing mode.']);
+    }
+
+    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'dupe_hints'];
+    if (!in_array($mode, $allowedModes, true)) {
+        $respond(400, ['ok' => false, 'error' => 'Invalid mode.']);
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $jobDelete = [
+            'deleted' => 0,
+            'blocked' => [],
+            'cancel_requested_set' => 0,
+        ];
+        if ($mode !== 'dupe_hints') {
+            $jobDelete = sv_ollama_delete_jobs($pdo, $mediaId, $mode);
+        }
+
+        if (!empty($jobDelete['blocked'])) {
+            $pdo->rollBack();
+            $respond(409, [
+                'ok' => false,
+                'error' => 'Jobs are still running or queued.',
+                'job_delete' => $jobDelete,
+            ]);
+        }
+
+        $resultDelete = sv_ollama_delete_results($pdo, $mediaId, $mode);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+
+    $respond(200, [
+        'ok' => true,
+        'job_delete' => $jobDelete,
+        'result_delete' => $resultDelete,
+    ]);
+}
+
+if ($action === 'job_status') {
+    $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
+    $jobId = $jobId !== null ? (int)$jobId : 0;
+    if ($jobId <= 0) {
+        $respond(400, ['ok' => false, 'error' => 'Invalid job_id.']);
+    }
+
+    $job = sv_ollama_fetch_job_control($pdo, $jobId);
+    if ($job === []) {
+        $respond(404, ['ok' => false, 'error' => 'Job not found.']);
+    }
+
+    $respond(200, [
+        'ok' => true,
+        'job' => [
+            'id' => $jobId,
+            'status' => $job['status'] ?? null,
+            'progress_bits' => isset($job['progress_bits']) ? (int)$job['progress_bits'] : 0,
+            'progress_bits_total' => isset($job['progress_bits_total']) ? (int)$job['progress_bits_total'] : 0,
+            'heartbeat_at' => $job['heartbeat_at'] ?? null,
+            'last_error_code' => $job['last_error_code'] ?? null,
+        ],
     ]);
 }
 
