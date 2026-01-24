@@ -610,6 +610,68 @@ function sv_ollama_encode_json($value): ?string
     return $json === false ? null : $json;
 }
 
+function sv_ollama_vector_decode(string $json): ?array
+{
+    $decoded = json_decode($json, true);
+    if (!is_array($decoded) || $decoded === []) {
+        return null;
+    }
+
+    $vector = [];
+    foreach ($decoded as $entry) {
+        if (!is_numeric($entry)) {
+            return null;
+        }
+        $vector[] = (float)$entry;
+    }
+
+    return $vector;
+}
+
+function sv_ollama_cosine_similarity(array $a, array $b): ?float
+{
+    $count = count($a);
+    if ($count === 0 || $count !== count($b)) {
+        return null;
+    }
+
+    $dot = 0.0;
+    $normA = 0.0;
+    $normB = 0.0;
+
+    for ($i = 0; $i < $count; $i++) {
+        $va = (float)$a[$i];
+        $vb = (float)$b[$i];
+        $dot += $va * $vb;
+        $normA += $va * $va;
+        $normB += $vb * $vb;
+    }
+
+    if ($normA <= 0.0 || $normB <= 0.0) {
+        return null;
+    }
+
+    return $dot / (sqrt($normA) * sqrt($normB));
+}
+
+function sv_ollama_select_topk(array $items, int $k): array
+{
+    if ($k <= 0 || $items === []) {
+        return [];
+    }
+
+    usort($items, static function (array $left, array $right): int {
+        $scoreLeft = isset($left['score']) ? (float)$left['score'] : 0.0;
+        $scoreRight = isset($right['score']) ? (float)$right['score'] : 0.0;
+        if ($scoreLeft === $scoreRight) {
+            return 0;
+        }
+        return ($scoreLeft < $scoreRight) ? 1 : -1;
+    });
+
+    return array_slice($items, 0, $k);
+}
+
 function sv_ollama_normalize_score($value): ?int
 {
     if (!is_numeric($value)) {
