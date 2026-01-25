@@ -50,6 +50,13 @@ $logger = function (string $msg): void {
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
+try {
+    sv_run_migrations_if_needed($pdo, $config, $logger);
+} catch (Throwable $e) {
+    fwrite(STDERR, "Migration fehlgeschlagen: " . $e->getMessage() . "\n");
+    exit(1);
+}
+
 if ($limit <= 0) {
     $limit = 50;
 }

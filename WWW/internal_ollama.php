@@ -38,6 +38,17 @@ if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
 }
 
+$migrateActions = ['enqueue', 'run_once', 'cancel', 'delete', 'job_status', 'status'];
+if (in_array($action, $migrateActions, true)) {
+    try {
+        sv_run_migrations_if_needed($pdo, $config);
+    } catch (Throwable $e) {
+        $respond(500, ['ok' => false, 'error' => 'Migration fehlgeschlagen: ' . $e->getMessage()]);
+    }
+}
+
+$logsPath = sv_logs_root($config);
+
 if ($action === 'status') {
     $jobTypes = sv_ollama_job_types();
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
@@ -68,6 +79,7 @@ if ($action === 'status') {
         'ok' => true,
         'counts' => $counts,
         'last_errors' => $errors,
+        'logs_path' => $logsPath,
     ]);
 }
 
@@ -171,6 +183,7 @@ if ($action === 'job_status') {
             'heartbeat_at' => $job['heartbeat_at'] ?? null,
             'last_error_code' => $job['last_error_code'] ?? null,
         ],
+        'logs_path' => $logsPath,
     ]);
 }
 

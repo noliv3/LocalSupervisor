@@ -42,6 +42,43 @@ const SV_QUALITY_REVIEW           = 'review';
 const SV_QUALITY_BLOCKED          = 'blocked';
 const SV_BACKFILL_MAX_ENQUEUE_PER_RUN = 200;
 
+function sv_run_migrations_if_needed(PDO $pdo, array $config, ?callable $logger = null): array
+{
+    $migrationDir = realpath(__DIR__ . '/migrations');
+    if ($migrationDir === false || !is_dir($migrationDir)) {
+        throw new RuntimeException('Migrationsverzeichnis fehlt.');
+    }
+
+    sv_db_ensure_schema_migrations($pdo);
+    $migrations = sv_db_load_migrations($migrationDir);
+    $applied    = sv_db_load_applied_versions($pdo);
+
+    $appliedNow = [];
+    foreach ($migrations as $migration) {
+        $version = $migration['version'];
+        if (isset($applied[$version])) {
+            continue;
+        }
+
+        if ($logger !== null) {
+            $logger('Migration gestartet: ' . $version);
+        }
+
+        $migration['run']($pdo);
+        sv_db_record_version($pdo, $version, $migration['description'] ?? '');
+        sv_audit_log($pdo, 'migration_run', 'db', null, ['version' => $version]);
+        $appliedNow[] = $version;
+
+        if ($logger !== null) {
+            $logger('Migration abgeschlossen: ' . $version);
+        }
+    }
+
+    return [
+        'applied' => $appliedNow,
+    ];
+}
+
 function sv_job_queue_limits(array $config): array
 {
     $jobsCfg = $config['jobs'] ?? [];
