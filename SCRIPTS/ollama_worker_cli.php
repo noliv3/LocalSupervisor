@@ -16,9 +16,12 @@ try {
     exit(1);
 }
 
-$baseDir = sv_base_dir();
-$lockPath = $baseDir . '/LOGS/ollama_worker.lock.json';
-$errLogPath = $baseDir . '/LOGS/ollama_worker.err.log';
+$logsRoot = sv_logs_root($config);
+if (!is_dir($logsRoot)) {
+    @mkdir($logsRoot, 0777, true);
+}
+$lockPath = $logsRoot . '/ollama_worker.lock.json';
+$errLogPath = $logsRoot . '/ollama_worker.err.log';
 
 $isPidAlive = static function (int $pid): bool {
     if ($pid <= 0) {
@@ -72,16 +75,28 @@ $lockPayload = [
 ];
 @file_put_contents($lockPath, json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
+$loop = false;
+$sleepMs = 1000;
+$batchSize = null;
 $limit = null;
 $mediaId = null;
 $maxBatches = null;
+$maxMinutes = null;
 foreach (array_slice($argv, 1) as $arg) {
-    if (strpos($arg, '--limit=') === 0) {
+    if ($arg === '--loop') {
+        $loop = true;
+    } elseif (strpos($arg, '--sleep-ms=') === 0) {
+        $sleepMs = (int)substr($arg, 11);
+    } elseif (strpos($arg, '--batch=') === 0) {
+        $batchSize = (int)substr($arg, 8);
+    } elseif (strpos($arg, '--limit=') === 0) {
         $limit = (int)substr($arg, 8);
     } elseif (strpos($arg, '--media-id=') === 0) {
         $mediaId = (int)substr($arg, 11);
     } elseif (strpos($arg, '--max-batches=') === 0) {
         $maxBatches = (int)substr($arg, 14);
+    } elseif (strpos($arg, '--max-minutes=') === 0) {
+        $maxMinutes = (int)substr($arg, 14);
     }
 }
 
@@ -90,6 +105,19 @@ $logger = function (string $msg): void {
 };
 
 try {
+    sv_run_migrations_if_needed($pdo, $config, $logger);
+
+    $batchSize = $batchSize ?? $limit;
+    if ($batchSize !== null && $batchSize <= 0) {
+        $batchSize = null;
+    }
+    if ($sleepMs < 0) {
+        $sleepMs = 0;
+    }
+    if ($maxMinutes !== null && $maxMinutes <= 0) {
+        $maxMinutes = null;
+    }
+
     $batchCount = 0;
     $aggregate = [
         'total' => 0,
@@ -99,17 +127,29 @@ try {
         'retried' => 0,
     ];
 
+    $startedAt = time();
     while (true) {
-        $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, $mediaId);
+        $summary = sv_process_ollama_job_batch($pdo, $config, $batchSize, $logger, $mediaId);
         foreach ($aggregate as $key => $value) {
             $aggregate[$key] = $value + (int)($summary[$key] ?? 0);
         }
         $batchCount++;
 
-        if ((int)($summary['total'] ?? 0) === 0) {
+        $total = (int)($summary['total'] ?? 0);
+        if ($maxBatches !== null && $batchCount >= $maxBatches) {
             break;
         }
-        if ($maxBatches !== null && $batchCount >= $maxBatches) {
+        if ($loop) {
+            if ($maxMinutes !== null && (time() - $startedAt) >= ($maxMinutes * 60)) {
+                break;
+            }
+            if ($total === 0 && $sleepMs > 0) {
+                usleep($sleepMs * 1000);
+            }
+            continue;
+        }
+
+        if ($total === 0) {
             break;
         }
     }

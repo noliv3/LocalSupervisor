@@ -50,6 +50,15 @@ function sv_load_config(?string $baseDir = null, bool $allowExampleFallback = tr
         $config['_config_warning'] = $warning;
     }
 
+    if (!isset($config['paths']) || !is_array($config['paths'])) {
+        $config['paths'] = [];
+    }
+    $logsPath = $config['paths']['logs'] ?? null;
+    if (!is_string($logsPath) || trim($logsPath) === '') {
+        $logsPath = $baseDir . '/LOGS';
+    }
+    $config['paths']['logs'] = sv_normalize_directory($logsPath);
+
     return $config;
 }
 
