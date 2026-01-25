@@ -815,6 +815,329 @@
         loadJobs();
     }
 
+    function initOllamaDashboard() {
+        const root = document.querySelector('[data-ollama-dashboard]');
+        if (!root) return;
+
+        const endpoint = root.dataset.endpoint || 'internal_ollama.php';
+        const pollInterval = Number(root.dataset.pollInterval || '10000');
+        const heartbeatStaleSec = Number(root.dataset.heartbeatStale || '180');
+        const statusOrder = {
+            running: 1,
+            queued: 2,
+            pending: 3,
+            done: 4,
+            error: 5,
+            cancelled: 6,
+        };
+        const progressState = new Map();
+        let activeSortKey = null;
+        let activeSortDir = 'asc';
+
+        const statusClass = (status) => {
+            if (!status) return 'status-queued';
+            const normalized = status.toLowerCase();
+            if (normalized === 'running') return 'status-running';
+            if (normalized === 'queued' || normalized === 'pending') return 'status-queued';
+            if (normalized === 'done') return 'status-done';
+            if (normalized === 'error') return 'status-error';
+            if (normalized === 'cancelled') return 'status-cancelled';
+            return 'status-queued';
+        };
+
+        const messageBox = root.querySelector('[data-ollama-message]');
+        const messageTitle = messageBox ? messageBox.querySelector('.action-feedback-title') : null;
+        const messageText = messageBox ? messageBox.querySelector('div:nth-child(2)') : null;
+
+        function showMessage(type, title, text) {
+            if (!messageBox) return;
+            messageBox.classList.remove('success', 'error');
+            if (type) {
+                messageBox.classList.add(type);
+            }
+            if (messageTitle) {
+                messageTitle.textContent = title;
+            }
+            if (messageText) {
+                messageText.textContent = text;
+            }
+        }
+
+        function postAction(payload) {
+            const body = new URLSearchParams();
+            Object.entries(payload).forEach(([key, value]) => {
+                if (value === undefined || value === null) return;
+                body.append(key, String(value));
+            });
+            return fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body,
+                credentials: 'same-origin',
+            }).then((resp) => resp.json());
+        }
+
+        function updateStatusCounts(data) {
+            const counts = data.counts || {};
+            Object.entries(counts).forEach(([status, value]) => {
+                const el = root.querySelector(`[data-status-count="${status}"]`);
+                if (el) el.textContent = String(value);
+            });
+            const modeCounts = data.mode_counts || {};
+            Object.entries(modeCounts).forEach(([mode, countsForMode]) => {
+                if (!countsForMode) return;
+                Object.entries(countsForMode).forEach(([status, value]) => {
+                    const el = root.querySelector(`[data-mode-count="${mode}:${status}"]`);
+                    if (el) el.textContent = String(value);
+                });
+            });
+            const logsPath = data.logs_path;
+            if (logsPath) {
+                const logsEl = root.querySelector('[data-logs-path]');
+                if (logsEl) logsEl.textContent = logsPath;
+            }
+        }
+
+        function updateWarnings(row, status, progressKey, heartbeatAt) {
+            const jobId = row.dataset.jobId;
+            const warnings = [];
+            const now = Date.now();
+            const heartbeatMs = heartbeatAt ? Date.parse(heartbeatAt) : null;
+
+            if (status === 'running') {
+                if (heartbeatMs && Number.isFinite(heartbeatMs)) {
+                    if (now - heartbeatMs > heartbeatStaleSec * 1000) {
+                        warnings.push('Heartbeat alt');
+                    }
+                } else {
+                    warnings.push('Heartbeat fehlt');
+                }
+            }
+
+            const prev = progressState.get(jobId) || { key: null, unchanged: 0, status: null };
+            if (status === 'running') {
+                if (prev.key === progressKey && prev.status === 'running') {
+                    prev.unchanged += 1;
+                } else {
+                    prev.unchanged = 0;
+                }
+                if (prev.unchanged >= 2) {
+                    warnings.push('Progress hängt');
+                }
+            } else {
+                prev.unchanged = 0;
+            }
+            prev.key = progressKey;
+            prev.status = status;
+            progressState.set(jobId, prev);
+
+            const warningsCell = row.querySelector('[data-field="warnings"]');
+            if (warningsCell) {
+                if (warnings.length === 0) {
+                    warningsCell.textContent = '–';
+                } else {
+                    warningsCell.innerHTML = warnings
+                        .map((item) => `<span class="pill pill-warn">${item}</span>`)
+                        .join(' ');
+                }
+            }
+        }
+
+        function updateJobRow(row, data) {
+            if (!data) return;
+            const status = String(data.status || '');
+            const progressBits = Number(data.progress_bits || 0);
+            const progressTotal = Number(data.progress_bits_total || 0);
+            const heartbeatAt = data.heartbeat_at || '';
+            const lastError = data.last_error_code || '';
+            const statusBadge = row.querySelector('[data-field="status"]');
+            if (statusBadge) {
+                statusBadge.textContent = status || '–';
+                statusBadge.className = `status-badge ${statusClass(status)}`;
+            }
+            const progressCell = row.querySelector('[data-field="progress"]');
+            if (progressCell) {
+                const percent = progressTotal > 0 ? Math.round((progressBits / progressTotal) * 100) : 0;
+                progressCell.textContent = `${progressBits}/${progressTotal}${progressTotal > 0 ? ` (${percent}%)` : ''}`;
+            }
+            const heartbeatCell = row.querySelector('[data-field="heartbeat"]');
+            if (heartbeatCell) {
+                heartbeatCell.textContent = heartbeatAt ? heartbeatAt : '–';
+            }
+            const errorCell = row.querySelector('[data-field="error"]');
+            if (errorCell) {
+                errorCell.textContent = lastError ? lastError : '–';
+            }
+
+            const progressRatio = progressTotal > 0 ? (progressBits / progressTotal) : 0;
+            row.dataset.progress = String(progressRatio);
+            row.dataset.heartbeat = heartbeatAt ? String(Math.floor(Date.parse(heartbeatAt) / 1000)) : '0';
+            row.dataset.status = status;
+            row.dataset.statusOrder = String(statusOrder[status] || 99);
+
+            updateWarnings(row, status, `${progressBits}/${progressTotal}`, heartbeatAt);
+        }
+
+        function applySort() {
+            const table = root.querySelector('[data-ollama-jobs]');
+            if (!table || !activeSortKey) return;
+            const tbody = table.querySelector('tbody');
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll('tr[data-job-id]'));
+            const dir = activeSortDir === 'desc' ? -1 : 1;
+
+            rows.sort((a, b) => {
+                let aVal = 0;
+                let bVal = 0;
+                if (activeSortKey === 'status') {
+                    aVal = Number(a.dataset.statusOrder || 99);
+                    bVal = Number(b.dataset.statusOrder || 99);
+                } else if (activeSortKey === 'heartbeat') {
+                    aVal = Number(a.dataset.heartbeat || 0);
+                    bVal = Number(b.dataset.heartbeat || 0);
+                } else if (activeSortKey === 'progress') {
+                    aVal = Number(a.dataset.progress || 0);
+                    bVal = Number(b.dataset.progress || 0);
+                }
+                if (aVal === bVal) return 0;
+                return aVal > bVal ? dir : -dir;
+            });
+
+            rows.forEach((row) => tbody.appendChild(row));
+        }
+
+        function pollStatus() {
+            postAction({ action: 'status' })
+                .then((data) => {
+                    if (data && data.ok) {
+                        updateStatusCounts(data);
+                    }
+                })
+                .catch(() => {});
+        }
+
+        function pollJobs() {
+            const rows = Array.from(root.querySelectorAll('tr[data-job-id]'));
+            if (rows.length === 0) return;
+            Promise.all(rows.map((row) => {
+                const jobId = row.dataset.jobId;
+                if (!jobId) return null;
+                return postAction({ action: 'job_status', job_id: jobId })
+                    .then((data) => {
+                        if (data && data.ok && data.job) {
+                            updateJobRow(row, data.job);
+                        }
+                    })
+                    .catch(() => {});
+            })).finally(() => applySort());
+        }
+
+        function handleActionClick(event) {
+            const button = event.target.closest('button[data-action]');
+            if (!button) return;
+            const action = button.dataset.action;
+            if (action === 'cancel') {
+                const jobId = button.dataset.jobId;
+                if (!jobId) return;
+                showMessage('success', 'Cancel', `Job #${jobId} wird abgebrochen...`);
+                postAction({ action: 'cancel', job_id: jobId })
+                    .then((data) => {
+                        if (!data || !data.ok) {
+                            throw new Error(data && data.error ? data.error : 'Cancel fehlgeschlagen.');
+                        }
+                        showMessage('success', 'Cancel', `Job #${jobId} abgebrochen.`);
+                        pollJobs();
+                    })
+                    .catch((err) => showMessage('error', 'Cancel', err.message));
+            }
+            if (action === 'delete') {
+                const mediaId = button.dataset.mediaId;
+                const mode = button.dataset.mode;
+                if (!mediaId || !mode) return;
+                if (!window.confirm(`Ergebnisse für Media ${mediaId} (${mode}) löschen?`)) return;
+                showMessage('success', 'Delete', `Delete für Media ${mediaId} (${mode})...`);
+                postAction({ action: 'delete', media_id: mediaId, mode })
+                    .then((data) => {
+                        if (!data || !data.ok) {
+                            throw new Error(data && data.error ? data.error : 'Delete fehlgeschlagen.');
+                        }
+                        showMessage('success', 'Delete', `Media ${mediaId} (${mode}) gelöscht.`);
+                        pollStatus();
+                    })
+                    .catch((err) => showMessage('error', 'Delete', err.message));
+            }
+            if (action === 'requeue') {
+                const mediaId = button.dataset.mediaId;
+                const mode = button.dataset.mode;
+                if (!mediaId || !mode) return;
+                showMessage('success', 'Requeue', `Requeue für Media ${mediaId} (${mode})...`);
+                const filters = { media_id: Number(mediaId), force: 1, all: 1, limit: 1 };
+                postAction({ action: 'enqueue', mode, filters: JSON.stringify(filters) })
+                    .then((data) => {
+                        if (!data || !data.ok) {
+                            throw new Error(data && data.error ? data.error : 'Requeue fehlgeschlagen.');
+                        }
+                        showMessage('success', 'Requeue', `Requeue abgeschlossen (Media ${mediaId}).`);
+                        pollStatus();
+                    })
+                    .catch((err) => showMessage('error', 'Requeue', err.message));
+            }
+        }
+
+        const enqueueForm = root.querySelector('[data-ollama-enqueue]');
+        if (enqueueForm) {
+            enqueueForm.addEventListener('submit', (event) => {
+                event.preventDefault();
+                const formData = new FormData(enqueueForm);
+                const mode = String(formData.get('mode') || 'all');
+                const filters = {
+                    limit: Number(formData.get('limit') || 50),
+                    since: String(formData.get('since') || ''),
+                    missing_title: formData.get('missing_title') ? 1 : 0,
+                    missing_caption: formData.get('missing_caption') ? 1 : 0,
+                    all: formData.get('all') ? 1 : 0,
+                };
+                showMessage('success', 'Enqueue', `Enqueue läuft (${mode}).`);
+                postAction({ action: 'enqueue', mode, filters: JSON.stringify(filters) })
+                    .then((data) => {
+                        if (!data || !data.ok) {
+                            throw new Error(data && data.error ? data.error : 'Enqueue fehlgeschlagen.');
+                        }
+                        showMessage('success', 'Enqueue', `Enqueue OK: ${JSON.stringify(data.summary || {})}`);
+                        pollStatus();
+                        pollJobs();
+                    })
+                    .catch((err) => showMessage('error', 'Enqueue', err.message));
+            });
+        }
+
+        root.addEventListener('click', handleActionClick);
+
+        const table = root.querySelector('[data-ollama-jobs]');
+        if (table) {
+            table.querySelectorAll('th.sortable').forEach((th) => {
+                th.addEventListener('click', () => {
+                    const key = th.dataset.sortKey;
+                    if (!key) return;
+                    if (activeSortKey === key) {
+                        activeSortDir = activeSortDir === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        activeSortKey = key;
+                        activeSortDir = 'asc';
+                    }
+                    applySort();
+                });
+            });
+        }
+
+        pollStatus();
+        pollJobs();
+        setInterval(() => {
+            pollStatus();
+            pollJobs();
+        }, pollInterval);
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         initViewModeSelect();
         initTabs();
@@ -827,5 +1150,6 @@
         initForgeRepair();
         initRescanJobs();
         initScanJobsPanel();
+        initOllamaDashboard();
     });
 })();

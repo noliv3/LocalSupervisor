@@ -6,6 +6,7 @@ function sv_ui_header(string $title, string $activeNav): void
     $safeTitle = htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     $isDashboard = $activeNav === 'dashboard';
     $isMedia = $activeNav === 'medien';
+    $isOllama = $activeNav === 'ollama';
     ?>
     <!doctype html>
     <html lang="de">
@@ -24,6 +25,7 @@ function sv_ui_header(string $title, string $activeNav): void
             </div>
             <nav class="app-nav" aria-label="Hauptnavigation">
                 <a class="app-nav__link<?= $isDashboard ? ' is-active' : '' ?>" href="index.php">Dashboard</a>
+                <a class="app-nav__link<?= $isOllama ? ' is-active' : '' ?>" href="dashboard_ollama.php">Ollama</a>
                 <a class="app-nav__link<?= $isMedia ? ' is-active' : '' ?>" href="mediadb.php">Medien</a>
             </nav>
         </div>

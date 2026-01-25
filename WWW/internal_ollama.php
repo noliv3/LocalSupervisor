@@ -75,9 +75,42 @@ if ($action === 'status') {
     $errStmt->execute($jobTypes);
     $errors = $errStmt->fetchAll(PDO::FETCH_ASSOC);
 
+    $modeCounts = [];
+    $modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'dupe_hints'];
+    foreach ($modeList as $mode) {
+        $modeCounts[$mode] = [
+            'queued' => 0,
+            'pending' => 0,
+            'running' => 0,
+            'done' => 0,
+            'error' => 0,
+            'cancelled' => 0,
+        ];
+    }
+    $modeStmt = $pdo->prepare(
+        'SELECT type, status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY type, status'
+    );
+    $modeStmt->execute($jobTypes);
+    foreach ($modeStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $jobType = (string)($row['type'] ?? '');
+        $status = (string)($row['status'] ?? '');
+        if (!isset($counts[$status])) {
+            continue;
+        }
+        try {
+            $mode = sv_ollama_mode_for_job_type($jobType);
+        } catch (Throwable $e) {
+            continue;
+        }
+        if (isset($modeCounts[$mode])) {
+            $modeCounts[$mode][$status] = (int)($row['cnt'] ?? 0);
+        }
+    }
+
     $respond(200, [
         'ok' => true,
         'counts' => $counts,
+        'mode_counts' => $modeCounts,
         'last_errors' => $errors,
         'logs_path' => $logsPath,
     ]);
@@ -227,6 +260,8 @@ if ($action === 'enqueue') {
     $allFlag = !empty($filters['all']);
     $missingTitle = !empty($filters['missing_title']);
     $missingCaption = !empty($filters['missing_caption']);
+    $mediaIdFilter = isset($filters['media_id']) ? (int)$filters['media_id'] : 0;
+    $force = !empty($filters['force']);
 
     if ($limit <= 0) {
         $limit = 50;
@@ -284,9 +319,21 @@ if ($action === 'enqueue') {
         return $stmt;
     };
 
-    $selectCandidates = static function (string $mode) use ($buildCandidateQuery, $allFlag, $missingTitle, $missingCaption, $since): array {
+    $selectCandidates = static function (string $mode) use ($pdo, $buildCandidateQuery, $allFlag, $missingTitle, $missingCaption, $since, $mediaIdFilter, $force): array {
         $modeMissing = true;
         $hasMissingFilters = $missingTitle || $missingCaption;
+
+        if ($mediaIdFilter > 0) {
+            $stmt = $pdo->prepare('SELECT id FROM media WHERE id = :id LIMIT 1');
+            $stmt->execute([':id' => $mediaIdFilter]);
+            $exists = (int)$stmt->fetchColumn();
+            if ($exists <= 0) {
+                return [];
+            }
+            if ($force) {
+                return [$mediaIdFilter];
+            }
+        }
 
         if ($allFlag) {
             $modeMissing = false;
@@ -303,6 +350,10 @@ if ($action === 'enqueue') {
         } elseif ($mode === 'embed') {
         } elseif ($mode === 'prompt_recon') {
             $modeMissing = true;
+        }
+
+        if ($mediaIdFilter > 0) {
+            return [$mediaIdFilter];
         }
 
         $stmt = $buildCandidateQuery($mode, !$modeMissing ? true : false, $since);
