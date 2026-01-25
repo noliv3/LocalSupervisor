@@ -1211,10 +1211,49 @@ function sv_ollama_embed_candidate(PDO $pdo, array $config, int $mediaId, bool $
     ];
 }
 
+function sv_ollama_fetch_media_row(PDO $pdo, int $mediaId): array
+{
+    $stmt = $pdo->prepare('SELECT path, type, filesize, hash, has_nsfw FROM media WHERE id = :id');
+    $stmt->execute([':id' => $mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!is_array($row)) {
+        throw new RuntimeException('Media-Eintrag nicht gefunden.');
+    }
+
+    return $row;
+}
+
+function sv_ollama_resolve_local_image_path(array $mediaRow, array $config): ?string
+{
+    $pathsCfg = $config['paths'] ?? [];
+    $target = sv_resolve_media_target($mediaRow, $pathsCfg);
+    if (!is_array($target)) {
+        return null;
+    }
+
+    $candidate = (string)($target['path'] ?? '');
+    if ($candidate === '') {
+        return null;
+    }
+
+    try {
+        sv_assert_media_path_allowed($candidate, $pathsCfg, 'ollama_job_fallback');
+    } catch (Throwable $e) {
+        return null;
+    }
+
+    if (!is_file($candidate)) {
+        return null;
+    }
+
+    return $candidate;
+}
+
 function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, array $payload): array
 {
     $source = $payload['image_source'] ?? null;
     $mediaPath = null;
+    $mediaRow = null;
 
     if (is_array($source)) {
         if (isset($source['base64']) && is_string($source['base64']) && trim($source['base64']) !== '') {
@@ -1233,12 +1272,8 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
     }
 
     if ($mediaPath === null) {
-        $stmt = $pdo->prepare('SELECT path, type, filesize FROM media WHERE id = :id');
-        $stmt->execute([':id' => $mediaId]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!is_array($row)) {
-            throw new RuntimeException('Media-Eintrag nicht gefunden.');
-        }
+        $row = sv_ollama_fetch_media_row($pdo, $mediaId);
+        $mediaRow = $row;
         $type = (string)($row['type'] ?? '');
         if ($type !== 'image') {
             throw new RuntimeException('Nur Bildmedien werden unterstützt.');
@@ -1268,15 +1303,23 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
         ]);
         $raw = @file_get_contents($mediaPath, false, $context);
         if ($raw === false) {
-            throw new RuntimeException('Bild konnte nicht von URL geladen werden.');
+            if ($mediaRow === null) {
+                $mediaRow = sv_ollama_fetch_media_row($pdo, $mediaId);
+            }
+            $fallbackPath = sv_ollama_resolve_local_image_path($mediaRow, $config);
+            if ($fallbackPath === null) {
+                throw new RuntimeException('Bild konnte nicht von URL geladen werden.');
+            }
+            $mediaPath = $fallbackPath;
+        } else {
+            if ($maxBytes > 0 && strlen($raw) > $maxBytes) {
+                throw new RuntimeException('Bildgröße zu groß (' . strlen($raw) . ' > ' . $maxBytes . ' Bytes).');
+            }
+            return [
+                'base64' => base64_encode($raw),
+                'source' => 'url',
+            ];
         }
-        if ($maxBytes > 0 && strlen($raw) > $maxBytes) {
-            throw new RuntimeException('Bildgröße zu groß (' . strlen($raw) . ' > ' . $maxBytes . ' Bytes).');
-        }
-        return [
-            'base64' => base64_encode($raw),
-            'source' => 'url',
-        ];
     }
 
     $pathsCfg = $config['paths'] ?? [];
