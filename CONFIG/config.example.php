@@ -69,7 +69,10 @@ return [
         'tags_normalize_template' => "Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Antworte ausschließlich als JSON.\nFormat: {\"tags_normalized\":[],\"tags_map\":[{\"raw\":\"\",\"normalized\":\"\",\"confidence\":0.0,\"type\":\"\"}],\"rationale\":\"...\"}\nTags: {{tags}}\nKontext: {{context}}",
         'quality_template' => "Bewerte die technische Bildqualität (0-100) und klassifiziere die Domäne. Antworte ausschließlich als JSON.\nFormat: {\"quality_score\":0,\"quality_flags\":[],\"domain_type\":\"other\",\"domain_confidence\":0.0,\"rationale\":\"...\"}",
         'prompt_recon_template' => "Rekonstruiere den wahrscheinlichsten Prompt aus den Metadaten. Antworte ausschließlich als JSON.\nFormat: {\"prompt\":\"...\",\"negative_prompt\":\"...\",\"confidence\":0.0,\"style_tokens\":[],\"subject_tokens\":[],\"rationale\":\"...\"}\nCaption: {{caption}}\nTitle: {{title}}\nTags: {{tags_normalized}}\nDomain: {{domain_type}}\nQuality flags: {{quality_flags}}\nOriginal prompt: {{original_prompt}}",
+        'nsfw_classify_template' => "Klassifiziere das Medium auf NSFW-Risiko. Gib keine expliziten Details wieder. Antworte ausschließlich als JSON.\nFormat: {\"nsfw_score\":0.0,\"nsfw_flags\":[],\"category\":\"safe\",\"rationale_short\":\"...\"}",
         'timeout_ms' => 20000,
+        'timeout_ms_text' => 90000,
+        'timeout_ms_vision' => 180000,
         'max_image_bytes' => 4194304,
         'worker' => [
             'batch_size' => 5,

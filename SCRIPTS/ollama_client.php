@@ -79,7 +79,12 @@ function sv_ollama_config(array $config): array
         'prompt_recon_template' => isset($ollama['prompt_recon_template']) && is_string($ollama['prompt_recon_template']) && trim($ollama['prompt_recon_template']) !== ''
             ? trim($ollama['prompt_recon_template'])
             : "Rekonstruiere den wahrscheinlichsten Prompt aus den Metadaten. Antworte ausschließlich als JSON.\nFormat: {\"prompt\":\"...\",\"negative_prompt\":\"...\",\"confidence\":0.0,\"style_tokens\":[],\"subject_tokens\":[],\"rationale\":\"...\"}\nCaption: {{caption}}\nTitle: {{title}}\nTags: {{tags_normalized}}\nDomain: {{domain_type}}\nQuality flags: {{quality_flags}}\nOriginal prompt: {{original_prompt}}",
+        'nsfw_classify_template' => isset($ollama['nsfw_classify_template']) && is_string($ollama['nsfw_classify_template']) && trim($ollama['nsfw_classify_template']) !== ''
+            ? trim($ollama['nsfw_classify_template'])
+            : "Klassifiziere das Medium auf NSFW-Risiko. Gib keine expliziten Details wieder. Antworte ausschließlich als JSON.\nFormat: {\"nsfw_score\":0.0,\"nsfw_flags\":[],\"category\":\"safe\",\"rationale_short\":\"...\"}",
         'timeout_ms' => isset($ollama['timeout_ms']) ? max(1000, (int)$ollama['timeout_ms']) : 20000,
+        'timeout_ms_text' => isset($ollama['timeout_ms_text']) ? max(1000, (int)$ollama['timeout_ms_text']) : 90000,
+        'timeout_ms_vision' => isset($ollama['timeout_ms_vision']) ? max(1000, (int)$ollama['timeout_ms_vision']) : 180000,
         'max_image_bytes' => isset($ollama['max_image_bytes']) ? max(0, (int)$ollama['max_image_bytes']) : 4194304,
         'retry' => [
             'max_attempts' => isset($retry['max_attempts']) ? max(1, (int)$retry['max_attempts']) : 3,
@@ -318,6 +323,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'usage' => null,
                 'error' => $message,
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
@@ -329,21 +335,24 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'usage' => null,
                 'error' => sv_ollama_http_error_message($url, $httpCode, $responseBody !== false ? (string)$responseBody : null),
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
         $decoded = json_decode($responseBody, true);
         if (!is_array($decoded)) {
+            $responseText = is_string($responseBody) ? sv_ollama_truncate_for_log($responseBody, 200) : null;
             return [
-                'ok' => false,
+                'ok' => true,
                 'model' => $model,
                 'response_json' => null,
-                'response_text' => null,
+                'response_text' => $responseText,
                 'raw_body' => $responseBody !== false ? (string)$responseBody : null,
                 'parse_error' => true,
                 'usage' => null,
-                'error' => 'Ungültige JSON-Antwort',
+                'error' => null,
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
@@ -358,6 +367,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'usage' => null,
                 'error' => sv_sanitize_error_message((string)$decoded['error'], 200),
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
@@ -366,14 +376,13 @@ function sv_ollama_request(array $config, array $input, array $options): array
         $parseError = false;
         if (is_array($responseText)) {
             $responseJson = $responseText;
+            $responseText = null;
         } elseif (is_string($responseText)) {
-            $parsed = json_decode($responseText, true);
-            if (is_array($parsed)) {
-                $responseJson = $parsed;
-            } else {
-                $parseError = true;
-            }
+            $responseText = (string)$responseText;
         } elseif ($responseText !== null) {
+            $parseError = true;
+            $responseText = null;
+        } else {
             $parseError = true;
         }
 
@@ -395,6 +404,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
             'usage' => $usage !== [] ? $usage : null,
             'error' => null,
             'latency_ms' => $latencyMs,
+            'request_url' => $url,
         ];
     }
 
@@ -405,6 +415,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
         'usage' => null,
         'error' => 'Unbekannter Fehler',
         'latency_ms' => null,
+        'request_url' => $url,
     ];
 }
 
@@ -498,6 +509,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
                 'usage' => null,
                 'error' => $message,
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
@@ -509,6 +521,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
                 'usage' => null,
                 'error' => sv_ollama_http_error_message($url, $httpCode, $responseBody !== false ? (string)$responseBody : null),
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
@@ -522,19 +535,21 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
                 'parse_error' => true,
                 'error' => 'Ungültige JSON-Antwort',
                 'latency_ms' => $latencyMs,
+                'request_url' => $url,
             ];
         }
 
         if (isset($decoded['error'])) {
-            return [
-                'ok' => false,
-                'model' => $model,
-                'vector' => null,
-                'usage' => null,
-                'parse_error' => true,
-                'error' => sv_sanitize_error_message((string)$decoded['error'], 200),
-                'latency_ms' => $latencyMs,
-            ];
+        return [
+            'ok' => false,
+            'model' => $model,
+            'vector' => null,
+            'usage' => null,
+            'parse_error' => true,
+            'error' => sv_sanitize_error_message((string)$decoded['error'], 200),
+            'latency_ms' => $latencyMs,
+            'request_url' => $url,
+        ];
         }
 
         $vector = $decoded['embedding'] ?? null;
@@ -550,6 +565,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
             'usage' => $usage !== [] ? $usage : null,
             'error' => null,
             'latency_ms' => $latencyMs,
+            'request_url' => $url,
         ];
     }
 
@@ -560,5 +576,6 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
         'usage' => null,
         'error' => 'Unbekannter Fehler',
         'latency_ms' => null,
+        'request_url' => $url,
     ];
 }

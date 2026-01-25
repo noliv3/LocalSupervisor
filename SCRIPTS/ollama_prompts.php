@@ -33,6 +33,10 @@ function sv_ollama_prompt_definitions(array $config): array
             'prompt' => $ollamaCfg['prompt_recon_template'],
             'output_key' => 'prompt',
         ],
+        'nsfw_classify' => [
+            'prompt' => $ollamaCfg['nsfw_classify_template'],
+            'output_key' => 'nsfw_score',
+        ],
     ];
 }
 
