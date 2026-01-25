@@ -723,6 +723,10 @@ function sv_ollama_build_parse_error_detail(array $response, ?string $responseTe
     $url = isset($response['request_url']) && is_string($response['request_url']) ? $response['request_url'] : '';
     $snippet = sv_ollama_http_error_body_snippet($responseText);
     if ($snippet === '') {
+        $rawBody = isset($response['raw_body']) && is_string($response['raw_body']) ? $response['raw_body'] : null;
+        $snippet = sv_ollama_http_error_body_snippet($rawBody);
+    }
+    if ($snippet === '') {
         $snippet = '<empty>';
     }
     if ($url === '') {
@@ -2258,7 +2262,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             ]);
 
             $detail = $qualityErrorDetail ?? 'Ollama-Antwort für quality ist ungültig.';
-            $detail = trim($detail . ' ' . $parseErrorDetail);
+            if ($parseErrorDetail !== '' && $parseErrorDetail !== $detail) {
+                $detail = trim($detail . ' ' . $parseErrorDetail);
+            }
             throw new RuntimeException('parse_error: ' . $detail);
         }
 
@@ -2293,7 +2299,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             ]);
 
             $detail = $promptReconErrorDetail ?? 'Ollama-Antwort für prompt_recon ist ungültig.';
-            $detail = trim($detail . ' ' . $parseErrorDetail);
+            if ($parseErrorDetail !== '' && $parseErrorDetail !== $detail) {
+                $detail = trim($detail . ' ' . $parseErrorDetail);
+            }
             throw new RuntimeException('parse_error: ' . $detail);
         }
 
@@ -2328,7 +2336,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             ]);
 
             $detail = $nsfwErrorDetail ?? 'Ollama-Antwort für nsfw_classify ist ungültig.';
-            $detail = trim($detail . ' ' . $parseErrorDetail);
+            if ($parseErrorDetail !== '' && $parseErrorDetail !== $detail) {
+                $detail = trim($detail . ' ' . $parseErrorDetail);
+            }
             throw new RuntimeException('parse_error: ' . $detail);
         }
 
