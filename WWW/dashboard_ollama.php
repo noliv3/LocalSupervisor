@@ -38,6 +38,13 @@ try {
     exit;
 }
 
+$migrationError = null;
+try {
+    sv_run_migrations_if_needed($pdo, $config);
+} catch (Throwable $e) {
+    $migrationError = 'Migration fehlgeschlagen: ' . sv_sanitize_error_message($e->getMessage());
+}
+
 function sv_ollama_normalize_enum(?string $value, array $allowed, string $default): string
 {
     if ($value === null) {
@@ -75,11 +82,44 @@ $limit = sv_ollama_clamp_int((int)($_GET['limit'] ?? 120), 20, 500, 120);
 $jobTypes = sv_ollama_job_types();
 $typePlaceholders = implode(',', array_fill(0, count($jobTypes), '?'));
 
-$errorCodeStmt = $pdo->prepare(
-    'SELECT DISTINCT last_error_code FROM jobs WHERE type IN (' . $typePlaceholders . ') AND last_error_code IS NOT NULL AND last_error_code != "" ORDER BY last_error_code ASC'
-);
-$errorCodeStmt->execute($jobTypes);
-$errorCodes = array_values(array_filter(array_map('strval', $errorCodeStmt->fetchAll(PDO::FETCH_COLUMN, 0))));
+$jobColumns = [];
+try {
+    $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    if ($driver === 'mysql') {
+        $stmt = $pdo->query('SHOW COLUMNS FROM jobs');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        foreach ($rows as $row) {
+            if (isset($row['Field'])) {
+                $jobColumns[] = strtolower((string)$row['Field']);
+            }
+        }
+    } else {
+        $stmt = $pdo->query('PRAGMA table_info(jobs)');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        foreach ($rows as $row) {
+            if (isset($row['name'])) {
+                $jobColumns[] = strtolower((string)$row['name']);
+            }
+        }
+    }
+} catch (Throwable $e) {
+    $jobColumns = [];
+}
+$jobColumns = array_unique($jobColumns);
+
+$hasLastErrorCode = in_array('last_error_code', $jobColumns, true);
+$hasHeartbeatAt = in_array('heartbeat_at', $jobColumns, true);
+$hasProgressBits = in_array('progress_bits', $jobColumns, true);
+$hasProgressBitsTotal = in_array('progress_bits_total', $jobColumns, true);
+
+$errorCodes = [];
+if ($hasLastErrorCode) {
+    $errorCodeStmt = $pdo->prepare(
+        'SELECT DISTINCT last_error_code FROM jobs WHERE type IN (' . $typePlaceholders . ') AND last_error_code IS NOT NULL AND last_error_code != "" ORDER BY last_error_code ASC'
+    );
+    $errorCodeStmt->execute($jobTypes);
+    $errorCodes = array_values(array_filter(array_map('strval', $errorCodeStmt->fetchAll(PDO::FETCH_COLUMN, 0))));
+}
 $allowedErrorCodes = array_merge(['all', 'none'], $errorCodes);
 $errorFilter = sv_ollama_normalize_enum($_GET['error_code'] ?? null, $allowedErrorCodes, 'all');
 
@@ -99,11 +139,13 @@ if ($statusFilter !== 'all') {
     $params[] = $statusFilter;
 }
 if ($errorFilter !== 'all') {
-    if ($errorFilter === 'none') {
-        $conditions[] = '(j.last_error_code IS NULL OR j.last_error_code = "")';
-    } else {
-        $conditions[] = 'j.last_error_code = ?';
-        $params[] = $errorFilter;
+    if ($hasLastErrorCode) {
+        if ($errorFilter === 'none') {
+            $conditions[] = '(j.last_error_code IS NULL OR j.last_error_code = "")';
+        } else {
+            $conditions[] = 'j.last_error_code = ?';
+            $params[] = $errorFilter;
+        }
     }
 }
 if ($domainFilter !== 'all') {
@@ -131,13 +173,26 @@ if ($hasMetaFilter !== 'all') {
 
 $whereClause = $conditions !== [] ? ('WHERE ' . implode(' AND ', $conditions)) : '';
 
+$jobsSelect = [
+    'j.id',
+    'j.media_id',
+    'j.type',
+    'j.status',
+    $hasProgressBits ? 'j.progress_bits' : 'NULL AS progress_bits',
+    $hasProgressBitsTotal ? 'j.progress_bits_total' : 'NULL AS progress_bits_total',
+    $hasHeartbeatAt ? 'j.heartbeat_at' : 'NULL AS heartbeat_at',
+    $hasLastErrorCode ? 'j.last_error_code' : 'NULL AS last_error_code',
+    'j.created_at',
+    'j.updated_at',
+    'j.' . $payloadColumn . ' AS payload_json',
+    'mm_stage.meta_value AS stage_version',
+    'mm_quality.meta_value AS quality_score',
+    'mm_domain.meta_value AS domain_type',
+];
+
 $jobsStmt = $pdo->prepare(
-    'SELECT j.id, j.media_id, j.type, j.status, j.progress_bits, j.progress_bits_total, j.heartbeat_at, '
-    . 'j.last_error_code, j.created_at, j.updated_at, j.' . $payloadColumn . ' AS payload_json, '
-    . 'mm_stage.meta_value AS stage_version, '
-    . 'mm_quality.meta_value AS quality_score, '
-    . 'mm_domain.meta_value AS domain_type '
-    . 'FROM jobs j '
+    'SELECT ' . implode(', ', $jobsSelect)
+    . ' FROM jobs j '
     . 'LEFT JOIN media_meta mm_stage ON mm_stage.id = ('
     . '  SELECT id FROM media_meta WHERE media_id = j.media_id AND meta_key = "ollama.stage_version" ORDER BY id DESC LIMIT 1'
     . ') '
@@ -193,7 +248,6 @@ foreach ($modeCountStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
 }
 
 $pendingMigrations = [];
-$migrationError = null;
 try {
     $migrationDir = realpath(__DIR__ . '/../SCRIPTS/migrations');
     if ($migrationDir !== false && is_dir($migrationDir)) {
@@ -205,10 +259,14 @@ try {
             }
         }
     } else {
-        $migrationError = 'Migrationsverzeichnis fehlt.';
+        if ($migrationError === null) {
+            $migrationError = 'Migrationsverzeichnis fehlt.';
+        }
     }
 } catch (Throwable $e) {
-    $migrationError = 'Migrationsstatus nicht lesbar: ' . sv_sanitize_error_message($e->getMessage());
+    if ($migrationError === null) {
+        $migrationError = 'Migrationsstatus nicht lesbar: ' . sv_sanitize_error_message($e->getMessage());
+    }
 }
 
 $logsPath = sv_logs_root($config);
