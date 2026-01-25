@@ -12,6 +12,7 @@ const SV_JOB_TYPE_OLLAMA_TITLE       = 'ollama_title';
 const SV_JOB_TYPE_OLLAMA_PROMPT_EVAL = 'ollama_prompt_eval';
 const SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE = 'ollama_tags_normalize';
 const SV_JOB_TYPE_OLLAMA_QUALITY     = 'ollama_quality';
+const SV_JOB_TYPE_OLLAMA_NSFW_CLASSIFY = 'ollama_nsfw_classify';
 const SV_JOB_TYPE_OLLAMA_EMBED       = 'ollama_embed';
 const SV_JOB_TYPE_OLLAMA_PROMPT_RECON = 'ollama_prompt_recon';
 const SV_OLLAMA_STAGE_VERSION        = 'stage5_v1';
@@ -51,6 +52,7 @@ function sv_ollama_job_types(): array
         SV_JOB_TYPE_OLLAMA_PROMPT_EVAL,
         SV_JOB_TYPE_OLLAMA_TAGS_NORMALIZE,
         SV_JOB_TYPE_OLLAMA_QUALITY,
+        SV_JOB_TYPE_OLLAMA_NSFW_CLASSIFY,
         SV_JOB_TYPE_OLLAMA_EMBED,
         SV_JOB_TYPE_OLLAMA_PROMPT_RECON,
     ];
@@ -73,6 +75,9 @@ function sv_ollama_job_type_for_mode(string $mode): string
     }
     if ($mode === 'quality') {
         return SV_JOB_TYPE_OLLAMA_QUALITY;
+    }
+    if ($mode === 'nsfw_classify') {
+        return SV_JOB_TYPE_OLLAMA_NSFW_CLASSIFY;
     }
     if ($mode === 'embed') {
         return SV_JOB_TYPE_OLLAMA_EMBED;
@@ -100,6 +105,9 @@ function sv_ollama_mode_for_job_type(string $jobType): string
     }
     if ($jobType === SV_JOB_TYPE_OLLAMA_QUALITY) {
         return 'quality';
+    }
+    if ($jobType === SV_JOB_TYPE_OLLAMA_NSFW_CLASSIFY) {
+        return 'nsfw_classify';
     }
     if ($jobType === SV_JOB_TYPE_OLLAMA_EMBED) {
         return 'embed';
@@ -195,6 +203,7 @@ function sv_ollama_progress_bits_total(string $mode): int
         'prompt_eval' => 1000,
         'tags_normalize' => 1000,
         'quality' => 1000,
+        'nsfw_classify' => 1000,
         'prompt_recon' => 1000,
         'embed' => 1000,
     ];
@@ -338,6 +347,14 @@ function sv_ollama_mode_meta_keys(string $mode): array
             'ollama.domain.type',
             'ollama.domain.confidence',
             'ollama.quality.meta',
+        ];
+    }
+    if ($mode === 'nsfw_classify') {
+        return [
+            'ollama.nsfw.score',
+            'ollama.nsfw.flags',
+            'ollama.nsfw.category',
+            'ollama.nsfw.meta',
         ];
     }
     if ($mode === 'embed') {
@@ -650,6 +667,69 @@ function sv_ollama_decode_json_list(?string $value): ?array
 
     $list = array_values(array_filter(array_map('strval', $decoded), static fn ($v) => trim($v) !== ''));
     return $list === [] ? null : $list;
+}
+
+function sv_ollama_extract_first_json_object(string $text): ?string
+{
+    $length = strlen($text);
+    $depth = 0;
+    $start = null;
+    $inString = false;
+    $escape = false;
+
+    for ($i = 0; $i < $length; $i++) {
+        $char = $text[$i];
+        if ($inString) {
+            if ($escape) {
+                $escape = false;
+                continue;
+            }
+            if ($char === '\\') {
+                $escape = true;
+                continue;
+            }
+            if ($char === '"') {
+                $inString = false;
+            }
+            continue;
+        }
+
+        if ($char === '"') {
+            $inString = true;
+            continue;
+        }
+
+        if ($char === '{') {
+            if ($depth === 0) {
+                $start = $i;
+            }
+            $depth++;
+            continue;
+        }
+
+        if ($char === '}' && $depth > 0) {
+            $depth--;
+            if ($depth === 0 && $start !== null) {
+                return substr($text, $start, $i - $start + 1);
+            }
+        }
+    }
+
+    return null;
+}
+
+function sv_ollama_build_parse_error_detail(array $response, ?string $responseText): string
+{
+    $url = isset($response['request_url']) && is_string($response['request_url']) ? $response['request_url'] : '';
+    $snippet = sv_ollama_http_error_body_snippet($responseText);
+    if ($snippet === '') {
+        $snippet = '<empty>';
+    }
+    if ($url === '') {
+        return 'BODY=' . $snippet;
+    }
+
+    return 'URL=' . $url . ' BODY=' . $snippet;
 }
 
 function sv_ollama_build_prompt_recon_payload(PDO $pdo, int $mediaId): array
@@ -1125,6 +1205,17 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.domain.confidence', $values['domain_confidence'], $source);
         }
     }
+    if ($mode === 'nsfw_classify') {
+        if (isset($values['nsfw_score']) && $values['nsfw_score'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.nsfw.score', $values['nsfw_score'], $source);
+        }
+        if (isset($values['nsfw_flags']) && $values['nsfw_flags'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.nsfw.flags', $values['nsfw_flags'], $source);
+        }
+        if (isset($values['nsfw_category']) && $values['nsfw_category'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.nsfw.category', $values['nsfw_category'], $source);
+        }
+    }
     if ($mode === 'embed') {
         if (isset($values['embed_model']) && $values['embed_model'] !== null) {
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.embed.text.model', $values['embed_model'], $source);
@@ -1163,7 +1254,8 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
     }
 
     if (isset($values['meta']) && is_string($values['meta']) && trim($values['meta']) !== '') {
-        sv_set_media_meta_value($pdo, $mediaId, 'ollama.' . $mode . '.meta', $values['meta'], $source);
+        $metaKey = $mode === 'nsfw_classify' ? 'ollama.nsfw.meta' : ('ollama.' . $mode . '.meta');
+        sv_set_media_meta_value($pdo, $mediaId, $metaKey, $values['meta'], $source);
     }
 }
 
@@ -1591,7 +1683,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 $options['model'] = $ollamaCfg['model']['embed'] ?? $ollamaCfg['model_default'];
             }
             if (!isset($options['timeout_ms'])) {
-                $options['timeout_ms'] = $ollamaCfg['timeout_ms'];
+                $options['timeout_ms'] = $ollamaCfg['timeout_ms_text'] ?? $ollamaCfg['timeout_ms'];
             }
             if (!array_key_exists('deterministic', $options)) {
                 $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
@@ -1801,6 +1893,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
 
         $imageData = null;
+        $imageBase64 = null;
         $promptPayload = $payload;
         $rawTags = null;
         $contextText = '';
@@ -1865,13 +1958,16 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         if (isset($payload['model']) && is_string($payload['model']) && trim($payload['model']) !== '') {
             $options['model'] = trim($payload['model']);
         }
+        $hasImages = is_string($imageBase64) && $imageBase64 !== '';
         if (!isset($options['model']) || trim((string)$options['model']) === '') {
-            $options['model'] = ($mode === 'tags_normalize' || $mode === 'prompt_recon')
-                ? ($ollamaCfg['model']['text'] ?? $ollamaCfg['model_default'])
-                : ($ollamaCfg['model']['vision'] ?? $ollamaCfg['model_default']);
+            $options['model'] = $hasImages
+                ? ($ollamaCfg['model']['vision'] ?? $ollamaCfg['model_default'])
+                : ($ollamaCfg['model']['text'] ?? $ollamaCfg['model_default']);
         }
         if (!isset($options['timeout_ms'])) {
-            $options['timeout_ms'] = $ollamaCfg['timeout_ms'];
+            $timeoutText = $ollamaCfg['timeout_ms_text'] ?? $ollamaCfg['timeout_ms'];
+            $timeoutVision = $ollamaCfg['timeout_ms_vision'] ?? $ollamaCfg['timeout_ms'];
+            $options['timeout_ms'] = $hasImages ? $timeoutVision : $timeoutText;
         }
         if (!array_key_exists('deterministic', $options)) {
             $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
@@ -1883,14 +1979,26 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
         }
 
-        if ($mode === 'tags_normalize' || $mode === 'prompt_recon') {
-            $response = sv_ollama_generate_text($config, $prompt, $options);
-        } else {
+        $progressBits = 200;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+        }
+
+        if ($hasImages) {
             $response = sv_ollama_analyze_image($config, $imageBase64, $prompt, $options);
+        } else {
+            $response = sv_ollama_generate_text($config, $prompt, $options);
         }
         if (empty($response['ok'])) {
             $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
             throw new RuntimeException($error);
+        }
+
+        $progressBits = 400;
+        sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
+        if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
+            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
         }
 
         $progressBits = 500;
@@ -1901,7 +2009,32 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
         $responseJson = is_array($response['response_json'] ?? null) ? $response['response_json'] : null;
         $responseText = isset($response['response_text']) && is_string($response['response_text']) ? $response['response_text'] : null;
-        $parseError = !empty($response['parse_error']) || $responseJson === null;
+        $parseError = !empty($response['parse_error']);
+        $jsonModes = [
+            'caption',
+            'title',
+            'prompt_eval',
+            'tags_normalize',
+            'quality',
+            'prompt_recon',
+            'nsfw_classify',
+        ];
+        if ($responseJson === null && is_string($responseText) && in_array($mode, $jsonModes, true)) {
+            $jsonChunk = sv_ollama_extract_first_json_object($responseText);
+            if (is_string($jsonChunk)) {
+                $decodedChunk = json_decode($jsonChunk, true);
+                if (is_array($decodedChunk)) {
+                    $responseJson = $decodedChunk;
+                } else {
+                    $parseError = true;
+                }
+            } else {
+                $parseError = true;
+            }
+        }
+        if ($responseJson === null) {
+            $parseError = true;
+        }
 
         $title = null;
         $caption = null;
@@ -1920,6 +2053,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $promptReconConfidence = null;
         $promptReconStyleTokens = null;
         $promptReconSubjectTokens = null;
+        $nsfwScore = null;
+        $nsfwFlags = null;
+        $nsfwCategory = null;
+        $nsfwRationale = null;
         if (is_array($responseJson)) {
             $title = sv_ollama_normalize_text_value($responseJson['title'] ?? null);
             $caption = sv_ollama_normalize_text_value($responseJson['caption'] ?? ($responseJson['description'] ?? null));
@@ -1956,18 +2093,39 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 $promptReconStyleTokens = sv_ollama_normalize_tag_list($responseJson['style_tokens'] ?? null);
                 $promptReconSubjectTokens = sv_ollama_normalize_tag_list($responseJson['subject_tokens'] ?? null);
             }
+            if ($mode === 'nsfw_classify') {
+                if (isset($responseJson['nsfw_score']) && is_numeric($responseJson['nsfw_score'])) {
+                    $nsfwScore = (float)$responseJson['nsfw_score'];
+                    if ($nsfwScore < 0.0) {
+                        $nsfwScore = 0.0;
+                    } elseif ($nsfwScore > 1.0) {
+                        $nsfwScore = 1.0;
+                    }
+                }
+                $nsfwFlags = sv_ollama_normalize_tag_list($responseJson['nsfw_flags'] ?? null);
+                $nsfwCategoryRaw = sv_ollama_normalize_text_value($responseJson['category'] ?? null);
+                if ($nsfwCategoryRaw !== null) {
+                    $candidate = strtolower($nsfwCategoryRaw);
+                    if (in_array($candidate, ['safe', 'suggestive', 'explicit'], true)) {
+                        $nsfwCategory = $candidate;
+                    }
+                }
+                $nsfwRationale = sv_ollama_normalize_text_value($responseJson['rationale_short'] ?? null);
+            }
         }
+
+        $parseErrorDetail = sv_ollama_build_parse_error_detail($response, $responseText);
 
         if ($mode === 'tags_normalize') {
             if ($parseError) {
                 $progressBits = 800;
                 sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, 'parse_error');
-                throw new RuntimeException('Ollama-Antwort für tags_normalize konnte nicht geparst werden.');
+                throw new RuntimeException('parse_error: ' . ($parseErrorDetail ?? 'Ollama-Antwort für tags_normalize konnte nicht geparst werden.'));
             }
             if ($tagsNormalized === null || $tagsMap === null) {
                 $progressBits = 800;
                 sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, 'parse_error');
-                throw new RuntimeException('Ollama-Antwort für tags_normalize unvollständig.');
+                throw new RuntimeException('parse_error: Ollama-Antwort für tags_normalize unvollständig. ' . $parseErrorDetail);
             }
         }
 
@@ -1976,7 +2134,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         if ($mode === 'prompt_recon') {
             if ($parseError) {
                 $promptReconErrorType = 'parse_error';
-                $promptReconErrorDetail = 'Ollama-Antwort für prompt_recon konnte nicht geparst werden.';
+                $promptReconErrorDetail = $parseErrorDetail ?? 'Ollama-Antwort für prompt_recon konnte nicht geparst werden.';
             } else {
                 if ($promptReconPrompt === null) {
                     $promptReconErrorType = 'parse_error';
@@ -1993,7 +2151,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         if ($mode === 'quality') {
             if ($parseError) {
                 $qualityErrorType = 'parse_error';
-                $qualityErrorDetail = 'Ollama-Antwort für quality konnte nicht geparst werden.';
+                $qualityErrorDetail = $parseErrorDetail ?? 'Ollama-Antwort für quality konnte nicht geparst werden.';
             } else {
                 if ($qualityScore === null || $qualityScore < 0 || $qualityScore > 100) {
                     $qualityErrorType = 'parse_error';
@@ -2010,11 +2168,30 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 }
             }
         }
+        $nsfwErrorType = null;
+        $nsfwErrorDetail = null;
+        if ($mode === 'nsfw_classify') {
+            if ($parseError) {
+                $nsfwErrorType = 'parse_error';
+                $nsfwErrorDetail = $parseErrorDetail ?? 'Ollama-Antwort für nsfw_classify konnte nicht geparst werden.';
+            } else {
+                if ($nsfwScore === null) {
+                    $nsfwErrorType = 'parse_error';
+                    $nsfwErrorDetail = 'Ollama-Antwort für nsfw_classify enthält keinen gültigen nsfw_score.';
+                } elseif ($nsfwCategory === null) {
+                    $nsfwErrorType = 'parse_error';
+                    $nsfwErrorDetail = 'Ollama-Antwort für nsfw_classify enthält keine gültige category.';
+                }
+            }
+        }
 
         if ($qualityErrorType !== null) {
             $parseError = true;
         }
         if ($promptReconErrorType !== null) {
+            $parseError = true;
+        }
+        if ($nsfwErrorType !== null) {
             $parseError = true;
         }
 
@@ -2041,6 +2218,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
         if ($promptReconErrorType !== null) {
             $meta['error_type'] = $promptReconErrorType;
+        }
+        if ($nsfwErrorType !== null) {
+            $meta['error_type'] = $nsfwErrorType;
         }
         $metaJson = sv_ollama_encode_json($meta);
 
@@ -2078,6 +2258,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             ]);
 
             $detail = $qualityErrorDetail ?? 'Ollama-Antwort für quality ist ungültig.';
+            $detail = trim($detail . ' ' . $parseErrorDetail);
             throw new RuntimeException('parse_error: ' . $detail);
         }
 
@@ -2112,6 +2293,42 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             ]);
 
             $detail = $promptReconErrorDetail ?? 'Ollama-Antwort für prompt_recon ist ungültig.';
+            $detail = trim($detail . ' ' . $parseErrorDetail);
+            throw new RuntimeException('parse_error: ' . $detail);
+        }
+
+        if ($mode === 'nsfw_classify' && $nsfwErrorType !== null) {
+            $resultId = sv_ollama_insert_result($pdo, [
+                'media_id' => $mediaId,
+                'mode' => $mode,
+                'model' => (string)($response['model'] ?? $options['model']),
+                'title' => null,
+                'caption' => null,
+                'score' => $nsfwScore,
+                'contradictions' => null,
+                'missing' => null,
+                'rationale' => $nsfwRationale,
+                'raw_json' => $rawJson,
+                'raw_text' => $responseText,
+                'parse_error' => true,
+                'created_at' => date('c'),
+                'meta' => $metaJson,
+            ]);
+
+            $metaSnapshot = sv_ollama_build_tags_normalize_meta(
+                $resultId,
+                (string)($response['model'] ?? $options['model']),
+                true
+            );
+
+            sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
+                'meta' => $metaSnapshot,
+            ], [
+                'set_common_meta' => false,
+            ]);
+
+            $detail = $nsfwErrorDetail ?? 'Ollama-Antwort für nsfw_classify ist ungültig.';
+            $detail = trim($detail . ' ' . $parseErrorDetail);
             throw new RuntimeException('parse_error: ' . $detail);
         }
 
@@ -2123,10 +2340,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'caption' => $mode === 'prompt_recon' ? $promptReconPrompt : $caption,
             'score' => $mode === 'quality'
                 ? ($qualityScore !== null && $qualityScore >= 0 && $qualityScore <= 100 ? $qualityScore : null)
-                : $score,
+                : ($mode === 'nsfw_classify' ? $nsfwScore : $score),
             'contradictions' => $contradictions,
             'missing' => $missing,
-            'rationale' => $rationale,
+            'rationale' => $mode === 'nsfw_classify' ? $nsfwRationale : $rationale,
             'raw_json' => $rawJson,
             'raw_text' => $parseError ? $responseText : null,
             'parse_error' => $parseError,
@@ -2138,7 +2355,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $payload['last_success_at'] = $lastSuccessAt;
         sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
 
-        if ($mode === 'tags_normalize' || $mode === 'prompt_recon') {
+        if ($mode === 'tags_normalize' || $mode === 'prompt_recon' || $mode === 'nsfw_classify') {
             $metaSnapshot = sv_ollama_build_tags_normalize_meta(
                 $resultId,
                 (string)($response['model'] ?? $options['model']),
@@ -2168,6 +2385,11 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'quality_flags' => $mode === 'quality' ? sv_ollama_encode_json($qualityFlags ?? []) : null,
             'domain_type' => $mode === 'quality' ? $domainType : null,
             'domain_confidence' => $mode === 'quality' ? $domainConfidence : null,
+            'nsfw_score' => $mode === 'nsfw_classify' ? $nsfwScore : null,
+            'nsfw_flags' => $mode === 'nsfw_classify' && $nsfwFlags !== null
+                ? sv_ollama_encode_json($nsfwFlags)
+                : null,
+            'nsfw_category' => $mode === 'nsfw_classify' ? $nsfwCategory : null,
             'prompt' => $mode === 'prompt_recon' ? $promptReconPrompt : null,
             'negative_prompt' => $mode === 'prompt_recon' ? $promptReconNegative : null,
             'confidence' => $mode === 'prompt_recon' ? $promptReconConfidence : null,

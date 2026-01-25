@@ -76,7 +76,7 @@ if ($action === 'status') {
     $errors = $errStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $modeCounts = [];
-    $modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'dupe_hints'];
+    $modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'dupe_hints'];
     foreach ($modeList as $mode) {
         $modeCounts[$mode] = [
             'queued' => 0,
@@ -153,7 +153,7 @@ if ($action === 'delete') {
         $respond(400, ['ok' => false, 'error' => 'Missing mode.']);
     }
 
-    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'dupe_hints'];
+    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'dupe_hints'];
     if (!in_array($mode, $allowedModes, true)) {
         $respond(400, ['ok' => false, 'error' => 'Invalid mode.']);
     }
@@ -239,7 +239,7 @@ if ($action === 'run_once') {
 if ($action === 'enqueue') {
     $modeArg = $_POST['mode'] ?? ($jsonBody['mode'] ?? 'all');
     $modeArg = is_string($modeArg) ? trim($modeArg) : 'all';
-    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'all'];
+    $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'all'];
     if (!in_array($modeArg, $allowedModes, true)) {
         $respond(400, ['ok' => false, 'error' => 'Invalid mode.']);
     }
@@ -278,10 +278,12 @@ if ($action === 'enqueue') {
             $params[':prompt_key'] = 'ollama.prompt_recon.prompt';
             $params[':caption_key'] = 'ollama.caption';
             $params[':tags_key'] = 'ollama.tags_normalized';
-        } elseif (!$allFlag) {
-            if ($mode === 'tags_normalize' || $mode === 'quality') {
+        } elseif (!$allFlag || $mode === 'nsfw_classify') {
+            if ($mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
                 $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
-                $params[':meta_key'] = $mode === 'quality' ? 'ollama.quality.score' : 'ollama.tags_normalized';
+                $params[':meta_key'] = $mode === 'quality'
+                    ? 'ollama.quality.score'
+                    : ($mode === 'nsfw_classify' ? 'ollama.nsfw.score' : 'ollama.tags_normalized');
             } elseif ($mode !== 'embed') {
                 $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
                 $params[':mode'] = $mode;
@@ -292,8 +294,8 @@ if ($action === 'enqueue') {
         if ($mode === 'prompt_recon') {
             $conditions[] = 'mm_prompt.id IS NULL';
             $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
-        } elseif (!$allFlag) {
-            if ($mode === 'tags_normalize' || $mode === 'quality') {
+        } elseif (!$allFlag || $mode === 'nsfw_classify') {
+            if ($mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
                 $conditions[] = 'mm.id IS NULL';
             } elseif ($mode !== 'embed') {
                 $conditions[] = 'o.id IS NULL';
@@ -350,6 +352,8 @@ if ($action === 'enqueue') {
         } elseif ($mode === 'embed') {
         } elseif ($mode === 'prompt_recon') {
             $modeMissing = true;
+        } elseif ($mode === 'nsfw_classify') {
+            $modeMissing = true;
         }
 
         if ($mediaIdFilter > 0) {
@@ -362,7 +366,7 @@ if ($action === 'enqueue') {
     };
 
     $modes = $modeArg === 'all'
-        ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed']
+        ? ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed']
         : [$modeArg];
     $summary = [
         'candidates' => 0,

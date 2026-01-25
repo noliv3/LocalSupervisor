@@ -64,7 +64,7 @@ function sv_ollama_clamp_int(int $value, int $min, int $max, int $default): int
 }
 
 $statusList = ['queued', 'pending', 'running', 'done', 'error', 'cancelled'];
-$modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'prompt_recon', 'embed', 'dupe_hints'];
+$modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'dupe_hints'];
 
 $allowedModes = array_merge(['all'], $modeList);
 $allowedStatuses = array_merge(['all'], $statusList);
@@ -366,6 +366,7 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                         <option value="prompt_eval">prompt_eval</option>
                         <option value="tags_normalize">tags_normalize</option>
                         <option value="quality">quality</option>
+                        <option value="nsfw_classify">nsfw_classify</option>
                         <option value="prompt_recon">prompt_recon</option>
                         <option value="embed">embed</option>
                     </select>
