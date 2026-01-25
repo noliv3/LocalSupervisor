@@ -122,6 +122,14 @@ function sv_ollama_truncate_for_log(?string $value, int $maxLen = 240): string
     return $value;
 }
 
+function sv_ollama_http_error_message(string $url, int $httpCode, ?string $body): string
+{
+    $snippet = sv_ollama_truncate_for_log($body, 200);
+    $suffix = $snippet !== '' ? ' Body: ' . $snippet : '';
+
+    return 'HTTP ' . $httpCode . ' bei ' . $url . $suffix;
+}
+
 function sv_ollama_health(array $config): array
 {
     $cfg = sv_ollama_config($config);
@@ -309,7 +317,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'model' => $model,
                 'response_json' => null,
                 'usage' => null,
-                'error' => 'HTTP ' . $httpCode,
+                'error' => sv_ollama_http_error_message($url, $httpCode, $responseBody !== false ? (string)$responseBody : null),
                 'latency_ms' => $latencyMs,
             ];
         }
@@ -496,7 +504,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
                 'model' => $model,
                 'vector' => null,
                 'usage' => null,
-                'error' => 'HTTP ' . $httpCode,
+                'error' => sv_ollama_http_error_message($url, $httpCode, $responseBody !== false ? (string)$responseBody : null),
                 'latency_ms' => $latencyMs,
             ];
         }
