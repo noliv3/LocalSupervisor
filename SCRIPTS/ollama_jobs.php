@@ -1352,6 +1352,109 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
     return $summary;
 }
 
+function sv_ollama_run_batch(int $batch, int $maxSeconds): array
+{
+    try {
+        $config = sv_load_config();
+        $pdo = sv_open_pdo($config);
+
+        return sv_ollama_run_batch_with_context($pdo, $config, $batch, $maxSeconds, static function (): void {
+        });
+    } catch (Throwable $e) {
+        return [
+            'ok' => false,
+            'error' => $e->getMessage(),
+            'processed' => 0,
+            'done' => 0,
+            'errors' => 0,
+            'cancelled' => 0,
+            'remaining_queued' => 0,
+            'remaining_running' => 0,
+        ];
+    }
+}
+
+function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, int $maxSeconds, callable $logger): array
+{
+    $ollamaCfg = sv_ollama_config($config);
+    if ($batch <= 0) {
+        $batch = (int)($ollamaCfg['worker']['batch_size'] ?? 5);
+    }
+    if ($batch <= 0) {
+        $batch = 5;
+    }
+    if ($maxSeconds <= 0) {
+        $maxSeconds = 20;
+    }
+
+    $jobTypes = sv_ollama_job_types();
+    sv_mark_stuck_jobs($pdo, $jobTypes, SV_JOB_STUCK_MINUTES, $logger);
+
+    $processed = 0;
+    $done = 0;
+    $errors = 0;
+    $cancelled = 0;
+
+    $startedAt = microtime(true);
+    $timeUp = false;
+
+    while ($processed < $batch && !$timeUp) {
+        $limit = min($batch - $processed, $batch);
+        $rows = sv_ollama_fetch_pending_jobs($pdo, $jobTypes, $limit, null);
+        if ($rows === []) {
+            break;
+        }
+
+        foreach ($rows as $row) {
+            $processed++;
+            $result = sv_process_ollama_job($pdo, $config, $row, $logger);
+            $status = (string)($result['status'] ?? '');
+            if ($status === 'done') {
+                $done++;
+            } elseif ($status === 'error') {
+                $errors++;
+            } elseif ($status === 'cancelled') {
+                $cancelled++;
+            }
+
+            if ((microtime(true) - $startedAt) >= $maxSeconds) {
+                $timeUp = true;
+                break;
+            }
+            if ($processed >= $batch) {
+                break;
+            }
+        }
+    }
+
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $statusStmt = $pdo->prepare(
+        'SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("queued","pending","running") GROUP BY status'
+    );
+    $statusStmt->execute($jobTypes);
+    $queued = 0;
+    $running = 0;
+    foreach ($statusStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $status = (string)($row['status'] ?? '');
+        $count = (int)($row['cnt'] ?? 0);
+        if ($status === 'running') {
+            $running += $count;
+        } elseif ($status === 'queued' || $status === 'pending') {
+            $queued += $count;
+        }
+    }
+
+    return [
+        'ok' => true,
+        'processed' => $processed,
+        'done' => $done,
+        'errors' => $errors,
+        'cancelled' => $cancelled,
+        'remaining_queued' => $queued,
+        'remaining_running' => $running,
+    ];
+}
+
 function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
 {
     $jobId = (int)($jobRow['id'] ?? 0);

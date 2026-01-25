@@ -24,7 +24,11 @@ if (!$isLoopback) {
     sv_security_error(403, 'Forbidden.');
 }
 
-sv_require_internal_access($config, 'dashboard_ollama');
+if (!$isLoopback) {
+    sv_require_internal_access($config, 'dashboard_ollama');
+} else {
+    sv_validate_internal_access($config, 'dashboard_ollama', false);
+}
 
 try {
     $pdo = sv_open_pdo($config);
@@ -222,7 +226,7 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
 <div class="page-header">
     <div>
         <h1 class="page-title">OLLAMA Dashboard</h1>
-        <div class="hint">Interne Kontrolle der Ollama-Queue (Polling via internal_ollama.php).</div>
+        <div class="hint">Interne Kontrolle der Ollama-Queue (Polling via ollama.php).</div>
     </div>
     <div class="header-stats">
         <span class="pill">Jobs: <?= (int)array_sum($statusCounts) ?></span>
@@ -230,7 +234,7 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
     </div>
 </div>
 
-<div class="ollama-dashboard" data-ollama-dashboard data-endpoint="internal_ollama.php" data-poll-interval="10000" data-heartbeat-stale="180">
+<div class="ollama-dashboard" data-ollama-dashboard data-endpoint="ollama.php" data-poll-interval="10000" data-heartbeat-stale="180">
     <div class="panel">
         <div class="panel-header">Queue-Übersicht</div>
         <div class="ollama-status-grid">
@@ -281,7 +285,18 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
         <div class="panel-header">Aktionen</div>
         <div class="action-feedback" data-ollama-message>
             <div class="action-feedback-title">Bereit</div>
-            <div>Enqueue/Cancel/Delete/Requeue werden über internal_ollama.php ausgelöst.</div>
+            <div>Enqueue/Run/Cancel/Delete/Requeue werden über ollama.php ausgelöst.</div>
+        </div>
+        <div class="form-grid">
+            <button class="btn btn--primary" type="button" data-ollama-quick-enqueue>Enqueue all</button>
+            <label>Batch
+                <input type="number" min="1" max="50" value="5" data-ollama-run-batch>
+            </label>
+            <label>Max Sekunden
+                <input type="number" min="1" max="120" value="20" data-ollama-run-seconds>
+            </label>
+            <button class="btn btn--secondary" type="button" data-ollama-run>Run Batch</button>
+            <button class="btn btn--ghost" type="button" data-ollama-auto-run aria-pressed="false">Auto-Run: Aus</button>
         </div>
         <form class="ollama-enqueue" data-ollama-enqueue>
             <div class="form-grid">

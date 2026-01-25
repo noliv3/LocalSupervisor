@@ -15,6 +15,7 @@ try {
 
 $configWarning     = $config['_config_warning'] ?? null;
 $hasInternalAccess = sv_validate_internal_access($config, 'media_view', false);
+$canOllamaActions  = sv_is_loopback_remote_addr() || $hasInternalAccess;
 $forgeModels       = [];
 $forgeModelError   = null;
 $forgeModelStatus  = 'unavailable';
@@ -1496,6 +1497,20 @@ $metaScanAt = $latestScanRunAt !== '' ? $latestScanRunAt : '–';
 
         <div class="panel">
             <div class="panel-header">OLLAMA Ergebnisse</div>
+            <?php if ($canOllamaActions): ?>
+                <div class="action-feedback" data-ollama-analyze-message>
+                    <div class="action-feedback-title">Bereit</div>
+                    <div>Analyze this Media startet eine Batch-Verarbeitung.</div>
+                </div>
+                <button class="btn btn--primary btn--sm" type="button"
+                        data-ollama-analyze
+                        data-endpoint="ollama.php"
+                        data-media-id="<?= (int)$id ?>"
+                        data-run-batch="2"
+                        data-run-seconds="10">Analyze this Media</button>
+            <?php else: ?>
+                <div class="tab-hint">Ollama-Aktionen sind nur lokal verfügbar.</div>
+            <?php endif; ?>
             <div class="meta-grid">
                 <div class="meta-row"><span>Titel</span><strong><?= htmlspecialchars($ollamaTitle !== null && $ollamaTitle !== '' ? (string)$ollamaTitle : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
                 <div class="meta-row"><span>Caption</span><strong><?= htmlspecialchars($ollamaCaption !== null && $ollamaCaption !== '' ? (string)$ollamaCaption : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>

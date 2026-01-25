@@ -819,7 +819,7 @@
         const root = document.querySelector('[data-ollama-dashboard]');
         if (!root) return;
 
-        const endpoint = root.dataset.endpoint || 'internal_ollama.php';
+        const endpoint = root.dataset.endpoint || 'ollama.php';
         const pollInterval = Number(root.dataset.pollInterval || '10000');
         const heartbeatStaleSec = Number(root.dataset.heartbeatStale || '180');
         const statusOrder = {
@@ -848,6 +848,14 @@
         const messageBox = root.querySelector('[data-ollama-message]');
         const messageTitle = messageBox ? messageBox.querySelector('.action-feedback-title') : null;
         const messageText = messageBox ? messageBox.querySelector('div:nth-child(2)') : null;
+        const quickEnqueueBtn = root.querySelector('[data-ollama-quick-enqueue]');
+        const runBtn = root.querySelector('[data-ollama-run]');
+        const autoRunBtn = root.querySelector('[data-ollama-auto-run]');
+        const runBatchInput = root.querySelector('[data-ollama-run-batch]');
+        const runSecondsInput = root.querySelector('[data-ollama-run-seconds]');
+        let autoRunEnabled = false;
+        let autoRunBusy = false;
+        let lastCounts = { queued: 0, pending: 0 };
 
         function showMessage(type, title, text) {
             if (!messageBox) return;
@@ -883,6 +891,10 @@
                 const el = root.querySelector(`[data-status-count="${status}"]`);
                 if (el) el.textContent = String(value);
             });
+            lastCounts = {
+                queued: Number(counts.queued || 0),
+                pending: Number(counts.pending || 0),
+            };
             const modeCounts = data.mode_counts || {};
             Object.entries(modeCounts).forEach(([mode, countsForMode]) => {
                 if (!countsForMode) return;
@@ -968,6 +980,18 @@
             if (errorCell) {
                 errorCell.textContent = lastError ? lastError : '–';
             }
+            if ('model' in data) {
+                const modelCell = row.querySelector('[data-field="model"]');
+                if (modelCell) {
+                    modelCell.textContent = data.model ? data.model : '–';
+                }
+            }
+            if ('stage_version' in data) {
+                const stageCell = row.querySelector('[data-field="stage"]');
+                if (stageCell) {
+                    stageCell.textContent = data.stage_version ? data.stage_version : '–';
+                }
+            }
 
             const progressRatio = progressTotal > 0 ? (progressBits / progressTotal) : 0;
             row.dataset.progress = String(progressRatio);
@@ -1011,6 +1035,9 @@
                 .then((data) => {
                     if (data && data.ok) {
                         updateStatusCounts(data);
+                        if (autoRunEnabled) {
+                            triggerAutoRun();
+                        }
                     }
                 })
                 .catch(() => {});
@@ -1084,6 +1111,43 @@
             }
         }
 
+        function getRunConfig() {
+            const batch = runBatchInput ? Number(runBatchInput.value || 5) : 5;
+            const maxSeconds = runSecondsInput ? Number(runSecondsInput.value || 20) : 20;
+            return {
+                batch: Number.isFinite(batch) && batch > 0 ? batch : 5,
+                maxSeconds: Number.isFinite(maxSeconds) && maxSeconds > 0 ? maxSeconds : 20,
+            };
+        }
+
+        function triggerRun() {
+            const config = getRunConfig();
+            showMessage('success', 'Run', `Batch läuft (${config.batch}, ${config.maxSeconds}s).`);
+            return postAction({ action: 'run', batch: config.batch, max_seconds: config.maxSeconds })
+                .then((data) => {
+                    if (!data || !data.ok) {
+                        throw new Error(data && data.error ? data.error : 'Run fehlgeschlagen.');
+                    }
+                    showMessage('success', 'Run', `Verarbeitet: ${data.processed || 0}, Done: ${data.done || 0}, Errors: ${data.errors || 0}.`);
+                    pollStatus();
+                    pollJobs();
+                })
+                .catch((err) => showMessage('error', 'Run', err.message));
+        }
+
+        function triggerAutoRun() {
+            if (!autoRunEnabled || autoRunBusy) return;
+            const queued = Number(lastCounts.queued || 0) + Number(lastCounts.pending || 0);
+            if (queued <= 0) return;
+            autoRunBusy = true;
+            triggerRun().finally(() => {
+                autoRunBusy = false;
+                if (autoRunEnabled) {
+                    setTimeout(() => triggerAutoRun(), 1000);
+                }
+            });
+        }
+
         const enqueueForm = root.querySelector('[data-ollama-enqueue]');
         if (enqueueForm) {
             enqueueForm.addEventListener('submit', (event) => {
@@ -1113,6 +1177,39 @@
 
         root.addEventListener('click', handleActionClick);
 
+        if (quickEnqueueBtn) {
+            quickEnqueueBtn.addEventListener('click', () => {
+                showMessage('success', 'Enqueue', 'Enqueue all läuft.');
+                postAction({ action: 'enqueue', mode: 'all' })
+                    .then((data) => {
+                        if (!data || !data.ok) {
+                            throw new Error(data && data.error ? data.error : 'Enqueue fehlgeschlagen.');
+                        }
+                        showMessage('success', 'Enqueue', `Enqueue OK: ${JSON.stringify(data.summary || {})}`);
+                        pollStatus();
+                        pollJobs();
+                    })
+                    .catch((err) => showMessage('error', 'Enqueue', err.message));
+            });
+        }
+
+        if (runBtn) {
+            runBtn.addEventListener('click', () => {
+                triggerRun();
+            });
+        }
+
+        if (autoRunBtn) {
+            autoRunBtn.addEventListener('click', () => {
+                autoRunEnabled = !autoRunEnabled;
+                autoRunBtn.setAttribute('aria-pressed', autoRunEnabled ? 'true' : 'false');
+                autoRunBtn.textContent = autoRunEnabled ? 'Auto-Run: An' : 'Auto-Run: Aus';
+                if (autoRunEnabled) {
+                    triggerAutoRun();
+                }
+            });
+        }
+
         const table = root.querySelector('[data-ollama-jobs]');
         if (table) {
             table.querySelectorAll('th.sortable').forEach((th) => {
@@ -1138,6 +1235,79 @@
         }, pollInterval);
     }
 
+    function initOllamaMediaAnalyze() {
+        const button = document.querySelector('[data-ollama-analyze]');
+        if (!button) return;
+
+        const endpoint = button.dataset.endpoint || 'ollama.php';
+        const mediaId = button.dataset.mediaId || '';
+        const runBatch = Number(button.dataset.runBatch || 2);
+        const runSeconds = Number(button.dataset.runSeconds || 10);
+        const message = document.querySelector('[data-ollama-analyze-message]');
+        const messageTitle = message ? message.querySelector('.action-feedback-title') : null;
+        const messageBody = message ? message.querySelector('div:nth-child(2)') : null;
+
+        const setMessage = (type, text) => {
+            if (!message) return;
+            message.classList.remove('success', 'error');
+            if (type) {
+                message.classList.add(type);
+            }
+            if (messageTitle) {
+                messageTitle.textContent = type === 'error' ? 'Fehler' : 'Status';
+            }
+            if (messageBody) {
+                messageBody.textContent = text;
+            } else {
+                message.textContent = text;
+            }
+        };
+
+        const postAction = (payload) => {
+            const body = new URLSearchParams();
+            Object.entries(payload).forEach(([key, value]) => {
+                if (value === undefined || value === null) return;
+                body.append(key, String(value));
+            });
+            return fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body,
+                credentials: 'same-origin',
+            }).then((resp) => resp.json());
+        };
+
+        button.addEventListener('click', () => {
+            if (!mediaId) return;
+            button.disabled = true;
+            setMessage('success', 'Enqueue läuft...');
+            postAction({ action: 'enqueue', mode: 'all', media_id: mediaId })
+                .then((data) => {
+                    if (!data || !data.ok) {
+                        throw new Error(data && data.error ? data.error : 'Enqueue fehlgeschlagen.');
+                    }
+                    setMessage('success', 'Enqueue OK, starte Run...');
+                    return postAction({
+                        action: 'run',
+                        batch: Number.isFinite(runBatch) && runBatch > 0 ? runBatch : 2,
+                        max_seconds: Number.isFinite(runSeconds) && runSeconds > 0 ? runSeconds : 10,
+                    });
+                })
+                .then((data) => {
+                    if (!data || !data.ok) {
+                        throw new Error(data && data.error ? data.error : 'Run fehlgeschlagen.');
+                    }
+                    setMessage('success', `Run OK (processed: ${data.processed || 0}).`);
+                })
+                .catch((err) => {
+                    setMessage('error', err.message);
+                })
+                .finally(() => {
+                    button.disabled = false;
+                });
+        });
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         initViewModeSelect();
         initTabs();
@@ -1151,5 +1321,6 @@
         initRescanJobs();
         initScanJobsPanel();
         initOllamaDashboard();
+        initOllamaMediaAnalyze();
     });
 })();
