@@ -104,6 +104,20 @@ function sv_limit_string(string $value, int $maxLen): string
     return mb_substr($trimmed, 0, $maxLen);
 }
 
+function sv_decode_meta_json_list(?string $value): array
+{
+    if ($value === null || trim($value) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($value, true);
+    if (is_array($decoded)) {
+        return $decoded;
+    }
+
+    return [];
+}
+
 $showAdult = sv_normalize_adult_flag($_GET);
 $showAdult = $showAdult && $hasInternalAccess;
 
@@ -566,6 +580,44 @@ $metaStmt = $pdo->prepare('SELECT source, meta_key, meta_value FROM media_meta W
 $metaStmt->execute([':id' => $id]);
 $metaRows = $metaStmt->fetchAll(PDO::FETCH_ASSOC);
 $hasStaleScan = false;
+
+$ollamaTitle = sv_get_media_meta_value($pdo, $id, 'ollama.title');
+$ollamaCaption = sv_get_media_meta_value($pdo, $id, 'ollama.caption');
+$ollamaPromptScore = sv_get_media_meta_value($pdo, $id, 'ollama.prompt_eval.score');
+$ollamaTagsNormalizedRaw = sv_get_media_meta_value($pdo, $id, 'ollama.tags_normalized');
+$ollamaTagsNormalized = sv_decode_meta_json_list(is_string($ollamaTagsNormalizedRaw) ? $ollamaTagsNormalizedRaw : null);
+$ollamaQualityScore = sv_get_media_meta_value($pdo, $id, 'ollama.quality.score');
+$ollamaQualityFlagsRaw = sv_get_media_meta_value($pdo, $id, 'ollama.quality.flags');
+$ollamaQualityFlags = sv_decode_meta_json_list(is_string($ollamaQualityFlagsRaw) ? $ollamaQualityFlagsRaw : null);
+$ollamaDomainType = sv_get_media_meta_value($pdo, $id, 'ollama.domain.type');
+$ollamaDomainConfidence = sv_get_media_meta_value($pdo, $id, 'ollama.domain.confidence');
+$ollamaPromptReconPrompt = sv_get_media_meta_value($pdo, $id, 'ollama.prompt_recon.prompt');
+$ollamaPromptReconNegative = sv_get_media_meta_value($pdo, $id, 'ollama.prompt_recon.negative');
+$ollamaPromptReconConfidence = sv_get_media_meta_value($pdo, $id, 'ollama.prompt_recon.confidence');
+$ollamaEmbedModel = sv_get_media_meta_value($pdo, $id, 'ollama.embed.text.model');
+$ollamaEmbedDims = sv_get_media_meta_value($pdo, $id, 'ollama.embed.text.dims');
+$ollamaEmbedHash = sv_get_media_meta_value($pdo, $id, 'ollama.embed.text.hash');
+$ollamaDupeHintsRaw = sv_get_media_meta_value($pdo, $id, 'ollama.dupe_hints.top');
+$ollamaDupeHints = [];
+$ollamaDupeHintsCount = 0;
+$ollamaDupeHintsTopScore = null;
+if (is_string($ollamaDupeHintsRaw) && trim($ollamaDupeHintsRaw) !== '') {
+    $decodedDupe = json_decode($ollamaDupeHintsRaw, true);
+    if (is_array($decodedDupe)) {
+        $ollamaDupeHints = $decodedDupe;
+        $ollamaDupeHintsCount = count($decodedDupe);
+        foreach ($decodedDupe as $entry) {
+            if (is_array($entry) && isset($entry['score']) && is_numeric($entry['score'])) {
+                $score = (float)$entry['score'];
+                if ($ollamaDupeHintsTopScore === null || $score > $ollamaDupeHintsTopScore) {
+                    $ollamaDupeHintsTopScore = $score;
+                }
+            }
+        }
+    }
+}
+$ollamaStageVersion = sv_get_media_meta_value($pdo, $id, 'ollama.stage_version');
+$ollamaLastRunAt = sv_get_media_meta_value($pdo, $id, 'ollama.last_run_at');
 
 $voteState = (int)(sv_get_media_meta_value($pdo, $id, 'vote.state') ?? 0);
 $checkedFlag = (int)(sv_get_media_meta_value($pdo, $id, 'curation.checked') ?? 0) === 1;
@@ -1440,6 +1492,74 @@ $metaScanAt = $latestScanRunAt !== '' ? $latestScanRunAt : '–';
             <?php else: ?>
                 <div class="tab-hint">Tags bearbeiten ist im Public-Modus deaktiviert.</div>
             <?php endif; ?>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">OLLAMA Ergebnisse</div>
+            <div class="meta-grid">
+                <div class="meta-row"><span>Titel</span><strong><?= htmlspecialchars($ollamaTitle !== null && $ollamaTitle !== '' ? (string)$ollamaTitle : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                <div class="meta-row"><span>Caption</span><strong><?= htmlspecialchars($ollamaCaption !== null && $ollamaCaption !== '' ? (string)$ollamaCaption : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                <div class="meta-row"><span>Prompt-Eval</span><strong><?= htmlspecialchars($ollamaPromptScore !== null && $ollamaPromptScore !== '' ? (string)$ollamaPromptScore : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                <div class="meta-row"><span>Quality</span><strong><?= htmlspecialchars($ollamaQualityScore !== null && $ollamaQualityScore !== '' ? (string)$ollamaQualityScore : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                <div class="meta-row"><span>Domain</span><strong><?= htmlspecialchars($ollamaDomainType !== null && $ollamaDomainType !== '' ? (string)$ollamaDomainType : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><?= $ollamaDomainConfidence !== null && $ollamaDomainConfidence !== '' ? ' (' . htmlspecialchars((string)$ollamaDomainConfidence, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . ')' : '' ?></strong></div>
+                <div class="meta-row"><span>Embed</span><strong><?= ($ollamaEmbedModel && $ollamaEmbedDims && $ollamaEmbedHash) ? 'vorhanden' : '–' ?></strong></div>
+                <div class="meta-row"><span>Stage-Version</span><strong><?= htmlspecialchars($ollamaStageVersion !== null && $ollamaStageVersion !== '' ? (string)$ollamaStageVersion : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                <div class="meta-row"><span>Last Run</span><strong><?= htmlspecialchars($ollamaLastRunAt !== null && $ollamaLastRunAt !== '' ? (string)$ollamaLastRunAt : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+            </div>
+
+            <div class="meta-section">
+                <div class="meta-title">Tags normalisiert</div>
+                <?php if ($ollamaTagsNormalized === []): ?>
+                    <div class="tab-hint">Keine Tags normalisiert.</div>
+                <?php else: ?>
+                    <div class="chip-list">
+                        <?php foreach ($ollamaTagsNormalized as $tag): ?>
+                            <?php if (!is_string($tag) || trim($tag) === '') { continue; } ?>
+                            <span class="chip"><?= htmlspecialchars($tag, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="meta-section">
+                <div class="meta-title">Quality Flags</div>
+                <?php if ($ollamaQualityFlags === []): ?>
+                    <div class="tab-hint">Keine Flags vorhanden.</div>
+                <?php else: ?>
+                    <div class="chip-list">
+                        <?php foreach ($ollamaQualityFlags as $flag): ?>
+                            <?php if (!is_string($flag) || trim($flag) === '') { continue; } ?>
+                            <span class="chip"><?= htmlspecialchars($flag, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="meta-section">
+                <div class="meta-title">Prompt Recon</div>
+                <div class="meta-grid">
+                    <div class="meta-row"><span>Prompt</span><strong><?= htmlspecialchars($ollamaPromptReconPrompt !== null && $ollamaPromptReconPrompt !== '' ? sv_meta_value((string)$ollamaPromptReconPrompt, 220) : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <div class="meta-row"><span>Negative</span><strong><?= htmlspecialchars($ollamaPromptReconNegative !== null && $ollamaPromptReconNegative !== '' ? sv_meta_value((string)$ollamaPromptReconNegative, 220) : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <div class="meta-row"><span>Confidence</span><strong><?= htmlspecialchars($ollamaPromptReconConfidence !== null && $ollamaPromptReconConfidence !== '' ? (string)$ollamaPromptReconConfidence : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                </div>
+            </div>
+
+            <div class="meta-section">
+                <div class="meta-title">Dupe Hints</div>
+                <div class="meta-grid">
+                    <div class="meta-row"><span>TopK</span><strong><?= $ollamaDupeHintsCount > 0 ? (string)$ollamaDupeHintsCount : '–' ?></strong></div>
+                    <div class="meta-row"><span>Top Score</span><strong><?= $ollamaDupeHintsTopScore !== null ? htmlspecialchars(number_format((float)$ollamaDupeHintsTopScore, 3), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></strong></div>
+                </div>
+            </div>
+
+            <div class="meta-section">
+                <div class="meta-title">Embed Details</div>
+                <div class="meta-grid">
+                    <div class="meta-row"><span>Model</span><strong><?= htmlspecialchars($ollamaEmbedModel !== null && $ollamaEmbedModel !== '' ? (string)$ollamaEmbedModel : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <div class="meta-row"><span>Dims</span><strong><?= htmlspecialchars($ollamaEmbedDims !== null && $ollamaEmbedDims !== '' ? (string)$ollamaEmbedDims : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                    <div class="meta-row"><span>Hash</span><strong><?= htmlspecialchars($ollamaEmbedHash !== null && $ollamaEmbedHash !== '' ? (string)$ollamaEmbedHash : '–', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></div>
+                </div>
+            </div>
         </div>
 
         <div class="panel">
