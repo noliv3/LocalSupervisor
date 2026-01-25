@@ -1,37 +1,38 @@
-# AGENTS – Arbeitsregeln & Diagnose
+# AGENTS – Developer-Regeln (Phase 3)
 
-## Zweck
-Diese Datei hält **Arbeitsregeln** für Änderungen im Repository sowie eine **Diagnose-Liste** mit Auffälligkeiten fest.
+## Verbindliche Regeln
+- **Keine Tests ausführen.**
+- **Keine UI außerhalb Dashboard/Media-Resultpanel ändern.**
+- **Keine Doku-Änderungen außer Phase 3.**
+- **Ollama:** keine Base64/Secrets, keine Vektoren in `meta` oder Logs.
 
-## Arbeitsregeln
-- **Kein Projektcode ändern**, außer es wird explizit beauftragt.
-- **Dokumentation immer in README.md und AGENTS.MD pflegen**, wenn Abläufe/Schnittstellen betroffen sind.
-- **Neue Dateien nur nach Auftrag**; bestehende Strukturen bevorzugen.
-- **Keine Tests ausführen**, sofern nicht ausdrücklich verlangt.
+## Phasenpipeline (Referenz: Stages + media_meta-Keys)
+**Stage 1 – Caption/Title**
+- `ollama.caption`, `ollama.caption.meta`
+- `ollama.title`, `ollama.title.meta`
 
-## Hinweis – Web-Zugriff (Dokumentation)
-- Public ist auf Galerie/Detailansicht + Upvote beschränkt; alle internen Aktionen erfordern Loopback + `internal_api_key`.
-- FSK18-Inhalte bleiben für Public unsichtbar (Filter/Stream/Thumb blockiert) und können nicht per Query-Parameter aktiviert werden.
-- Session/Cookie-Speicherung des `internal_key` erfolgt nur bei HTTPS oder expliziter Freigabe (`security.allow_insecure_internal_cookie=true`); bei HTTP ist der Key pro Request zu senden.
+**Stage 2 – Prompt Eval**
+- `ollama.prompt_eval.score`, `ollama.prompt_eval.meta`
 
-## Hinweis – Job-Queue-Guards
-- Queue-Limits sind konfigurierbar (`jobs.queue_max_total`, `jobs.queue_max_per_type_default`, `jobs.queue_max_per_type`, `jobs.queue_max_per_media`), damit Enqueue-Schleifen begrenzt werden.
+**Stage 3 – Tags Normalize**
+- `ollama.tags_raw`, `ollama.tags_normalized`, `ollama.tags_map`, `ollama.tags_normalize.meta`
 
-## Hinweis – Ollama-Planung (Dokumentation)
-- Für die geplante Ollama-Integration existieren separate Audit-/Interface-/Contract-Dokumente unter `DOCS/` sowie eine Agentenbeschreibung in `DOCS/agents_ollama.md`.
-- Implementierungen erfolgen erst nach Abschluss der Audit-Dokumentation und unter Beachtung der Idempotenz- und Logging-Regeln (keine Base64/Secrets in Logs).
-- Stage-1 CLI (Caption/Title/Prompt-Eval) nutzt `SCRIPTS/ollama_enqueue_cli.php` und `SCRIPTS/ollama_worker_cli.php` mit JSONL-Logs unter `LOGS/ollama_jobs.jsonl` und `LOGS/ollama_errors.jsonl`.
-- Interne Steuerung läuft über `WWW/internal_ollama.php` (Loopback + internal_api_key) und schreibt Ergebnisse nach `ollama_results`.
-- Enqueue-Status ist `queued`; der Worker konsumiert `queued`/`pending` und persistiert erfolgreiche Resultate zusätzlich in `media_meta` (u. a. `ollama.caption`, `ollama.title`, `ollama.prompt_eval.score`, `ollama.tags_normalized`, `ollama.<mode>.meta`, `ollama.last_run_at`, `ollama.stage_version`).
+**Stage 4 – Quality/Domain**
+- `ollama.quality.score`, `ollama.quality.flags`
+- `ollama.domain.type`, `ollama.domain.confidence`
+- `ollama.quality.meta`
 
-## Hinweis – Start.ps1 Cleanup
-- Start/Stop des PHP-Servers wird mit PID/Command/CWD geloggt; `php_server.pid` wird beim Beenden bereinigt.
-- Exit-Hooks prüfen `LOGS/php_server.pid` sowie optional das konfigurierte Log-Verzeichnis, validieren `php` als Prozessnamen und entfernen die PID-Datei danach.
+**Stage 5 – Prompt Recon**
+- `ollama.prompt_recon.prompt`, `ollama.prompt_recon.negative`
+- `ollama.prompt_recon.confidence`, `ollama.prompt_recon.style_tokens`, `ollama.prompt_recon.subject_tokens`
+- `ollama.prompt_recon.meta`
 
-## Diagnose – bekannte Auffälligkeiten
-1. **Runtime-Verzeichnisse fehlen im Repo:** `LOGS/` und `BACKUPS/` sind im Arbeitsbaum nicht vorhanden und werden erst zur Laufzeit erzeugt. 
-2. **Beispiel-Konfigurationen ohne echte Instanz:** Unter `config/` liegen nur `*.example.json`-Dateien; echte produktive Konfigurationsdateien sind nicht enthalten. 
-3. **Vendor-Ordner im Repo:** `node_modules/` ist im Repository enthalten (erhöht Repo-Größe und erschwert Diffs).
+**Stage 6 – Embeddings**
+- `ollama.embed.text.model`, `ollama.embed.text.dims`, `ollama.embed.text.hash`, `ollama.embed.text.vector_id`
+- `ollama.embed.meta`
 
-## Diagnose – offene Punkte (ohne Codeeingriffe)
-- Ein Versionen-/Änderungslog wird nun über `VERSIONSLOG.MD` geführt. Runtime-Änderungen sollten zusätzlich in `LOGS/` dokumentiert werden, sofern die Umgebung das unterstützt.
+**Stage 7 – Dupe Hints**
+- `ollama.dupe_hints.top`, `ollama.dupe_hints.threshold`, `ollama.dupe_hints.meta`
+
+**Global (alle Stages)**
+- `ollama.last_run_at`, `ollama.stage_version`
