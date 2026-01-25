@@ -122,19 +122,44 @@ function sv_ollama_truncate_for_log(?string $value, int $maxLen = 240): string
     return $value;
 }
 
+function sv_ollama_http_error_body_snippet(?string $body): string
+{
+    if (!is_string($body) || trim($body) === '') {
+        return '';
+    }
+
+    if (stripos($body, '"images"') !== false || stripos($body, 'data:') !== false || stripos($body, 'base64') !== false) {
+        return '<omitted>';
+    }
+
+    return sv_ollama_truncate_for_log($body, 200);
+}
+
 function sv_ollama_http_error_message(string $url, int $httpCode, ?string $body): string
 {
-    $snippet = sv_ollama_truncate_for_log($body, 200);
-    $suffix = $snippet !== '' ? ' Body: ' . $snippet : '';
+    $snippet = sv_ollama_http_error_body_snippet($body);
 
-    return 'HTTP ' . $httpCode . ' bei ' . $url . $suffix;
+    return 'HTTP ' . $httpCode . ' URL=' . $url . ' BODY=' . $snippet;
+}
+
+function sv_ollama_http_status_code(?array $responseHeader): ?int
+{
+    if (!is_array($responseHeader) || !isset($responseHeader[0])) {
+        return null;
+    }
+
+    if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$responseHeader[0], $matches)) {
+        return (int)$matches[1];
+    }
+
+    return null;
 }
 
 function sv_ollama_health(array $config): array
 {
     $cfg = sv_ollama_config($config);
-    $baseUrl = rtrim($cfg['base_url'], '/');
-    $url = $baseUrl . '/api/version';
+    $path = '/api/version';
+    $url = rtrim($cfg['base_url'], '/') . $path;
     $timeoutMs = (int)$cfg['timeout_ms'];
 
     $start = microtime(true);
@@ -149,17 +174,9 @@ function sv_ollama_health(array $config): array
     $responseBody = @file_get_contents($url, false, $context);
     $latencyMs = (int)round((microtime(true) - $start) * 1000);
 
-    $httpCode = null;
-    if (isset($http_response_header) && is_array($http_response_header)) {
-        foreach ($http_response_header as $headerLine) {
-            if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
-                $httpCode = (int)$matches[1];
-                break;
-            }
-        }
-    }
+    $httpCode = sv_ollama_http_status_code($http_response_header ?? null);
 
-    if ($responseBody !== false && $httpCode !== null && $httpCode >= 200 && $httpCode < 300) {
+    if ($responseBody !== false && $httpCode === 200) {
         return [
             'ok' => true,
             'latency_ms' => $latencyMs,
@@ -205,8 +222,8 @@ function sv_ollama_embed_text(array $config, string $input, array $options): arr
 function sv_ollama_request(array $config, array $input, array $options): array
 {
     $cfg = sv_ollama_config($config);
-    $baseUrl = rtrim($cfg['base_url'], '/');
-    $url = $baseUrl . '/api/generate';
+    $path = '/api/generate';
+    $url = rtrim($cfg['base_url'], '/') . $path;
 
     $prompt = isset($input['prompt']) ? (string)$input['prompt'] : '';
     $images = $input['images'] ?? null;
@@ -262,6 +279,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
                 'header'  => "Content-Type: application/json\r\nAccept: application/json\r\n",
                 'content' => json_encode($requestPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
                 'timeout' => $timeoutMs / 1000,
+                'ignore_errors' => true,
             ],
         ]);
 
@@ -281,15 +299,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
 
         $latencyMs = (int)round((microtime(true) - $start) * 1000);
 
-        $httpCode = null;
-        if (isset($http_response_header) && is_array($http_response_header)) {
-            foreach ($http_response_header as $headerLine) {
-                if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
-                    $httpCode = (int)$matches[1];
-                    break;
-                }
-            }
-        }
+        $httpCode = sv_ollama_http_status_code($http_response_header ?? null);
 
         if ($responseBody === false) {
             $message = $lastError ? sv_sanitize_error_message((string)$lastError, 200) : 'Transportfehler';
@@ -311,7 +321,7 @@ function sv_ollama_request(array $config, array $input, array $options): array
             ];
         }
 
-        if ($httpCode !== null && ($httpCode < 200 || $httpCode >= 300)) {
+        if ($httpCode !== null && $httpCode !== 200) {
             return [
                 'ok' => false,
                 'model' => $model,
@@ -401,8 +411,8 @@ function sv_ollama_request(array $config, array $input, array $options): array
 function sv_ollama_embeddings_request(array $config, array $input, array $options): array
 {
     $cfg = sv_ollama_config($config);
-    $baseUrl = rtrim($cfg['base_url'], '/');
-    $url = $baseUrl . '/api/embeddings';
+    $path = '/api/embeddings';
+    $url = rtrim($cfg['base_url'], '/') . $path;
 
     $prompt = isset($input['prompt']) ? (string)$input['prompt'] : '';
 
@@ -449,6 +459,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
                 'header'  => "Content-Type: application/json\r\nAccept: application/json\r\n",
                 'content' => json_encode($requestPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
                 'timeout' => $timeoutMs / 1000,
+                'ignore_errors' => true,
             ],
         ]);
 
@@ -468,15 +479,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
 
         $latencyMs = (int)round((microtime(true) - $start) * 1000);
 
-        $httpCode = null;
-        if (isset($http_response_header) && is_array($http_response_header)) {
-            foreach ($http_response_header as $headerLine) {
-                if (preg_match('~^HTTP/[^ ]+ ([0-9]{3})~', (string)$headerLine, $matches)) {
-                    $httpCode = (int)$matches[1];
-                    break;
-                }
-            }
-        }
+        $httpCode = sv_ollama_http_status_code($http_response_header ?? null);
 
         if ($responseBody === false) {
             $message = $lastError ? sv_sanitize_error_message((string)$lastError, 200) : 'Transportfehler';
@@ -498,7 +501,7 @@ function sv_ollama_embeddings_request(array $config, array $input, array $option
             ];
         }
 
-        if ($httpCode !== null && ($httpCode < 200 || $httpCode >= 300)) {
+        if ($httpCode !== null && $httpCode !== 200) {
             return [
                 'ok' => false,
                 'model' => $model,
