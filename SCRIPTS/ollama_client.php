@@ -371,7 +371,24 @@ function sv_ollama_request(array $config, array $input, array $options): array
             ];
         }
 
-        $responseText = $decoded['response'] ?? null;
+        $responsePayload = $decoded['response'] ?? null;
+        if ($responsePayload === null && isset($decoded['message']) && is_array($decoded['message'])) {
+            if (array_key_exists('content', $decoded['message'])) {
+                $responsePayload = $decoded['message']['content'];
+            }
+        }
+        if ($responsePayload === null && isset($decoded['choices']) && is_array($decoded['choices']) && $decoded['choices'] !== []) {
+            $choice = $decoded['choices'][0] ?? null;
+            if (is_array($choice)) {
+                if (isset($choice['message']) && is_array($choice['message']) && array_key_exists('content', $choice['message'])) {
+                    $responsePayload = $choice['message']['content'];
+                } elseif (array_key_exists('text', $choice)) {
+                    $responsePayload = $choice['text'];
+                }
+            }
+        }
+
+        $responseText = $responsePayload;
         $responseJson = null;
         $parseError = false;
         if (is_array($responseText)) {
