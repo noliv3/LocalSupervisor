@@ -106,6 +106,68 @@ function Get-BackupDir {
     return $value
 }
 
+function New-LocalDbBackup {
+    param(
+        [string]$DbPath,
+        [string]$BackupDir
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DbPath)) {
+        return [ordered]@{ ok = $false; error = 'DB-Pfad fehlt.' }
+    }
+    if (-not (Test-Path -Path $DbPath)) {
+        return [ordered]@{ ok = $false; error = "DB-Datei fehlt: $DbPath" }
+    }
+    if (-not (Test-Path -Path $BackupDir)) {
+        New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
+    }
+
+    $timestamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+    $backupFile = Join-Path $BackupDir "supervisor_${timestamp}.sqlite"
+    $gzipFile = "${backupFile}.gz"
+    $metaFile = Join-Path $BackupDir "supervisor_${timestamp}.meta.json"
+
+    try {
+        Copy-Item -Path $DbPath -Destination $backupFile -Force -ErrorAction Stop
+    } catch {
+        return [ordered]@{ ok = $false; error = "Backup-Kopie fehlgeschlagen: $($_.Exception.Message)" }
+    }
+
+    $gzipOk = $false
+    try {
+        $source = [System.IO.File]::OpenRead($backupFile)
+        $target = [System.IO.File]::Create($gzipFile)
+        $gzip = New-Object System.IO.Compression.GzipStream($target, [System.IO.Compression.CompressionLevel]::Optimal)
+        $source.CopyTo($gzip)
+        $gzip.Dispose()
+        $target.Dispose()
+        $source.Dispose()
+        $gzipOk = $true
+    } catch {
+        try {
+            if (Test-Path -Path $gzipFile) {
+                Remove-Item -Path $gzipFile -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+        }
+    }
+
+    $meta = [ordered]@{
+        created_at   = (Get-Date).ToString('o')
+        database_path = $DbPath
+        backup_file  = $backupFile
+        backup_gzip  = $gzipOk ? $gzipFile : $null
+    }
+    Write-JsonFile -Path $metaFile -Payload $meta
+
+    return [ordered]@{
+        ok = $true
+        backup_file = $backupFile
+        backup_gzip = $gzipOk ? $gzipFile : $null
+        meta_file = $metaFile
+    }
+}
+
 function Write-JsonFile {
     param(
         [string]$Path,
@@ -555,16 +617,20 @@ function Invoke-UpdateFlow {
             $steps['pull'] = 'merge'
         }
 
-        $backupOutput = & $phpExe @phpArgs "SCRIPTS\db_backup.php" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $result['short_error'] = Sanitize-Message (Get-CommandOutput $backupOutput)
+        $backupDir = Get-BackupDir
+        $dbPath = Get-DatabasePath
+        $backupResult = New-LocalDbBackup -DbPath $dbPath -BackupDir $backupDir
+        if (-not $backupResult.ok) {
+            $result['short_error'] = Sanitize-Message (Get-CommandOutput $backupResult.error)
             $steps['backup'] = 'error'
             $result['steps'] = $steps
             return $result
         }
         $steps['backup'] = 'ok'
+        if ($backupResult.backup_gzip) {
+            $steps['backup_gzip'] = 'ok'
+        }
 
-        $backupDir = Get-BackupDir
         Rotate-Backups -BackupDir $backupDir -Keep $BackupKeep
         $steps['backup_rotate'] = "keep=$BackupKeep"
 

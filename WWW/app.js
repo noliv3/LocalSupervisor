@@ -815,6 +815,98 @@
         loadJobs();
     }
 
+    function initJobsPruneControls() {
+        const containers = document.querySelectorAll('[data-jobs-prune]');
+        if (!containers.length) return;
+
+        const postAction = (endpoint, payload) => {
+            const body = new URLSearchParams();
+            Object.entries(payload).forEach(([key, value]) => {
+                if (value === undefined || value === null || value === '') return;
+                body.append(key, String(value));
+            });
+            return fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body,
+                credentials: 'same-origin',
+            }).then((resp) => resp.json());
+        };
+
+        const buildMessage = (result, note) => {
+            if (!result) return 'Keine Antwort vom Server.';
+            const parts = [
+                `matched ${result.matched_count || 0}`,
+                `deleted ${result.deleted_count || 0}`,
+                `updated ${result.updated_count || 0}`,
+                `blocked ${result.blocked_running_count || 0}`,
+            ];
+            if (note) {
+                parts.push(note);
+            }
+            return parts.join(' · ');
+        };
+
+        containers.forEach((container) => {
+            const endpoint = container.dataset.endpoint || 'jobs_prune.php';
+            const message = container.querySelector('[data-jobs-prune-message]');
+            const messageTitle = message ? message.querySelector('.action-feedback-title') : null;
+            const messageBody = message ? message.querySelector('div:nth-child(2)') : null;
+
+            const setMessage = (type, text) => {
+                if (!message) return;
+                message.classList.remove('success', 'error');
+                if (type) {
+                    message.classList.add(type);
+                }
+                if (messageTitle) {
+                    messageTitle.textContent = type === 'error' ? 'Fehler' : 'Status';
+                }
+                if (messageBody) {
+                    messageBody.textContent = text;
+                } else {
+                    message.textContent = text;
+                }
+            };
+
+            container.addEventListener('click', (event) => {
+                const button = event.target.closest('[data-jobs-prune-button]');
+                if (!button) return;
+                if (button.disabled) return;
+
+                const confirmText = button.dataset.confirm || '';
+                if (confirmText && !window.confirm(confirmText)) {
+                    return;
+                }
+
+                const payload = {
+                    group: button.dataset.group,
+                    status: button.dataset.status,
+                    scope: button.dataset.scope || 'all',
+                    media_id: button.dataset.mediaId || '',
+                    force: button.dataset.force || '0',
+                    dry_run: button.dataset.dryRun || '0',
+                };
+
+                button.disabled = true;
+                setMessage('success', 'Prune läuft...');
+                postAction(endpoint, payload)
+                    .then((data) => {
+                        if (!data || !data.ok) {
+                            throw new Error(data && data.error ? data.error : 'Prune fehlgeschlagen.');
+                        }
+                        setMessage('success', buildMessage(data.result, data.note));
+                    })
+                    .catch((err) => {
+                        setMessage('error', err.message);
+                    })
+                    .finally(() => {
+                        button.disabled = false;
+                    });
+            });
+        });
+    }
+
     function initOllamaDashboard() {
         const root = document.querySelector('[data-ollama-dashboard]');
         if (!root) return;
@@ -1320,6 +1412,7 @@
         initForgeRepair();
         initRescanJobs();
         initScanJobsPanel();
+        initJobsPruneControls();
         initOllamaDashboard();
         initOllamaMediaAnalyze();
     });

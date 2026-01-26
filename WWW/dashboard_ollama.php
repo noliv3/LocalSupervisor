@@ -385,6 +385,19 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
         </form>
     </div>
 
+    <div class="panel" data-jobs-prune data-endpoint="jobs_prune.php">
+        <div class="panel-header">Prune / Delete All</div>
+        <div class="action-feedback" data-jobs-prune-message>
+            <div class="action-feedback-title">Bereit</div>
+            <div>Ollama-Jobs gesammelt löschen.</div>
+        </div>
+        <div class="form-grid">
+            <button class="btn btn--danger" type="button" data-jobs-prune-button data-group="ollama" data-status="done,error,cancelled" data-confirm="Alle done/error/cancelled Ollama-Jobs löschen?">Delete done + error</button>
+            <button class="btn btn--secondary" type="button" data-jobs-prune-button data-group="ollama" data-status="queued,pending" data-confirm="Alle queued/pending Ollama-Jobs löschen?">Purge queue</button>
+            <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="ollama" data-status="running" data-force="1" data-confirm="Running Ollama-Jobs forcieren (cancel + delete)?">Force clear running</button>
+        </div>
+    </div>
+
     <form method="get" class="filters">
         <details open>
             <summary>Filter</summary>
