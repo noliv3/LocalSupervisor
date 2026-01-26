@@ -228,6 +228,7 @@ if ($action === 'run_once') {
         $logs[] = $message;
     };
 
+    sv_ollama_watchdog_stale_running($pdo, 10, 'requeue');
     $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, null);
     $respond(200, [
         'ok' => true,
