@@ -152,18 +152,26 @@ function New-LocalDbBackup {
         }
     }
 
+    $backupGzipValue = $null
+    if ($gzipOk) {
+        $backupGzipValue = $gzipFile
+    }
     $meta = [ordered]@{
-        created_at   = (Get-Date).ToString('o')
+        created_at    = (Get-Date).ToString('o')
         database_path = $DbPath
-        backup_file  = $backupFile
-        backup_gzip  = $gzipOk ? $gzipFile : $null
+        backup_file   = $backupFile
+        backup_gzip   = $backupGzipValue
     }
     Write-JsonFile -Path $metaFile -Payload $meta
 
+    $backupGzipResult = $null
+    if ($gzipOk) {
+        $backupGzipResult = $gzipFile
+    }
     return [ordered]@{
         ok = $true
         backup_file = $backupFile
-        backup_gzip = $gzipOk ? $gzipFile : $null
+        backup_gzip = $backupGzipResult
         meta_file = $metaFile
     }
 }
