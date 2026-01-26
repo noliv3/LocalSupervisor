@@ -760,10 +760,23 @@ function sv_ollama_build_prompt_recon_payload(PDO $pdo, int $mediaId): array
     $qualityFlagsRaw = sv_get_media_meta_value($pdo, $mediaId, 'ollama.quality.flags');
     $originalPrompt = sv_ollama_fetch_prompt_context($pdo, $mediaId);
 
+    $tagsNormalized = sv_ollama_decode_json_list($tagsRaw);
+    $tagsSource = null;
+    if ($tagsNormalized !== null && $tagsNormalized !== []) {
+        $tagsSource = 'normalized';
+    } else {
+        $rawTags = sv_ollama_fetch_prompt_recon_tags($pdo, $mediaId);
+        if ($rawTags !== []) {
+            $tagsNormalized = $rawTags;
+            $tagsSource = 'db_raw';
+        }
+    }
+
     return [
         'caption' => $caption,
         'title' => $title,
-        'tags_normalized' => sv_ollama_decode_json_list($tagsRaw),
+        'tags_normalized' => $tagsNormalized,
+        'tags_source' => $tagsSource,
         'domain_type' => $domainType,
         'quality_flags' => sv_ollama_decode_json_list($qualityFlagsRaw),
         'original_prompt' => $originalPrompt,
@@ -778,6 +791,61 @@ function sv_ollama_fetch_media_tags(PDO $pdo, int $mediaId): array
     $tagsStmt->execute([':media_id' => $mediaId]);
     $tags = $tagsStmt->fetchAll(PDO::FETCH_COLUMN, 0);
     return array_values(array_filter(array_map('strval', $tags), static fn ($v) => trim($v) !== ''));
+}
+
+function sv_ollama_fetch_prompt_recon_tags(PDO $pdo, int $mediaId): array
+{
+    $tagsStmt = $pdo->prepare(
+        'SELECT t.name FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = :media_id ORDER BY mt.score DESC, mt.created_at DESC LIMIT 80'
+    );
+    $tagsStmt->execute([':media_id' => $mediaId]);
+    $tags = $tagsStmt->fetchAll(PDO::FETCH_COLUMN, 0);
+    $tags = array_values(array_filter(array_map('strval', $tags), static fn ($v) => trim($v) !== ''));
+
+    return sv_ollama_filter_prompt_recon_tags($tags);
+}
+
+function sv_ollama_filter_prompt_recon_tags(array $tags): array
+{
+    $blockedPrefixes = ['rating:'];
+    $blockedTags = [
+        'tagme',
+        'commentary',
+        'commentary_request',
+        'translation',
+        'translation_request',
+        'bad_prompt',
+        'bad_source',
+        'bad_link',
+        'bad_id',
+        'bad_pixiv_id',
+    ];
+    $blockedTags = array_fill_keys($blockedTags, true);
+
+    $filtered = [];
+    foreach ($tags as $tag) {
+        $tag = trim((string)$tag);
+        if ($tag === '') {
+            continue;
+        }
+        $lower = strtolower($tag);
+        $blocked = false;
+        foreach ($blockedPrefixes as $prefix) {
+            if (str_starts_with($lower, $prefix)) {
+                $blocked = true;
+                break;
+            }
+        }
+        if ($blocked) {
+            continue;
+        }
+        if (isset($blockedTags[$lower])) {
+            continue;
+        }
+        $filtered[] = $tag;
+    }
+
+    return $filtered;
 }
 
 function sv_ollama_fetch_pending_jobs(PDO $pdo, array $jobTypes, int $limit, ?int $mediaId = null): array
@@ -1172,13 +1240,19 @@ function sv_ollama_build_meta_snapshot(int $resultId, string $model, bool $parse
     return $metaJson === false ? '{}' : $metaJson;
 }
 
-function sv_ollama_build_tags_normalize_meta(int $resultId, string $model, bool $parseError): string
+function sv_ollama_build_tags_normalize_meta(int $resultId, string $model, bool $parseError, array $extra = []): string
 {
     $meta = [
         'result_id' => $resultId,
         'model' => $model,
         'parse_error' => $parseError,
     ];
+    foreach ($extra as $key => $value) {
+        if ($value === null) {
+            continue;
+        }
+        $meta[$key] = $value;
+    }
 
     $metaJson = json_encode($meta, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     return $metaJson === false ? '{}' : $metaJson;
@@ -1264,6 +1338,9 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
         }
         if (isset($values['subject_tokens']) && $values['subject_tokens'] !== null) {
             sv_set_media_meta_value($pdo, $mediaId, 'ollama.prompt_recon.subject_tokens', $values['subject_tokens'], $source);
+        }
+        if (isset($values['tags_source']) && $values['tags_source'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.prompt_recon.tags_source', $values['tags_source'], $source);
         }
     }
 
@@ -1972,6 +2049,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $rawTags = null;
         $contextText = '';
         $imageRequired = false;
+        $promptReconTagsSource = null;
         if ($mode === 'tags_normalize') {
             $rawTags = sv_ollama_fetch_media_tags($pdo, $mediaId);
             if ($rawTags === []) {
@@ -2002,6 +2080,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             ];
         } elseif ($mode === 'prompt_recon') {
             $promptPayload = sv_ollama_build_prompt_recon_payload($pdo, $mediaId);
+            $promptReconTagsSource = $promptPayload['tags_source'] ?? null;
             $hasCaption = isset($promptPayload['caption']) && is_string($promptPayload['caption']) && trim($promptPayload['caption']) !== '';
             $hasTags = isset($promptPayload['tags_normalized']) && is_array($promptPayload['tags_normalized']) && $promptPayload['tags_normalized'] !== [];
             if (!$hasCaption && !$hasTags) {
@@ -2451,7 +2530,8 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $metaSnapshot = sv_ollama_build_tags_normalize_meta(
                 $resultId,
                 (string)($response['model'] ?? $options['model']),
-                true
+                true,
+                $mode === 'prompt_recon' ? ['tags_source' => $promptReconTagsSource] : []
             );
 
             sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
@@ -2488,7 +2568,8 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $metaSnapshot = sv_ollama_build_tags_normalize_meta(
                 $resultId,
                 (string)($response['model'] ?? $options['model']),
-                true
+                true,
+                $mode === 'prompt_recon' ? ['tags_source' => $promptReconTagsSource] : []
             );
 
             sv_ollama_persist_media_meta($pdo, $mediaId, $mode, [
@@ -2531,7 +2612,8 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $metaSnapshot = sv_ollama_build_tags_normalize_meta(
                 $resultId,
                 (string)($response['model'] ?? $options['model']),
-                $parseError
+                $parseError,
+                $mode === 'prompt_recon' ? ['tags_source' => $promptReconTagsSource] : []
             );
         } else {
             $metaSnapshot = sv_ollama_build_meta_snapshot(
@@ -2571,6 +2653,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'subject_tokens' => $mode === 'prompt_recon' && $promptReconSubjectTokens !== null
                 ? sv_ollama_encode_json($promptReconSubjectTokens)
                 : null,
+            'tags_source' => $mode === 'prompt_recon' ? $promptReconTagsSource : null,
         ]);
 
         $progressBits = 900;
