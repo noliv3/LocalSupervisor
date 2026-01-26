@@ -1,0 +1,1 @@
+Klassifiziere das Medium auf NSFW-Risiko. Gib keine expliziten Details wieder. Gib nur das JSON-Objekt aus. Keine zusätzlichen Keys. Keine Codeblöcke. Format: {"nsfw_score":0.0,"nsfw_flags":[],"category":"safe","rationale_short":"..."}

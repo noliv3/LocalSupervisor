@@ -1,0 +1,1 @@
+Bewerte die technische Bildqualität (0-100) und klassifiziere die Domäne. Gib nur das JSON-Objekt aus. Keine zusätzlichen Keys. Keine Codeblöcke. Format: {"quality_score":0,"quality_flags":[],"domain_type":"other","domain_confidence":0.0,"rationale":"..."}

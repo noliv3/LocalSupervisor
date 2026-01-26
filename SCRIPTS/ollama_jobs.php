@@ -5,7 +5,9 @@ require_once __DIR__ . '/operations.php';
 require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/logging.php';
 require_once __DIR__ . '/ollama_client.php';
+require_once __DIR__ . '/ollama_extract.php';
 require_once __DIR__ . '/ollama_prompts.php';
+require_once __DIR__ . '/ollama_trace.php';
 
 const SV_JOB_TYPE_OLLAMA_CAPTION     = 'ollama_caption';
 const SV_JOB_TYPE_OLLAMA_TITLE       = 'ollama_title';
@@ -267,6 +269,9 @@ function sv_ollama_mark_cancelled(PDO $pdo, int $jobId, array $context, callable
         'media_id' => $context['media_id'] ?? null,
         'job_type' => $context['job_type'] ?? null,
         'mode' => $context['mode'] ?? null,
+        'trace_file' => null,
+        'response_len' => null,
+        'raw_body_len' => null,
     ]);
 
     return [
@@ -571,6 +576,9 @@ function sv_enqueue_ollama_job(PDO $pdo, array $config, int $mediaId, string $mo
         'media_id' => $mediaId,
         'job_type' => $jobType,
         'mode' => $mode,
+        'trace_file' => null,
+        'response_len' => null,
+        'raw_body_len' => null,
     ]);
 
     return [
@@ -669,54 +677,6 @@ function sv_ollama_decode_json_list(?string $value): ?array
     return $list === [] ? null : $list;
 }
 
-function sv_ollama_extract_first_json_object(string $text): ?string
-{
-    $length = strlen($text);
-    $depth = 0;
-    $start = null;
-    $inString = false;
-    $escape = false;
-
-    for ($i = 0; $i < $length; $i++) {
-        $char = $text[$i];
-        if ($inString) {
-            if ($escape) {
-                $escape = false;
-                continue;
-            }
-            if ($char === '\\') {
-                $escape = true;
-                continue;
-            }
-            if ($char === '"') {
-                $inString = false;
-            }
-            continue;
-        }
-
-        if ($char === '"') {
-            $inString = true;
-            continue;
-        }
-
-        if ($char === '{') {
-            if ($depth === 0) {
-                $start = $i;
-            }
-            $depth++;
-            continue;
-        }
-
-        if ($char === '}' && $depth > 0) {
-            $depth--;
-            if ($depth === 0 && $start !== null) {
-                return substr($text, $start, $i - $start + 1);
-            }
-        }
-    }
-
-    return null;
-}
 
 function sv_ollama_build_parse_error_detail(array $response, ?string $responseText): string
 {
@@ -1650,19 +1610,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         'mode' => $mode,
     ]);
 
-    sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
-        'ts' => date('c'),
-        'event' => 'start',
-        'job_id' => $jobId,
-        'media_id' => $mediaId,
-        'job_type' => $jobType,
-        'mode' => $mode,
-    ]);
-
     $ollamaCfg = sv_ollama_config($config);
     $maxRetries = (int)$ollamaCfg['worker']['max_retries'];
     $attempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
     $imageLoadError = null;
+    $traceFile = null;
+    $traceAttempt = $attempts + 1;
 
     try {
         if (!$ollamaCfg['enabled']) {
@@ -1670,6 +1623,18 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
 
         if ($mode === 'embed') {
+            sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                'ts' => date('c'),
+                'event' => 'start',
+                'job_id' => $jobId,
+                'media_id' => $mediaId,
+                'job_type' => $jobType,
+                'mode' => $mode,
+                'trace_file' => null,
+                'response_len' => null,
+                'raw_body_len' => null,
+            ]);
+
             if (!sv_ollama_has_embedding_seed($pdo, $mediaId)) {
                 throw new RuntimeException('Keine Embedding-Quelle verfügbar.');
             }
@@ -1730,6 +1695,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                         'model' => $embedModel,
                         'input_hash' => $inputHash,
                         'deduped' => true,
+                        'trace_file' => null,
+                        'response_len' => null,
+                        'raw_body_len' => null,
                     ]);
 
                     return [
@@ -1884,6 +1852,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'model' => $embedModel,
                 'input_hash' => $inputHash,
                 'dims' => $dims,
+                'trace_file' => null,
+                'response_len' => null,
+                'raw_body_len' => null,
             ]);
 
             return [
@@ -1901,6 +1872,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $promptPayload = $payload;
         $rawTags = null;
         $contextText = '';
+        $imageRequired = false;
         if ($mode === 'tags_normalize') {
             $rawTags = sv_ollama_fetch_media_tags($pdo, $mediaId);
             if ($rawTags === []) {
@@ -1937,16 +1909,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 throw new RuntimeException('Prompt-Rekonstruktion benötigt mindestens Caption oder Tags.');
             }
         } else {
-            try {
-                $imageData = sv_ollama_load_image_source($pdo, $config, $mediaId, $payload);
-            } catch (Throwable $e) {
-                $imageLoadError = $e;
-                throw $e;
-            }
-            $imageBase64 = $imageData['base64'] ?? null;
-            if (!is_string($imageBase64) || $imageBase64 === '') {
-                throw new RuntimeException('Bilddaten fehlen.');
-            }
+            $imageRequired = true;
         }
 
         $progressBits = 50;
@@ -1957,12 +1920,13 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
         $promptData = sv_ollama_build_prompt($mode, $config, $promptPayload);
         $prompt = $promptData['prompt'];
+        $requestUrl = rtrim((string)($ollamaCfg['base_url'] ?? ''), '/') . '/api/generate';
 
         $options = isset($payload['options']) && is_array($payload['options']) ? $payload['options'] : [];
         if (isset($payload['model']) && is_string($payload['model']) && trim($payload['model']) !== '') {
             $options['model'] = trim($payload['model']);
         }
-        $hasImages = is_string($imageBase64) && $imageBase64 !== '';
+        $hasImages = $imageRequired;
         if (!isset($options['model']) || trim((string)$options['model']) === '') {
             $options['model'] = $hasImages
                 ? ($ollamaCfg['model']['vision'] ?? $ollamaCfg['model_default'])
@@ -1975,6 +1939,59 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
         if (!array_key_exists('deterministic', $options)) {
             $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
+        }
+
+        $traceBase = [
+            'ts' => date('c'),
+            'job_id' => $jobId,
+            'media_id' => $mediaId,
+            'job_type' => $jobType,
+            'mode' => $mode,
+            'attempt' => $traceAttempt,
+            'model' => $options['model'] ?? null,
+            'request_url' => $requestUrl,
+            'request_format' => $ollamaCfg['request_format'] ?? null,
+            'timeout_ms' => $options['timeout_ms'] ?? null,
+            'deterministic' => $options['deterministic'] ?? null,
+            'options' => $options,
+            'prompt_id' => $promptData['prompt_id'] ?? $mode,
+            'template_source' => $promptData['template_source'] ?? null,
+            'prompt' => $prompt,
+            'response_raw_body' => null,
+            'response_text' => null,
+            'response_json' => null,
+            'extracted' => null,
+            'parse_error' => null,
+            'parse_error_detail' => null,
+            'latency_ms' => null,
+            'usage' => null,
+        ];
+
+        $traceFile = sv_ollama_write_trace($config, $traceBase);
+
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'start',
+            'job_id' => $jobId,
+            'media_id' => $mediaId,
+            'job_type' => $jobType,
+            'mode' => $mode,
+            'trace_file' => $traceFile,
+            'response_len' => null,
+            'raw_body_len' => null,
+        ]);
+
+        if ($imageRequired) {
+            try {
+                $imageData = sv_ollama_load_image_source($pdo, $config, $mediaId, $payload);
+            } catch (Throwable $e) {
+                $imageLoadError = $e;
+                throw $e;
+            }
+            $imageBase64 = $imageData['base64'] ?? null;
+            if (!is_string($imageBase64) || $imageBase64 === '') {
+                throw new RuntimeException('Bilddaten fehlen.');
+            }
         }
 
         $progressBits = 150;
@@ -2013,6 +2030,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
         $responseJson = is_array($response['response_json'] ?? null) ? $response['response_json'] : null;
         $responseText = isset($response['response_text']) && is_string($response['response_text']) ? $response['response_text'] : null;
+        $responseRawBody = isset($response['raw_body']) && is_string($response['raw_body']) ? $response['raw_body'] : null;
         $parseError = !empty($response['parse_error']);
         $jsonModes = [
             'caption',
@@ -2023,21 +2041,18 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'prompt_recon',
             'nsfw_classify',
         ];
-        if ($responseJson === null && is_string($responseText) && in_array($mode, $jsonModes, true)) {
-            $jsonChunk = sv_ollama_extract_first_json_object($responseText);
-            if (is_string($jsonChunk)) {
-                $decodedChunk = json_decode($jsonChunk, true);
-                if (is_array($decodedChunk)) {
-                    $responseJson = $decodedChunk;
-                } else {
-                    $parseError = true;
-                }
-            } else {
-                $parseError = true;
+        if ($responseJson === null && in_array($mode, $jsonModes, true)) {
+            if (is_string($responseText)) {
+                $responseJson = sv_ollama_try_extract_json_object($responseText);
+            }
+            if ($responseJson === null && is_string($responseRawBody)) {
+                $responseJson = sv_ollama_try_extract_json_object($responseRawBody);
             }
         }
         if ($responseJson === null) {
             $parseError = true;
+        } else {
+            $parseError = false;
         }
 
         $title = null;
@@ -2118,7 +2133,41 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             }
         }
 
+        if ($responseJson === null) {
+            $fallbackText = $responseText ?? $responseRawBody ?? '';
+            if ($mode === 'title') {
+                $title = sv_ollama_extract_title_fallback($fallbackText);
+            } elseif ($mode === 'caption') {
+                $caption = sv_ollama_extract_caption_fallback($fallbackText);
+            } elseif ($mode === 'prompt_eval') {
+                $score = sv_ollama_extract_score_fallback($fallbackText);
+            }
+        }
+
         $parseErrorDetail = sv_ollama_build_parse_error_detail($response, $responseText);
+
+        $extracted = [
+            'title' => $title,
+            'caption' => $caption,
+            'score' => $score,
+            'tags_normalized_count' => is_array($tagsNormalized) ? count($tagsNormalized) : null,
+            'domain_type' => $domainType,
+            'quality_score' => $qualityScore,
+            'nsfw_score' => $nsfwScore,
+            'prompt' => $promptReconPrompt,
+        ];
+
+        $finalTrace = $traceBase;
+        $finalTrace['trace_file'] = $traceFile;
+        $finalTrace['response_raw_body'] = $responseRawBody;
+        $finalTrace['response_text'] = $responseText;
+        $finalTrace['response_json'] = $responseJson;
+        $finalTrace['extracted'] = $extracted;
+        $finalTrace['parse_error'] = $parseError;
+        $finalTrace['parse_error_detail'] = $parseErrorDetail;
+        $finalTrace['latency_ms'] = $response['latency_ms'] ?? null;
+        $finalTrace['usage'] = $response['usage'] ?? null;
+        $traceFile = sv_ollama_write_trace($config, $finalTrace);
 
         if ($mode === 'tags_normalize') {
             if ($parseError) {
@@ -2212,6 +2261,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'job_type' => $jobType,
             'mode' => $mode,
             'prompt_id' => $promptData['prompt_id'],
+            'template_source' => $promptData['template_source'] ?? null,
             'latency_ms' => $response['latency_ms'] ?? null,
             'usage' => $response['usage'] ?? null,
             'parse_error' => $parseError,
@@ -2355,7 +2405,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'missing' => $missing,
             'rationale' => $mode === 'nsfw_classify' ? $nsfwRationale : $rationale,
             'raw_json' => $rawJson,
-            'raw_text' => $parseError ? $responseText : null,
+            'raw_text' => $responseText,
             'parse_error' => $parseError,
             'created_at' => date('c'),
             'meta' => $metaJson,
@@ -2416,6 +2466,8 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
         $responseLog = $rawJson ? sv_ollama_truncate_for_log($rawJson, 300) : ($responseText ? sv_ollama_truncate_for_log($responseText, 300) : '');
         $promptLog = sv_ollama_truncate_for_log($prompt, 200);
+        $responseLen = is_string($responseText) ? strlen($responseText) : null;
+        $rawBodyLen = is_string($responseRawBody) ? strlen($responseRawBody) : null;
 
         sv_update_job_status($pdo, $jobId, 'done', json_encode([
             'job_type' => $jobType,
@@ -2449,6 +2501,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'response_preview' => $responseLog,
             'model' => $response['model'] ?? $options['model'],
             'parse_error' => $parseError,
+            'trace_file' => $traceFile,
+            'response_len' => $responseLen,
+            'raw_body_len' => $rawBodyLen,
         ]);
 
         return [
@@ -2488,6 +2543,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'mode' => $mode,
                 'attempts' => $attempts,
                 'error' => $errorMessage,
+                'trace_file' => $traceFile,
+                'response_len' => null,
+                'raw_body_len' => null,
             ]);
 
             $logger('Ollama-Job Retry (' . $attempts . '/' . $maxRetries . '): ' . $errorMessage);
@@ -2522,6 +2580,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'job_type' => $jobType,
             'mode' => $mode,
             'error' => $errorMessage,
+            'trace_file' => $traceFile,
+            'response_len' => null,
+            'raw_body_len' => null,
         ]);
 
         sv_ollama_log_jsonl($config, 'ollama_errors.jsonl', [

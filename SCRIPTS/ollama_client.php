@@ -46,6 +46,12 @@ function sv_ollama_config(array $config): array
         'base_url' => isset($ollama['base_url']) && is_string($ollama['base_url']) && trim($ollama['base_url']) !== ''
             ? trim($ollama['base_url'])
             : SV_OLLAMA_DEFAULT_BASE_URL,
+        'prompts_dir' => isset($ollama['prompts_dir']) && is_string($ollama['prompts_dir']) && trim($ollama['prompts_dir']) !== ''
+            ? trim($ollama['prompts_dir'])
+            : null,
+        'request_format' => isset($ollama['request_format']) && is_string($ollama['request_format']) && trim($ollama['request_format']) !== ''
+            ? trim($ollama['request_format'])
+            : null,
         'model_default' => $modelDefault,
         'model' => [
             'default' => isset($model['default']) && is_string($model['default']) && trim($model['default']) !== ''
@@ -63,25 +69,25 @@ function sv_ollama_config(array $config): array
         ],
         'caption_prompt_template' => isset($ollama['caption_prompt_template']) && is_string($ollama['caption_prompt_template']) && trim($ollama['caption_prompt_template']) !== ''
             ? trim($ollama['caption_prompt_template'])
-            : "Beschreibe das Bild in 1-3 Sätzen. Antworte ausschließlich als JSON.\nFormat: {\"caption\":\"...\",\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}",
+            : null,
         'title_prompt_template' => isset($ollama['title_prompt_template']) && is_string($ollama['title_prompt_template']) && trim($ollama['title_prompt_template']) !== ''
             ? trim($ollama['title_prompt_template'])
-            : "Erzeuge einen kurzen, prägnanten Titel (max 80 Zeichen). Antworte ausschließlich als JSON.\nFormat: {\"title\":\"...\",\"rationale\":\"...\"}",
+            : null,
         'prompt_eval_template' => isset($ollama['prompt_eval_template']) && is_string($ollama['prompt_eval_template']) && trim($ollama['prompt_eval_template']) !== ''
             ? trim($ollama['prompt_eval_template'])
-            : "Bewerte, wie gut der folgende Prompt das Bild beschreibt (0-100). Nenne Widersprüche, fehlende Elemente und eine kurze Begründung. Antworte ausschließlich als JSON.\nFormat: {\"score\":0,\"contradictions\":[],\"missing\":[],\"rationale\":\"...\"}\nPrompt: {{prompt}}",
+            : null,
         'tags_normalize_template' => isset($ollama['tags_normalize_template']) && is_string($ollama['tags_normalize_template']) && trim($ollama['tags_normalize_template']) !== ''
             ? trim($ollama['tags_normalize_template'])
-            : "Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Antworte ausschließlich als JSON.\nFormat: {\"tags_normalized\":[],\"tags_map\":[{\"raw\":\"\",\"normalized\":\"\",\"confidence\":0.0,\"type\":\"\"}],\"rationale\":\"...\"}\nTags: {{tags}}\nKontext: {{context}}",
+            : null,
         'quality_template' => isset($ollama['quality_template']) && is_string($ollama['quality_template']) && trim($ollama['quality_template']) !== ''
             ? trim($ollama['quality_template'])
-            : "Bewerte die technische Bildqualität (0-100) und klassifiziere die Domäne. Antworte ausschließlich als JSON.\nFormat: {\"quality_score\":0,\"quality_flags\":[],\"domain_type\":\"other\",\"domain_confidence\":0.0,\"rationale\":\"...\"}",
+            : null,
         'prompt_recon_template' => isset($ollama['prompt_recon_template']) && is_string($ollama['prompt_recon_template']) && trim($ollama['prompt_recon_template']) !== ''
             ? trim($ollama['prompt_recon_template'])
-            : "Rekonstruiere den wahrscheinlichsten Prompt aus den Metadaten. Antworte ausschließlich als JSON.\nFormat: {\"prompt\":\"...\",\"negative_prompt\":\"...\",\"confidence\":0.0,\"style_tokens\":[],\"subject_tokens\":[],\"rationale\":\"...\"}\nCaption: {{caption}}\nTitle: {{title}}\nTags: {{tags_normalized}}\nDomain: {{domain_type}}\nQuality flags: {{quality_flags}}\nOriginal prompt: {{original_prompt}}",
+            : null,
         'nsfw_classify_template' => isset($ollama['nsfw_classify_template']) && is_string($ollama['nsfw_classify_template']) && trim($ollama['nsfw_classify_template']) !== ''
             ? trim($ollama['nsfw_classify_template'])
-            : "Klassifiziere das Medium auf NSFW-Risiko. Gib keine expliziten Details wieder. Antworte ausschließlich als JSON.\nFormat: {\"nsfw_score\":0.0,\"nsfw_flags\":[],\"category\":\"safe\",\"rationale_short\":\"...\"}",
+            : null,
         'timeout_ms' => isset($ollama['timeout_ms']) ? max(1000, (int)$ollama['timeout_ms']) : 20000,
         'timeout_ms_text' => isset($ollama['timeout_ms_text']) ? max(1000, (int)$ollama['timeout_ms_text']) : 90000,
         'timeout_ms_vision' => isset($ollama['timeout_ms_vision']) ? max(1000, (int)$ollama['timeout_ms_vision']) : 180000,
@@ -239,7 +245,6 @@ function sv_ollama_request(array $config, array $input, array $options): array
 
     $payloadOptions = [
         'model' => $model,
-        'format' => 'json',
     ];
 
     if (isset($options['temperature'])) {
@@ -265,10 +270,12 @@ function sv_ollama_request(array $config, array $input, array $options): array
     $requestPayload = [
         'model' => $model,
         'prompt' => $prompt,
-        'format' => 'json',
         'stream' => false,
         'options' => $payloadOptions,
     ];
+    if (($cfg['request_format'] ?? null) === 'json') {
+        $requestPayload['format'] = 'json';
+    }
     if (is_array($images) && $images !== []) {
         $requestPayload['images'] = $images;
     }

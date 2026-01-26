@@ -1,0 +1,1 @@
+Erzeuge einen kurzen, prägnanten Titel (max 80 Zeichen). Gib nur das JSON-Objekt aus. Keine zusätzlichen Keys. Keine Codeblöcke. Format: {"title":"...","rationale":"..."}
