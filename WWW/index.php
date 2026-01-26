@@ -712,7 +712,34 @@ function sv_badge_class(string $status): string
                 <input type="number" name="keep_last" min="0" step="1" placeholder="Keep last" value="0">
                 <button type="submit" class="btn btn--xs btn--ghost">Prune finished</button>
             </form>
+            <div class="panel" data-jobs-prune data-endpoint="jobs_prune.php">
+                <div class="action-feedback" data-jobs-prune-message>
+                    <div class="action-feedback-title">Bereit</div>
+                    <div>Scan-Jobs gesammelt löschen.</div>
+                </div>
+                <div class="form-grid">
+                    <button class="btn btn--danger" type="button" data-jobs-prune-button data-group="scan" data-status="done,error,cancelled" data-confirm="Alle done/error/cancelled Scan-Jobs löschen?">Delete done + error</button>
+                    <button class="btn btn--secondary" type="button" data-jobs-prune-button data-group="scan" data-status="queued,pending" data-confirm="Alle queued/pending Scan-Jobs löschen?">Purge queue</button>
+                    <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="scan" data-status="running" data-force="1" data-confirm="Running Scan-Jobs forcieren (cancel + delete)?">Force clear running</button>
+                </div>
+            </div>
             <div class="muted">Cancel/Delete nur für scanbezogene Jobs, Delete/Prune nur in done/error/canceled.</div>
+        </section>
+
+        <section id="importscan-jobs" class="card" data-jobs-prune data-endpoint="jobs_prune.php">
+            <h2 class="section-title">Importscan-Jobs</h2>
+            <div class="action-feedback" data-jobs-prune-message>
+                <div class="action-feedback-title">Bereit</div>
+                <div>Importscan-Jobs gesammelt löschen.</div>
+            </div>
+            <div class="form-grid">
+                <button class="btn btn--danger" type="button" data-jobs-prune-button data-group="importscan" data-status="done,error,cancelled" data-confirm="Alle done/error/cancelled Importscan-Jobs löschen?">Delete done + error</button>
+                <button class="btn btn--secondary" type="button" data-jobs-prune-button data-group="importscan" data-status="queued,pending" data-confirm="Alle queued/pending Importscan-Jobs löschen?">Purge queue</button>
+                <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="importscan" data-status="running" data-force="1" data-confirm="Running Importscan-Jobs forcieren (cancel + delete)?">Force clear running</button>
+            </div>
+            <?php if (!$hasInternalAccess): ?>
+                <div class="muted">Aktionen erfordern Internal-Key + IP-Whitelist.</div>
+            <?php endif; ?>
         </section>
 
         <section id="job-center" class="card">
