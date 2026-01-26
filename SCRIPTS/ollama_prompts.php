@@ -2,39 +2,52 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/common.php';
-require_once __DIR__ . '/ollama_client.php';
+require_once __DIR__ . '/ollama_prompt_loader.php';
 
 function sv_ollama_prompt_definitions(array $config): array
 {
-    $ollamaCfg = sv_ollama_config($config);
+    $captionPrompt = sv_ollama_prompt_template('caption', $config);
+    $titlePrompt = sv_ollama_prompt_template('title', $config);
+    $promptEvalPrompt = sv_ollama_prompt_template('prompt_eval', $config);
+    $tagsNormalizePrompt = sv_ollama_prompt_template('tags_normalize', $config);
+    $qualityPrompt = sv_ollama_prompt_template('quality', $config);
+    $promptReconPrompt = sv_ollama_prompt_template('prompt_recon', $config);
+    $nsfwPrompt = sv_ollama_prompt_template('nsfw_classify', $config);
 
     return [
         'caption' => [
-            'prompt' => $ollamaCfg['caption_prompt_template'],
+            'prompt' => $captionPrompt['prompt'],
+            'template_source' => $captionPrompt['template_source'],
             'output_key' => 'caption',
         ],
         'title' => [
-            'prompt' => $ollamaCfg['title_prompt_template'],
+            'prompt' => $titlePrompt['prompt'],
+            'template_source' => $titlePrompt['template_source'],
             'output_key' => 'title',
         ],
         'prompt_eval' => [
-            'prompt' => $ollamaCfg['prompt_eval_template'],
+            'prompt' => $promptEvalPrompt['prompt'],
+            'template_source' => $promptEvalPrompt['template_source'],
             'output_key' => 'score',
         ],
         'tags_normalize' => [
-            'prompt' => $ollamaCfg['tags_normalize_template'],
+            'prompt' => $tagsNormalizePrompt['prompt'],
+            'template_source' => $tagsNormalizePrompt['template_source'],
             'output_key' => 'tags_normalized',
         ],
         'quality' => [
-            'prompt' => $ollamaCfg['quality_template'],
+            'prompt' => $qualityPrompt['prompt'],
+            'template_source' => $qualityPrompt['template_source'],
             'output_key' => 'quality_score',
         ],
         'prompt_recon' => [
-            'prompt' => $ollamaCfg['prompt_recon_template'],
+            'prompt' => $promptReconPrompt['prompt'],
+            'template_source' => $promptReconPrompt['template_source'],
             'output_key' => 'prompt',
         ],
         'nsfw_classify' => [
-            'prompt' => $ollamaCfg['nsfw_classify_template'],
+            'prompt' => $nsfwPrompt['prompt'],
+            'template_source' => $nsfwPrompt['template_source'],
             'output_key' => 'nsfw_score',
         ],
     ];
@@ -125,6 +138,7 @@ function sv_ollama_build_prompt(string $mode, array $config, array $payload = []
         'prompt_id' => $mode,
         'prompt' => $prompt,
         'template' => $templatePrompt,
+        'template_source' => $definitions[$mode]['template_source'] ?? null,
         'output_key' => $definitions[$mode]['output_key'],
     ];
 }

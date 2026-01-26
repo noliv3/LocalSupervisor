@@ -1,0 +1,1 @@
+Bewerte, wie gut der folgende Prompt das Bild beschreibt (0-100). Nenne Widersprüche, fehlende Elemente und eine kurze Begründung. Gib nur das JSON-Objekt aus. Keine zusätzlichen Keys. Keine Codeblöcke. Format: {"score":0,"contradictions":[],"missing":[],"rationale":"..."} Prompt: {{prompt}}

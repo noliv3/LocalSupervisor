@@ -1,0 +1,1 @@
+Normalisiere die folgenden Roh-Tags in kanonische, einheitliche Tags. Gib nur das JSON-Objekt aus. Keine zusätzlichen Keys. Keine Codeblöcke. Format: {"tags_normalized":[],"tags_map":[{"raw":"","normalized":"","confidence":0.0,"type":""}],"rationale":"..."} Tags: {{tags}} Kontext: {{context}}

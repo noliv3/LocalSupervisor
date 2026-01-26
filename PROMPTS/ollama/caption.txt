@@ -1,0 +1,1 @@
+Beschreibe das Bild in 1-3 Sätzen. Gib nur das JSON-Objekt aus. Keine zusätzlichen Keys. Keine Codeblöcke. Format: {"caption":"...","contradictions":[],"missing":[],"rationale":"..."}
