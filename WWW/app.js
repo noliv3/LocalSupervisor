@@ -129,6 +129,69 @@
         });
     }
 
+    function initPromptApply() {
+        document.querySelectorAll('[data-prompt-apply]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const promptTargetId = button.dataset.promptTarget || '';
+                const negativeTargetId = button.dataset.negativeTarget || '';
+                const promptValue = button.dataset.promptValue || '';
+                const negativeValue = button.dataset.negativeValue || '';
+                const promptTarget = promptTargetId ? document.getElementById(promptTargetId) : null;
+                const negativeTarget = negativeTargetId ? document.getElementById(negativeTargetId) : null;
+                if (promptTarget) {
+                    promptTarget.value = promptValue;
+                    promptTarget.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                if (negativeTarget) {
+                    negativeTarget.value = negativeValue;
+                    negativeTarget.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                if (promptTarget) {
+                    promptTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            });
+        });
+    }
+
+    function initPreviewControls() {
+        const preview = document.querySelector('.full-preview');
+        if (!preview) return;
+        const lightbox = document.getElementById('fullscreen-viewer');
+        let zoom = 1;
+
+        function setZoom(value) {
+            zoom = Math.min(3, Math.max(0.5, value));
+            preview.style.transform = `scale(${zoom})`;
+            preview.classList.toggle('is-zoomed', zoom !== 1);
+        }
+
+        function setMode(mode) {
+            preview.classList.toggle('preview-actual', mode === 'actual');
+            preview.classList.toggle('preview-fit', mode === 'fit');
+            preview.style.transform = '';
+            zoom = 1;
+        }
+
+        document.querySelectorAll('[data-preview-action]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const action = btn.dataset.previewAction || '';
+                if (action === 'fit') {
+                    setMode('fit');
+                } else if (action === 'actual') {
+                    setMode('actual');
+                } else if (action === 'zoom-in') {
+                    setZoom(zoom + 0.2);
+                } else if (action === 'zoom-out') {
+                    setZoom(zoom - 0.2);
+                } else if (action === 'fullscreen' && lightbox) {
+                    lightbox.classList.remove('is-hidden');
+                }
+            });
+        });
+
+        setMode('fit');
+    }
+
     function initVideoTools() {
         document.querySelectorAll('[data-video-tool]').forEach((tool) => {
             const video = tool.querySelector('video');
@@ -1457,6 +1520,8 @@
         initTagActions();
         initLightbox();
         initManualPromptIndicators();
+        initPromptApply();
+        initPreviewControls();
         initVideoTools();
         initForgeJobs();
         initForgeRepair();

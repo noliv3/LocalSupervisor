@@ -26,7 +26,7 @@ if (!in_array($method, ['GET', 'HEAD', 'POST'], true)) {
 }
 if ($method === 'POST' && !$hasInternalAccess) {
     $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    if ($action !== 'vote_up') {
+    if ($action !== 'vote_set') {
         sv_security_error(403, 'Forbidden.');
     }
 }
@@ -52,23 +52,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new RuntimeException('Ungültige Media-ID.');
         }
 
-        if ($action === 'vote_up') {
-            $voteValue = 1;
-            sv_set_media_meta_value($pdo, $mediaId, 'vote.state', $voteValue);
-            sv_audit_log($pdo, 'vote_set', 'media', $mediaId, [
-                'state' => $voteValue,
+        if ($action === 'vote_set') {
+            $allowedVotes = ['neutral', 'approved', 'rejected'];
+            $requestedVote = sv_normalize_enum($_POST['vote_status'] ?? null, $allowedVotes, 'neutral');
+            $voteStmt = $pdo->prepare('SELECT status_vote FROM media WHERE id = ?');
+            $voteStmt->execute([$mediaId]);
+            $currentVote = (string)($voteStmt->fetchColumn() ?? 'neutral');
+            if (!in_array($currentVote, $allowedVotes, true)) {
+                $currentVote = 'neutral';
+            }
+            $nextVote = $requestedVote === $currentVote ? 'neutral' : $requestedVote;
+            $updateVote = $pdo->prepare('UPDATE media SET status_vote = :vote WHERE id = :id');
+            $updateVote->execute([
+                ':vote' => $nextVote,
+                ':id'   => $mediaId,
             ]);
-            $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
+            sv_audit_log($pdo, 'vote_set', 'media', $mediaId, [
+                'vote'     => $nextVote,
+                'previous' => $currentVote,
+            ]);
+            $actionMessage = 'Vote gesetzt: ' . $nextVote . '.';
         } else {
             sv_require_internal_access($config, 'mediadb_action');
-            if ($action === 'vote_down') {
-                $voteValue = -1;
-                sv_set_media_meta_value($pdo, $mediaId, 'vote.state', $voteValue);
-                sv_audit_log($pdo, 'vote_set', 'media', $mediaId, [
-                    'state' => $voteValue,
-                ]);
-                $actionMessage = $voteValue > 0 ? 'Vote gesetzt: up.' : 'Vote gesetzt: down.';
-            } elseif ($action === 'checked_toggle') {
+            if ($action === 'checked_toggle') {
             $checkedValue = isset($_POST['checked_value']) && (string)$_POST['checked_value'] === '1' ? 1 : 0;
             sv_set_media_meta_value($pdo, $mediaId, 'curation.checked', $checkedValue);
             if ($checkedValue === 1) {
@@ -204,8 +210,20 @@ function sv_extract_scan_info($rawJson): array
     ];
 }
 
-$showAdult = sv_normalize_adult_flag($_GET);
-$showAdult = $showAdult && $hasInternalAccess;
+$adultParamPresent = array_key_exists('adult', $_GET) || array_key_exists('18', $_GET);
+$adultParamValue = $adultParamPresent ? sv_normalize_adult_flag($_GET) : null;
+if ($adultParamPresent) {
+    $cookieValue = $adultParamValue ? '1' : '0';
+    setcookie('sv_show_adult', $cookieValue, [
+        'expires' => time() + 60 * 60 * 24 * 180,
+        'path'    => '/',
+        'samesite'=> 'Lax',
+    ]);
+    $_COOKIE['sv_show_adult'] = $cookieValue;
+}
+$showAdult = $adultParamPresent
+    ? (bool)$adultParamValue
+    : ((string)($_COOKIE['sv_show_adult'] ?? '0') === '1');
 $viewMode  = (isset($_GET['view']) && $_GET['view'] === 'list') ? 'list' : 'grid';
 
 $page    = sv_clamp_int((int)($_GET['p'] ?? 1), 1, 10000, 1);
@@ -222,39 +240,53 @@ $typeFilter       = $_GET['type'] ?? 'all';
 $hasPromptFilter  = $_GET['has_prompt'] ?? 'all';
 $hasMetaFilter    = $_GET['has_meta'] ?? 'all';
 $pathFilter       = sv_limit_string((string)($_GET['q'] ?? ''), 200);
+$qScope           = $_GET['q_scope'] ?? 'any';
 $statusFilter     = $_GET['status'] ?? 'all';
 $minRating        = (int)($_GET['min_rating'] ?? 0);
 $incompleteFilter = $_GET['incomplete'] ?? 'none';
 $promptQualityFilter = $_GET['prompt_quality'] ?? 'all';
 $curationFilter   = $_GET['curation'] ?? 'all';
-$voteFilter       = $_GET['vote'] ?? 'any';
+$voteFilter       = $_GET['vote'] ?? 'all';
 $checkedFilter    = $_GET['checked'] ?? 'any';
 $lowActivityFilter = $_GET['low_activity'] ?? 'all';
+$activeFilter     = $_GET['active'] ?? 'active';
+$deletedFilter    = $_GET['deleted'] ?? 'exclude_deleted';
+$aiTitleFilter    = $_GET['ai_title'] ?? 'all';
+$aiCaptionFilter  = $_GET['ai_caption'] ?? 'all';
 
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
 $allowedMeta      = ['all', 'with', 'without'];
 $allowedStatus    = ['all', 'active', 'archived', 'deleted', 'missing', 'deleted_logical'];
+$allowedScope     = ['any', 'path', 'title', 'caption', 'prompt'];
 $allowedIncomplete= ['none', 'prompt', 'tags', 'meta', 'any'];
 $allowedQuality   = array_merge(['all'], sv_prompt_quality_values());
 $allowedCuration  = array_merge(['all'], sv_quality_status_values());
-$allowedVote      = ['any', 'up', 'down'];
+$allowedVote      = ['all', 'neutral', 'approved', 'rejected'];
 $allowedChecked   = ['any', 'checked', 'unchecked'];
 $allowedLowActivity = ['all', 'low'];
+$allowedActive    = ['all', 'active', 'inactive'];
+$allowedDeleted   = ['exclude_deleted', 'only_deleted', 'all'];
+$allowedAi        = ['all', 'with', 'without'];
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
 $hasPromptFilter  = sv_normalize_enum($hasPromptFilter, $allowedPrompt, 'all');
 $hasMetaFilter    = sv_normalize_enum($hasMetaFilter, $allowedMeta, 'all');
+$qScope           = sv_normalize_enum($qScope, $allowedScope, 'any');
 $statusFilter     = sv_normalize_enum($statusFilter, $allowedStatus, 'all');
 $minRating        = sv_clamp_int($minRating, 0, 3, 0);
 $incompleteFilter = sv_normalize_enum($incompleteFilter, $allowedIncomplete, 'none');
 $promptQualityFilter = sv_normalize_enum($promptQualityFilter, $allowedQuality, 'all');
 $curationFilter   = sv_normalize_enum($curationFilter, $allowedCuration, 'all');
-$voteFilter       = sv_normalize_enum($voteFilter, $allowedVote, 'any');
+$voteFilter       = sv_normalize_enum($voteFilter, $allowedVote, 'all');
 $checkedFilter    = sv_normalize_enum($checkedFilter, $allowedChecked, 'any');
 $lowActivityFilter = sv_normalize_enum($lowActivityFilter, $allowedLowActivity, 'all');
+$activeFilter     = sv_normalize_enum($activeFilter, $allowedActive, 'active');
+$deletedFilter    = sv_normalize_enum($deletedFilter, $allowedDeleted, 'exclude_deleted');
+$aiTitleFilter    = sv_normalize_enum($aiTitleFilter, $allowedAi, 'all');
+$aiCaptionFilter  = sv_normalize_enum($aiCaptionFilter, $allowedAi, 'all');
 
 if (!$hasInternalAccess) {
-    $voteFilter = 'any';
+    $voteFilter = 'all';
     $checkedFilter = 'any';
     $lowActivityFilter = 'all';
 }
@@ -269,7 +301,8 @@ $activityClicksSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mm WHE
 $activityLastSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mm WHERE mm.media_id = m.id AND mm.meta_key = 'activity.last_click_at' ORDER BY mm.id DESC LIMIT 1)";
 $activityBaseSql = "COALESCE($activityLastSql, CAST(strftime('%s', m.created_at) AS INTEGER), 0)";
 $activityScoreSql = "COALESCE($activityClicksSql, 0) - CAST((:activity_now - $activityBaseSql) / 86400 AS INTEGER)";
-$voteStateSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mmv WHERE mmv.media_id = m.id AND mmv.meta_key = 'vote.state' ORDER BY mmv.id DESC LIMIT 1)";
+$ollamaTitleSql = "(SELECT meta_value FROM media_meta mmt WHERE mmt.media_id = m.id AND mmt.meta_key = 'ollama.title' ORDER BY mmt.id DESC LIMIT 1)";
+$ollamaCaptionSql = "(SELECT meta_value FROM media_meta mmc WHERE mmc.media_id = m.id AND mmc.meta_key = 'ollama.caption' ORDER BY mmc.id DESC LIMIT 1)";
 $checkedStateSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mmc WHERE mmc.media_id = m.id AND mmc.meta_key = 'curation.checked' ORDER BY mmc.id DESC LIMIT 1)";
 
 if (!$showAdult) {
@@ -282,8 +315,21 @@ if ($typeFilter !== 'all') {
 }
 
 if ($pathFilter !== '') {
-    $where[]           = 'm.path LIKE :path';
     $params[':path'] = '%' . $pathFilter . '%';
+    if ($qScope === 'path') {
+        $where[] = 'm.path LIKE :path';
+    } elseif ($qScope === 'title') {
+        $where[] = $ollamaTitleSql . ' LIKE :path';
+    } elseif ($qScope === 'caption') {
+        $where[] = $ollamaCaptionSql . ' LIKE :path';
+    } elseif ($qScope === 'prompt') {
+        $where[] = 'p.prompt LIKE :path';
+    } else {
+        $where[] = '(m.path LIKE :path OR '
+            . $ollamaTitleSql . ' LIKE :path OR '
+            . $ollamaCaptionSql . ' LIKE :path OR '
+            . 'p.prompt LIKE :path)';
+    }
 }
 
 if ($statusFilter !== 'all') {
@@ -305,14 +351,34 @@ if ($minRating > 0) {
     $params[':minRating'] = $minRating;
 }
 
-if ($hasInternalAccess) {
-    $voteStateExpr = 'COALESCE(' . $voteStateSql . ', 0)';
-    if ($voteFilter === 'up') {
-        $where[] = $voteStateExpr . ' = 1';
-    } elseif ($voteFilter === 'down') {
-        $where[] = $voteStateExpr . ' = -1';
-    }
+if ($activeFilter !== 'all') {
+    $where[] = 'm.is_active = :is_active';
+    $params[':is_active'] = $activeFilter === 'active' ? 1 : 0;
+}
 
+if ($deletedFilter === 'exclude_deleted') {
+    $where[] = 'COALESCE(m.is_deleted, 0) = 0';
+} elseif ($deletedFilter === 'only_deleted') {
+    $where[] = 'COALESCE(m.is_deleted, 0) = 1';
+}
+
+if ($voteFilter !== 'all') {
+    $where[] = 'COALESCE(m.status_vote, :vote_default) = :vote_status';
+    $params[':vote_default'] = 'neutral';
+    $params[':vote_status'] = $voteFilter;
+}
+
+if ($aiTitleFilter !== 'all') {
+    $titleExpr = 'COALESCE(TRIM(' . $ollamaTitleSql . '), \'\')';
+    $where[] = $aiTitleFilter === 'with' ? ($titleExpr . " <> ''") : ($titleExpr . " = ''");
+}
+
+if ($aiCaptionFilter !== 'all') {
+    $captionExpr = 'COALESCE(TRIM(' . $ollamaCaptionSql . '), \'\')';
+    $where[] = $aiCaptionFilter === 'with' ? ($captionExpr . " <> ''") : ($captionExpr . " = ''");
+}
+
+if ($hasInternalAccess) {
     $checkedStateExpr = 'COALESCE(' . $checkedStateSql . ', 0)';
     if ($checkedFilter === 'checked') {
         $where[] = $checkedStateExpr . ' = 1';
@@ -379,7 +445,9 @@ $activitySelectCols = "
            COALESCE($activityClicksSql, 0) AS activity_clicks,
            COALESCE($activityLastSql, 0) AS activity_last_click_at,
            ($activityScoreSql) AS activity_score,
-           COALESCE($voteStateSql, 0) AS vote_state,
+           COALESCE(m.status_vote, 'neutral') AS vote_state,
+           COALESCE(m.is_active, 1) AS is_active,
+           COALESCE(m.is_deleted, 0) AS is_deleted,
            COALESCE($checkedStateSql, 0) AS checked_flag,
 ";
 $baseSelectCols = "m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifecycle_status, m.quality_status, m.hash,
@@ -387,6 +455,8 @@ $baseSelectCols = "m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifec
            $latestScanCols
            $activitySelectCols
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
+           $ollamaTitleSql AS ollama_title,
+           $ollamaCaptionSql AS ollama_caption,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND $promptCompleteClause) AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
@@ -524,6 +594,7 @@ $queryParams = [
     'has_prompt'     => $hasPromptFilter,
     'has_meta'       => $hasMetaFilter,
     'q'              => $pathFilter,
+    'q_scope'        => $qScope,
     'status'         => $statusFilter,
     'curation'       => $curationFilter,
     'min_rating'     => $minRating,
@@ -531,6 +602,10 @@ $queryParams = [
     'vote'           => $voteFilter,
     'checked'        => $checkedFilter,
     'low_activity'   => $lowActivityFilter,
+    'active'         => $activeFilter,
+    'deleted'        => $deletedFilter,
+    'ai_title'       => $aiTitleFilter,
+    'ai_caption'     => $aiCaptionFilter,
     'issues'         => $issueFilter ? '1' : '0',
     'prompt_quality' => $promptQualityFilter,
     'adult'          => $showAdult ? '1' : '0',
@@ -648,6 +723,12 @@ function sv_render_media_card(array $row, array $context): void
     $lastScanError = $scanInfo['error'] ?? null;
     $scanTagsWritten = $scanInfo['tags_written'] ?? null;
     $promptModel = sv_limit_string((string)($row['prompt_model'] ?? ''), 120);
+    $ollamaTitle = trim((string)($row['ollama_title'] ?? ''));
+    $ollamaCaption = trim((string)($row['ollama_caption'] ?? ''));
+    $rawTitle = pathinfo($pathLabel, PATHINFO_FILENAME);
+    $prettyTitle = trim((string)preg_replace('~[\\._-]+~', ' ', (string)$rawTitle));
+    $filenameTitle = $prettyTitle !== '' ? $prettyTitle : $rawTitle;
+    $displayTitle = $ollamaTitle !== '' ? $ollamaTitle : $filenameTitle;
 
     $qualityData = $row['quality'] ?? sv_prompt_quality_from_text(
         $row['prompt_text'] ?? null,
@@ -668,6 +749,11 @@ function sv_render_media_card(array $row, array $context): void
     }
     if ($status !== '' && $status !== 'active') {
         $statusVariant = 'bad';
+    }
+    if ($isDeleted) {
+        $statusVariant = 'bad';
+    } elseif (!$isActive) {
+        $statusVariant = 'warn';
     }
     if ($qualityStatus === SV_QUALITY_BLOCKED) {
         $statusVariant = 'bad';
@@ -698,7 +784,12 @@ function sv_render_media_card(array $row, array $context): void
     }
     $duration = $type === 'video' && isset($row['duration']) ? (float)$row['duration'] : null;
 
-    $voteState = (int)($row['vote_state'] ?? 0);
+    $voteState = (string)($row['vote_state'] ?? 'neutral');
+    if (!in_array($voteState, ['neutral', 'approved', 'rejected'], true)) {
+        $voteState = 'neutral';
+    }
+    $isActive = (int)($row['is_active'] ?? 1) === 1;
+    $isDeleted = (int)($row['is_deleted'] ?? 0) === 1;
     $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
     $activityScore = (int)($row['activity_score'] ?? 0);
     $hasInternalAccess = !empty($context['hasInternalAccess']);
@@ -717,6 +808,12 @@ function sv_render_media_card(array $row, array $context): void
             <?php endif; ?>
             <?php if ($hasNsfw): ?>
                 <span class="pill pill-nsfw">FSK18</span>
+            <?php endif; ?>
+            <?php if ($isDeleted): ?>
+                <span class="pill pill-bad">Gelöscht</span>
+            <?php endif; ?>
+            <?php if (!$isActive): ?>
+                <span class="pill pill-muted">Inaktiv</span>
             <?php endif; ?>
             <?php if ($status !== '' && $status !== 'active'): ?>
                 <span class="pill pill-bad">Status <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -756,6 +853,20 @@ function sv_render_media_card(array $row, array $context): void
         </div>
 
         <div class="card-info">
+            <div class="card-title" title="<?= htmlspecialchars($displayTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                <?= htmlspecialchars($displayTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+            </div>
+            <div class="card-caption <?= $ollamaCaption === '' ? 'muted' : '' ?>">
+                <?= $ollamaCaption !== '' ? htmlspecialchars($ollamaCaption, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'Keine Caption' ?>
+            </div>
+            <div class="card-status">
+                <span class="status-chip <?= $voteState === 'approved' ? 'chip-ok' : ($voteState === 'rejected' ? 'chip-bad' : 'chip-neutral') ?>">
+                    Vote <?= htmlspecialchars($voteState, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                </span>
+                <span class="status-chip <?= $isActive ? 'chip-ok' : 'chip-muted' ?>"><?= $isActive ? 'Aktiv' : 'Inaktiv' ?></span>
+                <?php if ($hasNsfw): ?><span class="status-chip chip-nsfw">FSK18</span><?php endif; ?>
+                <?php if ($lastScanError): ?><span class="status-chip chip-bad">Parse-Error</span><?php endif; ?>
+            </div>
             <div class="info-line">
                 <span class="info-chip"><?= $type === 'video' ? 'Video' : 'Bild' ?></span>
                 <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
@@ -770,7 +881,6 @@ function sv_render_media_card(array $row, array $context): void
                 <?php if (!$hasPrompt): ?><span class="info-chip">Kein Prompt</span><?php endif; ?>
                 <?php if ($scanStale): ?><span class="info-chip chip-warn" title="Scanner nicht erreichbar, Daten veraltet">Scan veraltet</span><?php endif; ?>
                 <?php if ($hasInternalAccess): ?>
-                    <span class="info-chip">Vote <?= $voteState ?></span>
                     <span class="info-chip"><?= $checkedFlag ? 'Geprüft' : 'Offen' ?></span>
                     <span class="info-chip">Score <?= $activityScore ?></span>
                 <?php endif; ?>
@@ -787,9 +897,10 @@ function sv_render_media_card(array $row, array $context): void
             <div class="card-actions">
                 <a class="btn btn--primary btn--sm" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
                 <form method="post" class="inline-form">
-                    <input type="hidden" name="action" value="vote_up">
+                    <input type="hidden" name="action" value="vote_set">
                     <input type="hidden" name="media_id" value="<?= $id ?>">
-                    <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
+                    <input type="hidden" name="vote_status" value="approved">
+                    <button class="btn btn--icon <?= $voteState === 'approved' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Approve" title="Approve"><?= $iconUp ?></button>
                 </form>
                 <?php if ($hasInternalAccess): ?>
                     <form method="post" class="inline-form">
@@ -798,9 +909,10 @@ function sv_render_media_card(array $row, array $context): void
                         <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
                     </form>
                     <form method="post" class="inline-form">
-                        <input type="hidden" name="action" value="vote_down">
+                        <input type="hidden" name="action" value="vote_set">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
-                        <button class="btn btn--icon <?= $voteState === -1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote runter" title="Vote runter"><?= $iconDown ?></button>
+                        <input type="hidden" name="vote_status" value="rejected">
+                        <button class="btn btn--icon <?= $voteState === 'rejected' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Reject" title="Reject"><?= $iconDown ?></button>
                     </form>
                     <form method="post" class="inline-form">
                         <input type="hidden" name="action" value="checked_toggle">
@@ -821,7 +933,15 @@ $promptQualityLabels = sv_prompt_quality_labels();
 
 $filterChips = [];
 if ($pathFilter !== '') {
-    $filterChips[] = 'Suche: ' . sv_limit_string($pathFilter, 32);
+    $scopeLabels = [
+        'any' => 'any',
+        'path' => 'Pfad',
+        'title' => 'Titel',
+        'caption' => 'Caption',
+        'prompt' => 'Prompt',
+    ];
+    $scopeLabel = $scopeLabels[$qScope] ?? $qScope;
+    $filterChips[] = 'Suche: ' . sv_limit_string($pathFilter, 32) . ' (' . $scopeLabel . ')';
 }
 if ($typeFilter !== 'all') {
     $filterChips[] = $typeFilter === 'video' ? 'Typ: Video' : 'Typ: Bild';
@@ -867,8 +987,8 @@ if ($dupeFilter) {
     $filterChips[] = $dupeHashFilter !== '' ? 'Dupe: ' . $dupeHashFilter : 'Dupes';
 }
 if ($hasInternalAccess) {
-    if ($voteFilter !== 'any') {
-        $filterChips[] = $voteFilter === 'up' ? 'Vote: up' : 'Vote: down';
+    if ($voteFilter !== 'all') {
+        $filterChips[] = 'Vote: ' . $voteFilter;
     }
     if ($checkedFilter !== 'any') {
         $filterChips[] = $checkedFilter === 'checked' ? 'Geprüft' : 'Offen';
@@ -877,10 +997,28 @@ if ($hasInternalAccess) {
         $filterChips[] = 'Niedrige Aktivität';
     }
 }
+if ($activeFilter !== 'all') {
+    $filterChips[] = $activeFilter === 'active' ? 'Aktiv' : 'Inaktiv';
+}
+if ($deletedFilter !== 'exclude_deleted') {
+    $filterChips[] = $deletedFilter === 'only_deleted' ? 'Nur gelöscht' : 'Deleted inkl.';
+}
+if ($aiTitleFilter !== 'all') {
+    $filterChips[] = $aiTitleFilter === 'with' ? 'AI Title: ja' : 'AI Title: nein';
+}
+if ($aiCaptionFilter !== 'all') {
+    $filterChips[] = $aiCaptionFilter === 'with' ? 'AI Caption: ja' : 'AI Caption: nein';
+}
 
 $filtersOpen = $filterChips !== [];
 ?>
-<?php sv_ui_header('Medien', 'medien'); ?>
+<?php
+$adultToggleHtml = '<div class="header-toggle">'
+    . '<a class="toggle-link' . ($showAdult ? '' : ' is-active') . '" href="mediadb.php?' . htmlspecialchars(http_build_query(array_merge($paginationBase, ['adult' => '0', 'p' => 1])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">Adult aus</a>'
+    . '<a class="toggle-link' . ($showAdult ? ' is-active' : '') . '" href="mediadb.php?' . htmlspecialchars(http_build_query(array_merge($paginationBase, ['adult' => '1', 'p' => 1])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">Adult an</a>'
+    . '</div>';
+?>
+<?php sv_ui_header('Medien', 'medien', $adultToggleHtml); ?>
 <div class="page-header">
     <div>
         <h1 class="page-title">Medien</h1>
@@ -894,15 +1032,16 @@ $filtersOpen = $filterChips !== [];
                 <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
             <?php endforeach; ?>
             <input type="hidden" name="p" value="1">
+            <select name="q_scope" aria-label="Suchbereich">
+                <option value="any" <?= $qScope === 'any' ? 'selected' : '' ?>>Any</option>
+                <option value="path" <?= $qScope === 'path' ? 'selected' : '' ?>>Pfad</option>
+                <option value="title" <?= $qScope === 'title' ? 'selected' : '' ?>>Titel</option>
+                <option value="caption" <?= $qScope === 'caption' ? 'selected' : '' ?>>Caption</option>
+                <option value="prompt" <?= $qScope === 'prompt' ? 'selected' : '' ?>>Prompt</option>
+            </select>
             <input type="text" name="q" value="<?= htmlspecialchars($pathFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Pfad oder Name" aria-label="Pfad oder Name">
             <button type="submit" class="btn btn--secondary btn--sm">Suche</button>
         </form>
-        <?php if ($hasInternalAccess): ?>
-            <div class="fsk-toggle">
-                <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '0', 'p' => 1])) ?>" class="<?= $showAdult ? '' : 'active' ?>">FSK18 aus</a>
-                <a href="?<?= http_build_query(array_merge($paginationBase, ['adult' => '1', 'p' => 1])) ?>" class="<?= $showAdult ? 'active' : '' ?>">FSK18 an</a>
-            </div>
-        <?php endif; ?>
         <div class="compact-status">
             <label>
                 <span>Modus:</span>
@@ -970,7 +1109,7 @@ $filtersOpen = $filterChips !== [];
     </summary>
     <div class="details-body">
         <form id="filters-form" method="get" class="controls">
-            <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p'], true)) { continue; } ?>
+            <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p','active','deleted','ai_title','ai_caption'], true)) { continue; } ?>
                 <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
             <?php endforeach; ?>
             <input type="hidden" name="p" value="1">
@@ -1039,13 +1178,46 @@ $filtersOpen = $filterChips !== [];
                     <?php endforeach; ?>
                 </select>
             </label>
+            <label>
+                Aktiv
+                <select name="active">
+                    <option value="all" <?= $activeFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="active" <?= $activeFilter === 'active' ? 'selected' : '' ?>>aktiv</option>
+                    <option value="inactive" <?= $activeFilter === 'inactive' ? 'selected' : '' ?>>inaktiv</option>
+                </select>
+            </label>
+            <label>
+                Deleted
+                <select name="deleted">
+                    <option value="exclude_deleted" <?= $deletedFilter === 'exclude_deleted' ? 'selected' : '' ?>>ausblenden</option>
+                    <option value="only_deleted" <?= $deletedFilter === 'only_deleted' ? 'selected' : '' ?>>nur gelöscht</option>
+                    <option value="all" <?= $deletedFilter === 'all' ? 'selected' : '' ?>>inkl. gelöscht</option>
+                </select>
+            </label>
+            <label>
+                AI Title
+                <select name="ai_title">
+                    <option value="all" <?= $aiTitleFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="with" <?= $aiTitleFilter === 'with' ? 'selected' : '' ?>>mit</option>
+                    <option value="without" <?= $aiTitleFilter === 'without' ? 'selected' : '' ?>>ohne</option>
+                </select>
+            </label>
+            <label>
+                AI Caption
+                <select name="ai_caption">
+                    <option value="all" <?= $aiCaptionFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="with" <?= $aiCaptionFilter === 'with' ? 'selected' : '' ?>>mit</option>
+                    <option value="without" <?= $aiCaptionFilter === 'without' ? 'selected' : '' ?>>ohne</option>
+                </select>
+            </label>
             <?php if ($hasInternalAccess): ?>
                 <label>
                     Vote
                     <select name="vote">
-                        <option value="any" <?= $voteFilter === 'any' ? 'selected' : '' ?>>alle</option>
-                        <option value="up" <?= $voteFilter === 'up' ? 'selected' : '' ?>>up</option>
-                        <option value="down" <?= $voteFilter === 'down' ? 'selected' : '' ?>>down</option>
+                        <option value="all" <?= $voteFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                        <option value="neutral" <?= $voteFilter === 'neutral' ? 'selected' : '' ?>>neutral</option>
+                        <option value="approved" <?= $voteFilter === 'approved' ? 'selected' : '' ?>>approved</option>
+                        <option value="rejected" <?= $voteFilter === 'rejected' ? 'selected' : '' ?>>rejected</option>
                     </select>
                 </label>
                 <label>
@@ -1178,7 +1350,10 @@ $filtersOpen = $filterChips !== [];
                                 isset($row['prompt_height']) ? (int)$row['prompt_height'] : null
                             );
                             $promptQualityClass = $promptQualityData['quality_class'] ?? 'C';
-                            $voteState = (int)($row['vote_state'] ?? 0);
+                            $voteState = (string)($row['vote_state'] ?? 'neutral');
+                            if (!in_array($voteState, ['neutral', 'approved', 'rejected'], true)) {
+                                $voteState = 'neutral';
+                            }
                             $checkedFlag = (int)($row['checked_flag'] ?? 0) === 1;
                             $activityScore = (int)($row['activity_score'] ?? 0);
                             $iconRescan = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 0 1 12.9-5.1l1.1-1.1V9.5h-3.7l1.4-1.4A6 6 0 1 0 18 12h1.5A7.5 7.5 0 0 1 4.5 12z" fill="currentColor"/></svg>';
@@ -1209,9 +1384,10 @@ $filtersOpen = $filterChips !== [];
                                     <div class="table-actions">
                                         <a class="btn btn--secondary btn--sm" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
                                         <form method="post" class="inline-form">
-                                            <input type="hidden" name="action" value="vote_up">
+                                            <input type="hidden" name="action" value="vote_set">
                                             <input type="hidden" name="media_id" value="<?= $id ?>">
-                                            <button class="btn btn--icon <?= $voteState === 1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote hoch" title="Vote hoch"><?= $iconUp ?></button>
+                                            <input type="hidden" name="vote_status" value="approved">
+                                            <button class="btn btn--icon <?= $voteState === 'approved' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Approve" title="Approve"><?= $iconUp ?></button>
                                         </form>
                                         <?php if ($hasInternalAccess): ?>
                                             <form method="post" class="inline-form">
@@ -1220,9 +1396,10 @@ $filtersOpen = $filterChips !== [];
                                                 <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
                                             </form>
                                             <form method="post" class="inline-form">
-                                                <input type="hidden" name="action" value="vote_down">
+                                                <input type="hidden" name="action" value="vote_set">
                                                 <input type="hidden" name="media_id" value="<?= $id ?>">
-                                                <button class="btn btn--icon <?= $voteState === -1 ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Vote runter" title="Vote runter"><?= $iconDown ?></button>
+                                                <input type="hidden" name="vote_status" value="rejected">
+                                                <button class="btn btn--icon <?= $voteState === 'rejected' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Reject" title="Reject"><?= $iconDown ?></button>
                                             </form>
                                             <form method="post" class="inline-form">
                                                 <input type="hidden" name="action" value="checked_toggle">
@@ -1243,11 +1420,9 @@ $filtersOpen = $filterChips !== [];
     </div>
 <?php endif; ?>
 
-<?php if ($hasInternalAccess): ?>
-    <div class="meta-note">
-        FSK18-Link: <code>?adult=1</code> oder <code>?18=True</code> · Default: Kacheln · Legacy-Grid ist nur noch per Direktaufruf erreichbar
-    </div>
-<?php endif; ?>
+<div class="meta-note">
+    Adult-Filter speichert pro Browser (Cookie). Links: <code>?adult=1</code> oder <code>?18=True</code> · Default: Kacheln
+</div>
 
 <div class="pager compact">
     <span>Seite <?= (int)$page ?> / <?= (int)$pages ?></span>
