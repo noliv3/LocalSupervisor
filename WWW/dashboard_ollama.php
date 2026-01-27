@@ -305,6 +305,12 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                 </div>
             <?php endforeach; ?>
         </div>
+        <div class="hint small">
+            Runner:
+            <span class="pill">running <span data-ollama-running><?= (int)($statusCounts['running'] ?? 0) ?></span></span>
+            <span class="pill">max <span data-ollama-max-concurrency><?= (int)sv_ollama_max_concurrency($config) ?></span></span>
+            <span class="pill">locked <span data-ollama-runner-locked>–</span></span>
+        </div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
