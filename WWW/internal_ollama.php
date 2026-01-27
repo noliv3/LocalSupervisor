@@ -228,13 +228,36 @@ if ($action === 'run_once') {
         $logs[] = $message;
     };
 
-    sv_ollama_watchdog_stale_running($pdo, 10, 'requeue');
-    $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, null);
-    $respond(200, [
-        'ok' => true,
-        'summary' => $summary,
-        'logs' => $logs,
-    ]);
+    $lock = sv_ollama_acquire_runner_lock($config, 'web:internal_ollama.php');
+    if (empty($lock['ok'])) {
+        $respond(200, [
+            'ok' => false,
+            'status' => 'locked',
+            'reason' => 'runner_locked',
+        ]);
+    }
+
+    try {
+        $maxConcurrency = sv_ollama_max_concurrency($config);
+        $running = sv_ollama_running_job_count($pdo);
+        if ($running >= $maxConcurrency) {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'busy',
+                'running' => $running,
+                'max_concurrency' => $maxConcurrency,
+            ]);
+        }
+
+        $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, null);
+        $respond(200, [
+            'ok' => true,
+            'summary' => $summary,
+            'logs' => $logs,
+        ]);
+    } finally {
+        sv_ollama_release_runner_lock($lock['handle']);
+    }
 }
 
 if ($action === 'enqueue') {

@@ -105,6 +105,7 @@ function sv_ollama_config(array $config): array
         'worker' => [
             'batch_size' => isset($worker['batch_size']) ? max(1, (int)$worker['batch_size']) : 5,
             'max_retries' => isset($worker['max_retries']) ? max(0, (int)$worker['max_retries']) : 2,
+            'max_concurrency' => isset($worker['max_concurrency']) ? max(1, (int)$worker['max_concurrency']) : 2,
         ],
         'prompt_eval_fallback' => isset($ollama['prompt_eval_fallback']) && is_string($ollama['prompt_eval_fallback'])
             ? strtolower(trim($ollama['prompt_eval_fallback']))
