@@ -947,6 +947,8 @@
         const runSecondsInput = root.querySelector('[data-ollama-run-seconds]');
         let autoRunEnabled = false;
         let autoRunBusy = false;
+        let autoRunNextAllowedAt = 0;
+        let runRequestInFlight = false;
         let lastCounts = { queued: 0, pending: 0 };
 
         function showMessage(type, title, text) {
@@ -961,6 +963,11 @@
             if (messageText) {
                 messageText.textContent = text;
             }
+        }
+
+        function setRunControlsDisabled(disabled) {
+            if (runBtn) runBtn.disabled = disabled;
+            if (autoRunBtn) autoRunBtn.disabled = disabled;
         }
 
         function postAction(payload) {
@@ -999,6 +1006,20 @@
             if (logsPath) {
                 const logsEl = root.querySelector('[data-logs-path]');
                 if (logsEl) logsEl.textContent = logsPath;
+            }
+            if ('running' in data) {
+                const runningEl = root.querySelector('[data-ollama-running]');
+                if (runningEl) runningEl.textContent = String(data.running ?? '0');
+            }
+            if ('max_concurrency' in data) {
+                const maxEl = root.querySelector('[data-ollama-max-concurrency]');
+                if (maxEl) maxEl.textContent = String(data.max_concurrency ?? '0');
+            }
+            if ('runner_locked' in data) {
+                const lockedEl = root.querySelector('[data-ollama-runner-locked]');
+                if (lockedEl) {
+                    lockedEl.textContent = data.runner_locked ? 'ja' : 'nein';
+                }
             }
         }
 
@@ -1213,30 +1234,52 @@
         }
 
         function triggerRun() {
+            if (runRequestInFlight) {
+                return Promise.resolve({ status: 'inflight' });
+            }
             const config = getRunConfig();
+            runRequestInFlight = true;
+            setRunControlsDisabled(true);
             showMessage('success', 'Run', `Batch läuft (${config.batch}, ${config.maxSeconds}s).`);
             return postAction({ action: 'run', batch: config.batch, max_seconds: config.maxSeconds })
                 .then((data) => {
+                    if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy')) {
+                        const text = data.status === 'locked'
+                            ? 'Runner locked (ein anderer Run aktiv).'
+                            : `Ollama busy (running ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
+                        showMessage('success', 'Status', text);
+                        return { status: data.status };
+                    }
                     if (!data || !data.ok) {
                         throw new Error(data && data.error ? data.error : 'Run fehlgeschlagen.');
                     }
                     showMessage('success', 'Run', `Verarbeitet: ${data.processed || 0}, Done: ${data.done || 0}, Errors: ${data.errors || 0}.`);
                     pollStatus();
                     pollJobs();
+                    return { status: 'ok' };
                 })
-                .catch((err) => showMessage('error', 'Run', err.message));
+                .catch((err) => {
+                    showMessage('error', 'Run', err.message);
+                    return { status: 'error' };
+                })
+                .finally(() => {
+                    runRequestInFlight = false;
+                    setRunControlsDisabled(false);
+                });
         }
 
         function triggerAutoRun() {
             if (!autoRunEnabled || autoRunBusy) return;
             const queued = Number(lastCounts.queued || 0) + Number(lastCounts.pending || 0);
             if (queued <= 0) return;
+            if (Date.now() < autoRunNextAllowedAt) return;
             autoRunBusy = true;
-            triggerRun().finally(() => {
-                autoRunBusy = false;
-                if (autoRunEnabled) {
-                    setTimeout(() => triggerAutoRun(), 1000);
+            triggerRun().then((result) => {
+                if (result && (result.status === 'busy' || result.status === 'locked')) {
+                    autoRunNextAllowedAt = Date.now() + pollInterval;
                 }
+            }).finally(() => {
+                autoRunBusy = false;
             });
         }
 
@@ -1386,6 +1429,13 @@
                     });
                 })
                 .then((data) => {
+                    if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy')) {
+                        const text = data.status === 'locked'
+                            ? 'Runner locked (ein anderer Run aktiv).'
+                            : `Ollama busy (running ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
+                        setMessage('success', text);
+                        return;
+                    }
                     if (!data || !data.ok) {
                         throw new Error(data && data.error ? data.error : 'Run fehlgeschlagen.');
                     }

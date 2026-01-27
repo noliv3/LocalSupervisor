@@ -115,12 +115,25 @@ if ($action === 'status') {
         $errorCounts[$code] = (int)($row['cnt'] ?? 0);
     }
 
+    $maxConcurrency = sv_ollama_max_concurrency($config);
+    $running = sv_ollama_running_job_count($pdo);
+    $runnerLocked = false;
+    $lockProbe = sv_ollama_acquire_runner_lock($config, 'status_probe');
+    if (!empty($lockProbe['ok'])) {
+        sv_ollama_release_runner_lock($lockProbe['handle']);
+    } elseif (($lockProbe['reason'] ?? '') === 'locked') {
+        $runnerLocked = true;
+    }
+
     $respond(200, [
         'ok' => true,
         'counts' => $counts,
         'mode_counts' => $modeCounts,
         'error_counts' => $errorCounts,
         'logs_path' => $logsPath,
+        'running' => $running,
+        'max_concurrency' => $maxConcurrency,
+        'runner_locked' => $runnerLocked,
     ]);
 }
 
