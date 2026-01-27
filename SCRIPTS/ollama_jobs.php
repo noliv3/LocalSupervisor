@@ -60,6 +60,95 @@ function sv_ollama_job_types(): array
     ];
 }
 
+function sv_ollama_max_concurrency(array $config): int
+{
+    $ollamaCfg = sv_ollama_config($config);
+    $maxConcurrency = isset($ollamaCfg['worker']['max_concurrency'])
+        ? (int)$ollamaCfg['worker']['max_concurrency']
+        : 2;
+
+    return max(1, $maxConcurrency);
+}
+
+function sv_ollama_running_job_count(PDO $pdo): int
+{
+    $jobTypes = sv_ollama_job_types();
+    if ($jobTypes === []) {
+        return 0;
+    }
+
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $stmt = $pdo->prepare(
+        'SELECT COUNT(*) AS cnt FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')'
+    );
+    $stmt->execute($jobTypes);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return (int)($row['cnt'] ?? 0);
+}
+
+function sv_ollama_runner_lock_path(array $config): string
+{
+    $logsRoot = sv_logs_root($config);
+    if (!is_dir($logsRoot)) {
+        @mkdir($logsRoot, 0777, true);
+    }
+
+    return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_worker.lock';
+}
+
+function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): array
+{
+    $lockPath = sv_ollama_runner_lock_path($config);
+    $handle = @fopen($lockPath, 'c+');
+    if ($handle === false) {
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'open_failed',
+        ];
+    }
+
+    $locked = @flock($handle, LOCK_EX | LOCK_NB);
+    if (!$locked) {
+        @fclose($handle);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'locked',
+        ];
+    }
+
+    $payload = [
+        'pid' => function_exists('getmypid') ? (int)getmypid() : null,
+        'started_at' => date('c'),
+        'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
+        'owner' => $owner ?? PHP_SAPI,
+    ];
+    @ftruncate($handle, 0);
+    @fwrite($handle, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    @fflush($handle);
+
+    return [
+        'ok' => true,
+        'handle' => $handle,
+        'path' => $lockPath,
+        'reason' => null,
+    ];
+}
+
+function sv_ollama_release_runner_lock($handle): void
+{
+    if (!is_resource($handle)) {
+        return;
+    }
+
+    @flock($handle, LOCK_UN);
+    @fclose($handle);
+}
+
 function sv_ollama_job_type_for_mode(string $mode): string
 {
     $mode = trim($mode);
@@ -180,13 +269,12 @@ function sv_ollama_update_job_columns(PDO $pdo, int $jobId, array $fields, bool 
     $stmt->execute($params);
 }
 
-function sv_ollama_watchdog_stale_running(PDO $pdo, int $minutes = 10, string $action = 'requeue'): int
+function sv_ollama_watchdog_stale_running(PDO $pdo, array $config, int $minutes = 10, string $action = 'requeue'): int
 {
     if (!sv_ollama_job_has_column($pdo, 'heartbeat_at')) {
         return 0;
     }
 
-    $minutes = max(1, $minutes);
     $action = $action === 'error' ? 'error' : 'requeue';
     $jobTypes = sv_ollama_job_types();
     if ($jobTypes === []) {
@@ -194,37 +282,87 @@ function sv_ollama_watchdog_stale_running(PDO $pdo, int $minutes = 10, string $a
     }
 
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
-    $stmt = $pdo->prepare(
-        'SELECT id FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')'
-        . ' AND (heartbeat_at IS NULL OR heartbeat_at < datetime("now", ?))'
-    );
-    $params = array_merge($jobTypes, ['-' . $minutes . ' minutes']);
-    $stmt->execute($params);
+    $sql = 'SELECT id, type, heartbeat_at, forge_request_json';
+    if (sv_jobs_supports_payload_json($pdo)) {
+        $sql .= ', payload_json';
+    }
+    $sql .= ' FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')';
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($jobTypes);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     if ($rows === []) {
         return 0;
     }
 
-    $now = date('c');
+    $ollamaCfg = sv_ollama_config($config);
+    $maxAttempts = (int)($ollamaCfg['retry']['max_attempts'] ?? 3);
+    $maxSecondsText = isset($ollamaCfg['worker']['max_seconds_text']) ? (int)$ollamaCfg['worker']['max_seconds_text'] : 60;
+    $maxSecondsVision = isset($ollamaCfg['worker']['max_seconds_vision']) ? (int)$ollamaCfg['worker']['max_seconds_vision'] : 180;
+    $maxSecondsText = max(1, $maxSecondsText);
+    $maxSecondsVision = max(1, $maxSecondsVision);
+    $thresholdText = $maxSecondsText + 120;
+    $thresholdVision = $maxSecondsVision + 120;
+
+    $visionModes = [
+        'caption' => true,
+        'title' => true,
+        'prompt_eval' => true,
+        'quality' => true,
+        'nsfw_classify' => true,
+    ];
+    $textModes = [
+        'tags_normalize' => true,
+        'prompt_recon' => true,
+        'embed' => true,
+    ];
+
+    $now = time();
+    $nowIso = date('c');
     $count = 0;
     foreach ($rows as $row) {
         $jobId = (int)($row['id'] ?? 0);
         if ($jobId <= 0) {
             continue;
         }
-        if ($action === 'requeue') {
+        $heartbeatRaw = isset($row['heartbeat_at']) ? (string)$row['heartbeat_at'] : '';
+        $heartbeatTs = $heartbeatRaw !== '' ? strtotime($heartbeatRaw) : false;
+        $isStale = $heartbeatTs === false;
+        $jobType = (string)($row['type'] ?? '');
+        $mode = null;
+        try {
+            $mode = sv_ollama_mode_for_job_type($jobType);
+        } catch (Throwable $e) {
+            $mode = null;
+        }
+        $threshold = $thresholdVision;
+        if ($mode !== null && isset($textModes[$mode])) {
+            $threshold = $thresholdText;
+        } elseif ($mode !== null && isset($visionModes[$mode])) {
+            $threshold = $thresholdVision;
+        }
+
+        if (!$isStale && ($now - (int)$heartbeatTs) < $threshold) {
+            continue;
+        }
+
+        $payload = sv_ollama_decode_job_payload($row);
+        $attempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
+        $shouldRetry = $attempts < $maxAttempts;
+
+        if ($action === 'requeue' && $shouldRetry) {
             sv_ollama_update_job_columns($pdo, $jobId, [
                 'status' => 'queued',
                 'cancel_requested' => 0,
-                'heartbeat_at' => $now,
+                'heartbeat_at' => $nowIso,
             ], true);
         } else {
             sv_ollama_update_job_columns($pdo, $jobId, [
                 'status' => 'error',
                 'last_error_code' => 'stale_running',
                 'error_message' => 'stale running watchdog',
-                'heartbeat_at' => $now,
+                'heartbeat_at' => $nowIso,
             ], true);
         }
         $count++;
@@ -867,6 +1005,73 @@ function sv_ollama_fetch_pending_jobs(PDO $pdo, array $jobTypes, int $limit, ?in
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function sv_ollama_fetch_job_row(PDO $pdo, int $jobId): array
+{
+    if ($jobId <= 0) {
+        return [];
+    }
+
+    $sql = 'SELECT id, media_id, type, status, created_at, updated_at, forge_request_json';
+    if (sv_jobs_supports_payload_json($pdo)) {
+        $sql .= ', payload_json';
+    }
+    $sql .= ' FROM jobs WHERE id = :id';
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([':id' => $jobId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return is_array($row) ? $row : [];
+}
+
+function sv_ollama_claim_pending_job(PDO $pdo, array $jobTypes, ?int $mediaId = null): array
+{
+    if ($jobTypes === []) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $params = $jobTypes;
+    $baseSql = 'SELECT id FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("pending","queued")';
+    if ($mediaId !== null && $mediaId > 0) {
+        $baseSql .= ' AND media_id = ?';
+        $params[] = $mediaId;
+    }
+    $baseSql .= ' ORDER BY id ASC LIMIT 1';
+
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        $stmt = $pdo->prepare($baseSql);
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $jobId = (int)($row['id'] ?? 0);
+        if ($jobId <= 0) {
+            return [];
+        }
+
+        $now = date('c');
+        $updateSql = 'UPDATE jobs SET status = "running", heartbeat_at = :heartbeat_at';
+        if (sv_ollama_job_has_column($pdo, 'started_at')) {
+            $updateSql .= ', started_at = :started_at';
+        }
+        $updateSql .= ' WHERE id = :id AND status IN ("pending","queued")';
+        $updateParams = [
+            ':heartbeat_at' => $now,
+            ':id' => $jobId,
+        ];
+        if (strpos($updateSql, ':started_at') !== false) {
+            $updateParams[':started_at'] = $now;
+        }
+
+        $updateStmt = $pdo->prepare($updateSql);
+        $updateStmt->execute($updateParams);
+        if ($updateStmt->rowCount() === 1) {
+            return sv_ollama_fetch_job_row($pdo, $jobId);
+        }
+    }
+
+    return [];
 }
 
 function sv_ollama_normalize_text_value($value): ?string
@@ -1549,15 +1754,14 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
 {
     $jobTypes = sv_ollama_job_types();
     sv_mark_stuck_jobs($pdo, $jobTypes, SV_JOB_STUCK_MINUTES, $logger);
-    sv_ollama_watchdog_stale_running($pdo, 10, 'requeue');
+    sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
 
     $ollamaCfg = sv_ollama_config($config);
     $limit = $limit !== null ? (int)$limit : (int)$ollamaCfg['worker']['batch_size'];
     if ($limit <= 0) {
         $limit = (int)$ollamaCfg['worker']['batch_size'];
     }
-
-    $rows = sv_ollama_fetch_pending_jobs($pdo, $jobTypes, $limit, $mediaId);
+    $maxConcurrency = sv_ollama_max_concurrency($config);
 
     $summary = [
         'total' => 0,
@@ -1567,7 +1771,14 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
         'retried' => 0,
     ];
 
-    foreach ($rows as $row) {
+    while ($summary['total'] < $limit) {
+        if (sv_ollama_running_job_count($pdo) >= $maxConcurrency) {
+            break;
+        }
+        $row = sv_ollama_claim_pending_job($pdo, $jobTypes, $mediaId);
+        if ($row === []) {
+            break;
+        }
         $summary['total']++;
         $result = sv_process_ollama_job($pdo, $config, $row, $logger);
         if (($result['status'] ?? null) === 'done') {
@@ -1621,7 +1832,7 @@ function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, i
 
     $jobTypes = sv_ollama_job_types();
     sv_mark_stuck_jobs($pdo, $jobTypes, SV_JOB_STUCK_MINUTES, $logger);
-    sv_ollama_watchdog_stale_running($pdo, 10, 'requeue');
+    sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
 
     $processed = 0;
     $done = 0;
@@ -1630,33 +1841,31 @@ function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, i
 
     $startedAt = microtime(true);
     $timeUp = false;
+    $maxConcurrency = sv_ollama_max_concurrency($config);
 
     while ($processed < $batch && !$timeUp) {
-        $limit = min($batch - $processed, $batch);
-        $rows = sv_ollama_fetch_pending_jobs($pdo, $jobTypes, $limit, null);
-        if ($rows === []) {
+        if (sv_ollama_running_job_count($pdo) >= $maxConcurrency) {
             break;
         }
 
-        foreach ($rows as $row) {
-            $processed++;
-            $result = sv_process_ollama_job($pdo, $config, $row, $logger);
-            $status = (string)($result['status'] ?? '');
-            if ($status === 'done') {
-                $done++;
-            } elseif ($status === 'error') {
-                $errors++;
-            } elseif ($status === 'cancelled') {
-                $cancelled++;
-            }
+        $row = sv_ollama_claim_pending_job($pdo, $jobTypes, null);
+        if ($row === []) {
+            break;
+        }
 
-            if ((microtime(true) - $startedAt) >= $maxSeconds) {
-                $timeUp = true;
-                break;
-            }
-            if ($processed >= $batch) {
-                break;
-            }
+        $processed++;
+        $result = sv_process_ollama_job($pdo, $config, $row, $logger);
+        $status = (string)($result['status'] ?? '');
+        if ($status === 'done') {
+            $done++;
+        } elseif ($status === 'error') {
+            $errors++;
+        } elseif ($status === 'cancelled') {
+            $cancelled++;
+        }
+
+        if ((microtime(true) - $startedAt) >= $maxSeconds) {
+            $timeUp = true;
         }
     }
 

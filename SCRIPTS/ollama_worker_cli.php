@@ -20,60 +20,12 @@ $logsRoot = sv_logs_root($config);
 if (!is_dir($logsRoot)) {
     @mkdir($logsRoot, 0777, true);
 }
-$lockPath = $logsRoot . '/ollama_worker.lock.json';
 $errLogPath = $logsRoot . '/ollama_worker.err.log';
-
-$isPidAlive = static function (int $pid): bool {
-    if ($pid <= 0) {
-        return false;
-    }
-    if (function_exists('posix_kill')) {
-        return @posix_kill($pid, 0);
-    }
-    $isWindows = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
-    if ($isWindows) {
-        $cmd = 'tasklist /FI ' . escapeshellarg('PID eq ' . $pid);
-        $output = @shell_exec($cmd);
-        if (!is_string($output)) {
-            return false;
-        }
-        return stripos($output, (string)$pid) !== false;
-    }
-    $cmd = 'ps -p ' . (int)$pid . ' -o pid=';
-    $output = @shell_exec($cmd);
-    if (!is_string($output)) {
-        return false;
-    }
-    return trim($output) !== '';
-};
 
 $writeErrLog = static function (string $message) use ($errLogPath): void {
     $line = '[' . date('c') . '] ' . $message . PHP_EOL;
     @file_put_contents($errLogPath, $line, FILE_APPEND);
 };
-
-$pid = getmypid();
-$cmdline = implode(' ', $argv);
-$host = function_exists('gethostname') ? (string)gethostname() : 'unknown';
-
-if (is_file($lockPath)) {
-    $raw = @file_get_contents($lockPath);
-    $data = is_string($raw) ? json_decode($raw, true) : null;
-    $existingPid = isset($data['pid']) ? (int)$data['pid'] : 0;
-    if ($existingPid > 0 && $isPidAlive($existingPid)) {
-        $writeErrLog('Ollama-Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
-        exit(0);
-    }
-    @unlink($lockPath);
-}
-
-$lockPayload = [
-    'pid'        => $pid,
-    'started_at' => date('c'),
-    'host'       => $host,
-    'cmdline'    => $cmdline,
-];
-@file_put_contents($lockPath, json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
 $loop = false;
 $sleepMs = 1000;
@@ -104,6 +56,12 @@ $logger = function (string $msg): void {
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
+$lock = sv_ollama_acquire_runner_lock($config, 'cli:ollama_worker_cli.php');
+if (empty($lock['ok'])) {
+    $writeErrLog('Ollama-Worker bereits aktiv (Lock), neuer Start abgebrochen.');
+    exit(0);
+}
+
 try {
     sv_run_migrations_if_needed($pdo, $config, $logger);
 
@@ -116,6 +74,13 @@ try {
     }
     if ($maxMinutes !== null && $maxMinutes <= 0) {
         $maxMinutes = null;
+    }
+
+    $maxConcurrency = sv_ollama_max_concurrency($config);
+    $running = sv_ollama_running_job_count($pdo);
+    if ($running >= $maxConcurrency) {
+        $writeErrLog('Ollama-Worker nicht gestartet (busy): running=' . $running . ' max=' . $maxConcurrency . '.');
+        exit(0);
     }
 
     $batchCount = 0;
@@ -169,7 +134,5 @@ try {
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 } finally {
-    if (is_file($lockPath)) {
-        @unlink($lockPath);
-    }
+    sv_ollama_release_runner_lock($lock['handle'] ?? null);
 }

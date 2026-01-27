@@ -80,6 +80,7 @@ return [
         'worker' => [
             'batch_size' => 5,
             'max_retries' => 2,
+            'max_concurrency' => 2,
         ],
         'prompt_eval_fallback' => 'tags',
         'prompt_eval_fallback_separator' => ', ',

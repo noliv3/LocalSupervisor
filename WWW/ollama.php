@@ -343,11 +343,36 @@ if ($action === 'run') {
     $batch = $batch !== null ? (int)$batch : 5;
     $maxSeconds = $maxSeconds !== null ? (int)$maxSeconds : 20;
 
-    $result = sv_ollama_run_batch($batch, $maxSeconds);
-    if (empty($result['ok'])) {
-        $respond(500, $result);
+    $lock = sv_ollama_acquire_runner_lock($config, 'web:ollama.php');
+    if (empty($lock['ok'])) {
+        $respond(200, [
+            'ok' => false,
+            'status' => 'locked',
+            'reason' => 'runner_locked',
+        ]);
     }
-    $respond(200, $result);
+
+    try {
+        $maxConcurrency = sv_ollama_max_concurrency($config);
+        $running = sv_ollama_running_job_count($pdo);
+        if ($running >= $maxConcurrency) {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'busy',
+                'running' => $running,
+                'max_concurrency' => $maxConcurrency,
+            ]);
+        }
+
+        $result = sv_ollama_run_batch_with_context($pdo, $config, $batch, $maxSeconds, static function (): void {
+        });
+        if (empty($result['ok'])) {
+            $respond(500, $result);
+        }
+        $respond(200, $result);
+    } finally {
+        sv_ollama_release_runner_lock($lock['handle']);
+    }
 }
 
 if ($action === 'cancel') {
