@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-function sv_ui_header(string $title, string $activeNav): void
+function sv_ui_header(string $title, string $activeNav, ?string $headerActionsHtml = null): void
 {
     $safeTitle = htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     $isDashboard = $activeNav === 'dashboard';
@@ -28,6 +28,11 @@ function sv_ui_header(string $title, string $activeNav): void
                 <a class="app-nav__link<?= $isOllama ? ' is-active' : '' ?>" href="dashboard_ollama.php">Ollama</a>
                 <a class="app-nav__link<?= $isMedia ? ' is-active' : '' ?>" href="mediadb.php">Medien</a>
             </nav>
+            <?php if ($headerActionsHtml): ?>
+                <div class="app-header__actions">
+                    <?= $headerActionsHtml ?>
+                </div>
+            <?php endif; ?>
         </div>
     </header>
     <main class="app-main">

@@ -7632,6 +7632,131 @@ function sv_mark_media_missing(PDO $pdo, int $mediaId, callable $logger): array
     ];
 }
 
+function sv_delete_media_hard(PDO $pdo, array $config, int $mediaId, callable $logger): array
+{
+    $stmt = $pdo->prepare('SELECT * FROM media WHERE id = ?');
+    $stmt->execute([$mediaId]);
+    $media = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$media) {
+        throw new RuntimeException('Medium nicht gefunden.');
+    }
+
+    $deletedFiles = [];
+    $missingFiles = [];
+    $errors       = [];
+
+    $deleteFile = function (string $path, string $context, bool $allowPreviews = false, bool $allowBackups = false, bool $allowTmp = false) use (&$deletedFiles, &$missingFiles, &$errors, $config): void {
+        if ($path === '') {
+            return;
+        }
+        if (!is_file($path)) {
+            $missingFiles[] = $path;
+            return;
+        }
+        try {
+            if ($allowPreviews || $allowBackups || $allowTmp) {
+                sv_assert_stream_path_allowed($path, $config, $context, $allowPreviews, $allowBackups, $allowTmp);
+            } else {
+                sv_assert_media_path_allowed($path, $config['paths'] ?? [], $context);
+            }
+            if (@unlink($path)) {
+                $deletedFiles[] = $path;
+                return;
+            }
+            $errors[] = 'Datei konnte nicht gelöscht werden: ' . $path;
+        } catch (Throwable $e) {
+            $errors[] = 'Delete-Fehler (' . $context . '): ' . $e->getMessage();
+        }
+    };
+
+    $primaryPath = (string)($media['path'] ?? '');
+    $deleteFile($primaryPath, 'hard_delete_media');
+
+    $previewDir = null;
+    try {
+        $previewDir = sv_resolve_preview_dir($config);
+    } catch (Throwable $e) {
+        $previewDir = null;
+    }
+    if ($previewDir !== null) {
+        $pattern = rtrim($previewDir, '/') . '/preview_' . $mediaId . '_*';
+        foreach (glob($pattern) ?: [] as $previewFile) {
+            $deleteFile((string)$previewFile, 'hard_delete_preview', true, false, false);
+        }
+    }
+
+    $cacheThumb = sv_base_dir() . '/CACHE/thumbs/video/' . $mediaId . '.jpg';
+    if (is_file($cacheThumb)) {
+        if (@unlink($cacheThumb)) {
+            $deletedFiles[] = $cacheThumb;
+        } else {
+            $errors[] = 'Cache-Thumb konnte nicht gelöscht werden: ' . $cacheThumb;
+        }
+    }
+
+    $jobStmt = $pdo->prepare('SELECT id, forge_response_json FROM jobs WHERE media_id = :id');
+    $jobStmt->execute([':id' => $mediaId]);
+    $jobs = $jobStmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($jobs as $job) {
+        $responseRaw = (string)($job['forge_response_json'] ?? '');
+        if ($responseRaw === '') {
+            continue;
+        }
+        $response = json_decode($responseRaw, true);
+        if (!is_array($response)) {
+            continue;
+        }
+        $result = is_array($response['result'] ?? null) ? $response['result'] : [];
+        foreach (['preview_path', 'backup_path', 'output_path'] as $key) {
+            if (!empty($result[$key]) && is_string($result[$key])) {
+                $deleteFile((string)$result[$key], 'hard_delete_job_asset', true, true, true);
+            }
+        }
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $deleteMap = [
+            'media_meta' => 'DELETE FROM media_meta WHERE media_id = ?',
+            'media_tags' => 'DELETE FROM media_tags WHERE media_id = ?',
+            'scan_results' => 'DELETE FROM scan_results WHERE media_id = ?',
+            'prompts' => 'DELETE FROM prompts WHERE media_id = ?',
+            'prompt_history' => 'DELETE FROM prompt_history WHERE media_id = ?',
+            'jobs' => 'DELETE FROM jobs WHERE media_id = ?',
+            'media_lifecycle_events' => 'DELETE FROM media_lifecycle_events WHERE media_id = ?',
+            'collection_media' => 'DELETE FROM collection_media WHERE media_id = ?',
+        ];
+        foreach ($deleteMap as $label => $sql) {
+            try {
+                $del = $pdo->prepare($sql);
+                $del->execute([$mediaId]);
+            } catch (Throwable $e) {
+                $errors[] = 'DB-Delete-Fehler (' . $label . '): ' . $e->getMessage();
+            }
+        }
+
+        $mediaDelete = $pdo->prepare('DELETE FROM media WHERE id = ?');
+        $mediaDelete->execute([$mediaId]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
+
+    sv_audit_log($pdo, 'media_hard_delete', 'media', $mediaId, [
+        'deleted_files' => count($deletedFiles),
+        'missing_files' => count($missingFiles),
+        'errors'        => $errors,
+    ]);
+
+    return [
+        'deleted_files' => $deletedFiles,
+        'missing_files' => $missingFiles,
+        'errors'        => $errors,
+    ];
+}
+
 function sv_media_consistency_status(PDO $pdo, int $mediaId): array
 {
     $promptComplete = sv_prompt_core_complete_condition('p');

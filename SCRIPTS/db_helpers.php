@@ -174,6 +174,7 @@ function sv_db_expected_schema(): array
             'id', 'path', 'type', 'source', 'width', 'height', 'duration', 'fps', 'filesize', 'hash',
             'created_at', 'imported_at', 'rating', 'has_nsfw', 'parent_media_id', 'status',
             'lifecycle_status', 'lifecycle_reason', 'quality_status', 'quality_score', 'quality_notes', 'deleted_at',
+            'status_vote', 'is_active', 'is_deleted',
         ],
         'tags' => ['id', 'name', 'type', 'locked'],
         'media_tags' => ['media_id', 'tag_id', 'confidence', 'locked'],
