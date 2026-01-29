@@ -119,6 +119,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - `internal_ollama.php`: interner API-Endpoint (nur Loopback/Intern).
 - `health.php`: Healthcheck.
 - `jobs_prune.php`: Jobs-Bereinigung.
+- Featureview in `mediadb.php` zeigt maximal 4 Einträge mit der niedrigsten Aktivität.
 
 ## Security Modell
 - Interne Endpoints erfordern `internal_api_key` und Loopback-Zugriff.

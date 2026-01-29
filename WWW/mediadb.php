@@ -471,7 +471,7 @@ FROM media m
 ' . $latestPromptJoin . '
 WHERE ' . $whereSql . '
 ORDER BY activity_score ASC, m.created_at ASC, m.id ASC
-LIMIT 10';
+LIMIT 4';
     $featureStmt = $pdo->prepare($featureSql);
     foreach ($params as $k => $v) {
         $featureStmt->bindValue($k, $v);
@@ -1238,7 +1238,9 @@ $adultToggleHtml = '<div class="header-toggle">'
             <?php endif; ?>
             <div class="controls-actions">
                 <button type="submit" class="btn btn--primary btn--sm">Filter anwenden</button>
-                <a class="reset-link" href="?adult=<?= $showAdult ? '1' : '0' ?>">Reset</a>
+                <?php if ($filtersOpen): ?>
+                    <a class="reset-link" href="?adult=<?= $showAdult ? '1' : '0' ?>">Filter zurücksetzen</a>
+                <?php endif; ?>
             </div>
         </form>
     </div>

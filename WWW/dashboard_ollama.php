@@ -77,7 +77,8 @@ $statusFilter = sv_ollama_normalize_enum($_GET['status'] ?? null, $allowedStatus
 $domainFilter = sv_ollama_normalize_enum($_GET['domain'] ?? null, $allowedDomain, 'all');
 $qualityFilter = sv_ollama_normalize_enum($_GET['quality'] ?? null, $allowedQuality, 'all');
 $hasMetaFilter = sv_ollama_normalize_enum($_GET['has_meta'] ?? null, $allowedHasMeta, 'all');
-$limit = sv_ollama_clamp_int((int)($_GET['limit'] ?? 120), 20, 500, 120);
+$defaultLimit = 120;
+$limit = sv_ollama_clamp_int((int)($_GET['limit'] ?? $defaultLimit), 20, 500, $defaultLimit);
 
 $jobTypes = sv_ollama_job_types();
 $typePlaceholders = implode(',', array_fill(0, count($jobTypes), '?'));
@@ -122,6 +123,14 @@ if ($hasLastErrorCode) {
 }
 $allowedErrorCodes = array_merge(['all', 'none'], $errorCodes);
 $errorFilter = sv_ollama_normalize_enum($_GET['error_code'] ?? null, $allowedErrorCodes, 'all');
+
+$filtersActive = $modeFilter !== 'all'
+    || $statusFilter !== 'all'
+    || $errorFilter !== 'all'
+    || $domainFilter !== 'all'
+    || $qualityFilter !== 'all'
+    || $hasMetaFilter !== 'all'
+    || $limit !== $defaultLimit;
 
 $payloadColumn = sv_ollama_payload_column($pdo);
 
@@ -279,12 +288,12 @@ $statusOrder = [
     'cancelled' => 6,
 ];
 
-sv_ui_header('OLLAMA Dashboard', 'ollama');
+sv_ui_header('Ollama-Dashboard', 'ollama');
 ?>
 <div class="page-header">
     <div>
-        <h1 class="page-title">OLLAMA Dashboard</h1>
-        <div class="hint">Interne Kontrolle der Ollama-Queue (Polling via ollama.php).</div>
+        <h1 class="page-title">Ollama-Dashboard</h1>
+        <div class="hint">Interne Kontrolle der Ollama-Warteschlange (Polling via ollama.php).</div>
     </div>
     <div class="header-stats">
         <span class="pill">Jobs: <?= (int)array_sum($statusCounts) ?></span>
@@ -294,7 +303,7 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
 
 <div class="ollama-dashboard" data-ollama-dashboard data-endpoint="ollama.php" data-poll-interval="10000" data-heartbeat-stale="180">
     <div class="panel">
-        <div class="panel-header">Queue-Übersicht</div>
+        <div class="panel-header">Warteschlangen-Übersicht</div>
         <div class="ollama-status-grid">
             <?php foreach ($statusList as $status): ?>
                 <div class="ollama-status-card">
@@ -306,16 +315,16 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
             <?php endforeach; ?>
         </div>
         <div class="hint small">
-            Runner:
-            <span class="pill">running <span data-ollama-running><?= (int)($statusCounts['running'] ?? 0) ?></span></span>
+            Worker:
+            <span class="pill">läuft <span data-ollama-running><?= (int)($statusCounts['running'] ?? 0) ?></span></span>
             <span class="pill">max <span data-ollama-max-concurrency><?= (int)sv_ollama_max_concurrency($config) ?></span></span>
-            <span class="pill">locked <span data-ollama-runner-locked>–</span></span>
+            <span class="pill">gesperrt <span data-ollama-runner-locked>–</span></span>
         </div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
                     <tr>
-                        <th>Mode</th>
+                        <th>Modus</th>
                         <?php foreach ($statusList as $status): ?>
                             <th><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></th>
                         <?php endforeach; ?>
@@ -349,24 +358,24 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
         <div class="panel-header">Aktionen</div>
         <div class="action-feedback" data-ollama-message>
             <div class="action-feedback-title">Bereit</div>
-            <div>Enqueue/Run/Cancel/Delete/Requeue werden über ollama.php ausgelöst.</div>
+            <div>Einreihen/Batch/Abbrechen/Löschen/Neu einreihen werden über ollama.php ausgelöst.</div>
         </div>
         <div class="form-grid">
-            <button class="btn btn--primary" type="button" data-ollama-quick-enqueue>Enqueue all</button>
+            <button class="btn btn--primary" type="button" data-ollama-quick-enqueue>Alles einreihen</button>
             <label>Batch
                 <input type="number" min="1" max="50" value="5" data-ollama-run-batch>
             </label>
             <label>Max Sekunden
                 <input type="number" min="1" max="120" value="20" data-ollama-run-seconds>
             </label>
-            <button class="btn btn--secondary" type="button" data-ollama-run>Run Batch</button>
-            <button class="btn btn--ghost" type="button" data-ollama-auto-run aria-pressed="false">Auto-Run: Aus</button>
+            <button class="btn btn--secondary" type="button" data-ollama-run>Batch starten</button>
+            <button class="btn btn--ghost" type="button" data-ollama-auto-run aria-pressed="false">Auto-Lauf: Aus</button>
         </div>
         <form class="ollama-enqueue" data-ollama-enqueue>
             <div class="form-grid">
-                <label>Mode
+                <label>Modus
                     <select name="mode">
-                        <option value="all">all</option>
+                        <option value="all">alles</option>
                         <option value="caption">caption</option>
                         <option value="title">title</option>
                         <option value="prompt_eval">prompt_eval</option>
@@ -380,27 +389,27 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                 <label>Limit
                     <input type="number" name="limit" min="1" max="500" value="50">
                 </label>
-                <label>Since (YYYY-MM-DD)
+                <label>Seit (YYYY-MM-DD)
                     <input type="date" name="since">
                 </label>
-                <label class="checkbox-inline"><input type="checkbox" name="missing_title" value="1"> missing title</label>
-                <label class="checkbox-inline"><input type="checkbox" name="missing_caption" value="1"> missing caption</label>
-                <label class="checkbox-inline"><input type="checkbox" name="all" value="1"> all</label>
+                <label class="checkbox-inline"><input type="checkbox" name="missing_title" value="1"> Titel fehlt</label>
+                <label class="checkbox-inline"><input type="checkbox" name="missing_caption" value="1"> Caption fehlt</label>
+                <label class="checkbox-inline"><input type="checkbox" name="all" value="1"> alles</label>
             </div>
-            <button class="btn btn--primary" type="submit">Enqueue starten</button>
+            <button class="btn btn--primary" type="submit">Einreihen starten</button>
         </form>
     </div>
 
     <div class="panel" data-jobs-prune data-endpoint="jobs_prune.php">
-        <div class="panel-header">Prune / Delete All</div>
+        <div class="panel-header">Aufräumen / Sammellöschen</div>
         <div class="action-feedback" data-jobs-prune-message>
             <div class="action-feedback-title">Bereit</div>
             <div>Ollama-Jobs gesammelt löschen.</div>
         </div>
         <div class="form-grid">
-            <button class="btn btn--danger" type="button" data-jobs-prune-button data-group="ollama" data-status="done,error,cancelled" data-confirm="Alle done/error/cancelled Ollama-Jobs löschen?">Delete done + error</button>
-            <button class="btn btn--secondary" type="button" data-jobs-prune-button data-group="ollama" data-status="queued,pending" data-confirm="Alle queued/pending Ollama-Jobs löschen?">Purge queue</button>
-            <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="ollama" data-status="running" data-force="1" data-confirm="Running Ollama-Jobs forcieren (cancel + delete)?">Force clear running</button>
+            <button class="btn btn--danger" type="button" data-jobs-prune-button data-group="ollama" data-status="done,error,cancelled" data-confirm="Alle fertigen/fehlerhaften/abgebrochenen Ollama-Jobs löschen?">Fertige löschen</button>
+            <button class="btn btn--secondary" type="button" data-jobs-prune-button data-group="ollama" data-status="queued,pending" data-confirm="Alle wartenden Ollama-Jobs löschen?">Warteschlange leeren</button>
+            <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="ollama" data-status="running" data-force="1" data-confirm="Running Ollama-Jobs erzwingen (abbrechen + löschen)?">Running erzwingen</button>
         </div>
     </div>
 
@@ -409,11 +418,12 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
             <summary>Filter</summary>
             <div class="details-body">
                 <div class="form-grid">
-                    <label>Mode
+                    <label>Modus
                         <select name="mode">
                             <?php foreach ($allowedModes as $mode): ?>
+                                <?php $modeLabel = $mode === 'all' ? 'alles' : $mode; ?>
                                 <option value="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $modeFilter === $mode ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?= htmlspecialchars($modeLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -421,17 +431,25 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                     <label>Status
                         <select name="status">
                             <?php foreach ($allowedStatuses as $status): ?>
+                                <?php $statusLabel = $status === 'all' ? 'alle' : $status; ?>
                                 <option value="<?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $statusFilter === $status ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </label>
-                    <label>Error-Code
+                    <label>Fehlercode
                         <select name="error_code">
                             <?php foreach ($allowedErrorCodes as $code): ?>
+                                <?php
+                                $codeLabel = match ($code) {
+                                    'all' => 'alle',
+                                    'none' => 'ohne',
+                                    default => $code,
+                                };
+                                ?>
                                 <option value="<?= htmlspecialchars($code, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $errorFilter === $code ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($code, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?= htmlspecialchars($codeLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -439,26 +457,51 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                     <label>Domain
                         <select name="domain">
                             <?php foreach ($allowedDomain as $domain): ?>
+                                <?php
+                                $domainLabel = match ($domain) {
+                                    'all' => 'alle',
+                                    'missing' => 'fehlend',
+                                    default => $domain,
+                                };
+                                ?>
                                 <option value="<?= htmlspecialchars($domain, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $domainFilter === $domain ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($domain, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?= htmlspecialchars($domainLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </label>
-                    <label>Quality
+                    <label>Qualität
                         <select name="quality">
                             <?php foreach ($allowedQuality as $quality): ?>
+                                <?php
+                                $qualityLabel = match ($quality) {
+                                    'all' => 'alle',
+                                    'high' => 'hoch',
+                                    'mid' => 'mittel',
+                                    'low' => 'niedrig',
+                                    'missing' => 'fehlend',
+                                    default => $quality,
+                                };
+                                ?>
                                 <option value="<?= htmlspecialchars($quality, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $qualityFilter === $quality ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($quality, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </label>
-                    <label>Has Meta
+                    <label>Hat Meta
                         <select name="has_meta">
                             <?php foreach ($allowedHasMeta as $hasMeta): ?>
+                                <?php
+                                $hasMetaLabel = match ($hasMeta) {
+                                    'all' => 'alle',
+                                    'with' => 'mit',
+                                    'without' => 'ohne',
+                                    default => $hasMeta,
+                                };
+                                ?>
                                 <option value="<?= htmlspecialchars($hasMeta, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $hasMetaFilter === $hasMeta ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($hasMeta, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?= htmlspecialchars($hasMetaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -469,7 +512,9 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                 </div>
                 <div class="button-stack inline">
                     <button class="btn btn--secondary" type="submit">Filter anwenden</button>
-                    <a class="btn btn--ghost" href="dashboard_ollama.php">Reset</a>
+                    <?php if ($filtersActive): ?>
+                        <a class="btn btn--ghost" href="dashboard_ollama.php">Filter zurücksetzen</a>
+                    <?php endif; ?>
                 </div>
             </div>
         </details>
@@ -486,12 +531,12 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                     <tr>
                         <th data-sort-key="status" class="sortable">Status</th>
                         <th>Job</th>
-                        <th>Mode</th>
-                        <th data-sort-key="progress" class="sortable">Progress</th>
+                        <th>Modus</th>
+                        <th data-sort-key="progress" class="sortable">Fortschritt</th>
                         <th data-sort-key="heartbeat" class="sortable">Heartbeat</th>
-                        <th>Error</th>
-                        <th>Model</th>
-                        <th>Stage</th>
+                        <th>Fehler</th>
+                        <th>Modell</th>
+                        <th>Stufe</th>
                         <th>Warnungen</th>
                         <th>Aktionen</th>
                     </tr>
@@ -565,9 +610,9 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                                 <td data-field="warnings" class="job-warnings">–</td>
                                 <td>
                                     <div class="table-actions">
-                                        <button class="btn btn--ghost btn--sm" type="button" data-action="requeue" data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" data-media-id="<?= $mediaId ?>">Requeue</button>
-                                        <button class="btn btn--secondary btn--sm" type="button" data-action="cancel" data-job-id="<?= $jobId ?>" <?= $canCancel ? '' : 'disabled' ?>>Cancel</button>
-                                        <button class="btn btn--danger btn--sm" type="button" data-action="delete" data-media-id="<?= $mediaId ?>" data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Delete</button>
+                                        <button class="btn btn--ghost btn--sm" type="button" data-action="requeue" data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" data-media-id="<?= $mediaId ?>">Neu einreihen</button>
+                                        <button class="btn btn--secondary btn--sm" type="button" data-action="cancel" data-job-id="<?= $jobId ?>" <?= $canCancel ? '' : 'disabled' ?>>Abbrechen</button>
+                                        <button class="btn btn--danger btn--sm" type="button" data-action="delete" data-media-id="<?= $mediaId ?>" data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Ergebnisse löschen</button>
                                     </div>
                                 </td>
                             </tr>
@@ -576,7 +621,7 @@ sv_ui_header('OLLAMA Dashboard', 'ollama');
                 </tbody>
             </table>
         </div>
-        <div class="hint small">Sortierung: Klick auf Status/Progress/Heartbeat.</div>
+        <div class="hint small">Sortierung: Klick auf Status/Fortschritt/Heartbeat.</div>
     </div>
 </div>
 

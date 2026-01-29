@@ -7,6 +7,77 @@
         }
     }
 
+    function normalizeSnippet(value, maxLen = 160) {
+        const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!cleaned) return '';
+        if (cleaned.length > maxLen) {
+            return `${cleaned.slice(0, maxLen)}…`;
+        }
+        return cleaned;
+    }
+
+    function formatApiError(payload, fallback) {
+        if (!payload || typeof payload !== 'object') {
+            return fallback;
+        }
+        const status = typeof payload.http_status === 'number'
+            ? payload.http_status
+            : Number(payload.http_status || 0);
+        if (status === 403) {
+            return 'Zugriff verweigert (403).';
+        }
+        if (status === 404) {
+            return 'Job nicht gefunden (evtl. bereits gelöscht).';
+        }
+        if (payload.code === 'non_json') {
+            const snippet = normalizeSnippet(payload.error, 200);
+            return `Server-Antwort ist kein JSON: ${snippet || '—'}`;
+        }
+        if (payload.error) {
+            return payload.error;
+        }
+        return fallback;
+    }
+
+    function fetchJson(endpoint, options = {}) {
+        return fetch(endpoint, options).then(async (resp) => {
+            const contentType = resp.headers.get('Content-Type') || '';
+            const textBody = await resp.text();
+            if (contentType.includes('application/json')) {
+                if (!textBody) {
+                    return { ok: resp.ok, http_status: resp.status, status_text: resp.statusText };
+                }
+                try {
+                    const data = JSON.parse(textBody);
+                    if (data && typeof data === 'object') {
+                        if (typeof data.http_status === 'undefined') {
+                            data.http_status = resp.status;
+                        }
+                        if (typeof data.status_text === 'undefined') {
+                            data.status_text = resp.statusText;
+                        }
+                    }
+                    return data;
+                } catch (err) {
+                    return {
+                        ok: false,
+                        error: textBody,
+                        http_status: resp.status,
+                        status_text: resp.statusText,
+                        code: 'non_json',
+                    };
+                }
+            }
+            return {
+                ok: false,
+                error: textBody,
+                http_status: resp.status,
+                status_text: resp.statusText,
+                code: 'non_json',
+            };
+        });
+    }
+
     function initTabs() {
         document.querySelectorAll('.tab-bar').forEach((bar) => {
             const buttons = Array.from(bar.querySelectorAll('.tab-button'));
@@ -368,14 +439,11 @@
         }
 
         function loadJobs() {
-            fetch(endpoint, { headers: { Accept: 'application/json' } })
-                .then((resp) => {
-                    if (!resp.ok) {
-                        throw new Error(`HTTP ${resp.status}`);
-                    }
-                    return resp.json();
-                })
+            fetchJson(endpoint, { headers: { Accept: 'application/json' } })
                 .then((data) => {
+                    if (!data || data.ok === false) {
+                        throw new Error(formatApiError(data, 'Job-Status konnte nicht geladen werden.'));
+                    }
                     const jobs = data.jobs || [];
                     lastStatusLabel = jobs.length ? `Status: ${jobs.map((j) => j.status || 'queued').join(', ')}` : 'Keine Jobs';
                     renderJobs(jobs);
@@ -468,24 +536,21 @@
                 startButton.disabled = true;
             }
             const formData = new FormData(form);
-            fetch(endpoint, {
+            fetchJson(endpoint, {
                 method: 'POST',
                 body: formData,
                 headers: { Accept: 'application/json' },
             })
-                .then((resp) => {
-                    if (!resp.ok) {
-                        throw new Error(`HTTP ${resp.status}`);
-                    }
-                    return resp.json();
-                })
                 .then((payload) => {
                     if (status) {
                         status.classList.remove('is-hidden');
-                        status.classList.toggle('error', !payload.ok);
-                        status.textContent = payload.message || (payload.ok ? 'Repair gestartet.' : 'Repair fehlgeschlagen.');
+                        status.classList.toggle('error', !payload || !payload.ok);
+                        const fallback = payload && payload.ok ? 'Repair gestartet.' : 'Repair fehlgeschlagen.';
+                        status.textContent = payload && payload.message
+                            ? payload.message
+                            : formatApiError(payload, fallback);
                     }
-                    if (payload.ok) {
+                    if (payload && payload.ok) {
                         document.dispatchEvent(new Event('sv-forge-refresh'));
                     }
                 })
@@ -682,9 +747,11 @@
         }
 
         function loadState() {
-            fetch(endpoint, { headers: { Accept: 'application/json' } })
-                .then((resp) => resp.json())
+            fetchJson(endpoint, { headers: { Accept: 'application/json' } })
                 .then((data) => {
+                    if (!data || data.ok === false) {
+                        throw new Error(formatApiError(data, 'Rescan-Status konnte nicht geladen werden.'));
+                    }
                     const active = renderState(data);
                     scheduleNext(active);
                 })
@@ -809,12 +876,11 @@
         }
 
         function loadJobs() {
-            fetch(endpoint, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
-                .then((resp) => {
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    return resp.json();
-                })
+            fetchJson(endpoint, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
                 .then((data) => {
+                    if (!data || data.ok === false) {
+                        throw new Error(formatApiError(data, 'Scan-Jobs konnten nicht geladen werden.'));
+                    }
                     const jobs = Array.isArray(data.jobs) ? data.jobs : [];
                     renderJobs(jobs);
                     const active = jobs.some((job) => activeStatuses.includes((job.status || '').toLowerCase()));
@@ -848,9 +914,13 @@
             if (action === 'delete' && !window.confirm('Job wirklich löschen?')) return;
 
             const ajaxAction = action === 'cancel' ? 'job_cancel' : 'job_delete';
-            fetch(buildAjaxUrl(ajaxAction, jobId), { method: 'POST', credentials: 'same-origin' })
-                .then((resp) => resp.json())
-                .then(() => loadJobs())
+            fetchJson(buildAjaxUrl(ajaxAction, jobId), { method: 'POST', credentials: 'same-origin' })
+                .then((data) => {
+                    if (data && data.ok === false) {
+                        list.innerHTML = `<div class="job-error">${escapeHtml(formatApiError(data, 'Aktion fehlgeschlagen.'))}</div>`;
+                    }
+                    loadJobs();
+                })
                 .catch(() => loadJobs());
         });
 
@@ -864,13 +934,17 @@
                 if (!canManage) return;
                 if (!window.confirm('Fertige Scan-Jobs wirklich prunen?')) return;
                 const formData = new FormData(pruneForm);
-                fetch(buildAjaxUrl('jobs_prune'), {
+                fetchJson(buildAjaxUrl('jobs_prune'), {
                     method: 'POST',
                     body: formData,
                     credentials: 'same-origin',
                 })
-                    .then((resp) => resp.json())
-                    .then(() => loadJobs())
+                    .then((data) => {
+                        if (data && data.ok === false) {
+                            list.innerHTML = `<div class="job-error">${escapeHtml(formatApiError(data, 'Prune fehlgeschlagen.'))}</div>`;
+                        }
+                        loadJobs();
+                    })
                     .catch(() => loadJobs());
             });
         }
@@ -888,12 +962,12 @@
                 if (value === undefined || value === null || value === '') return;
                 body.append(key, String(value));
             });
-            return fetch(endpoint, {
+            return fetchJson(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body,
                 credentials: 'same-origin',
-            }).then((resp) => resp.json());
+            });
         };
 
         const buildMessage = (result, note) => {
@@ -956,7 +1030,7 @@
                 postAction(endpoint, payload)
                     .then((data) => {
                         if (!data || !data.ok) {
-                            throw new Error(data && data.error ? data.error : 'Prune fehlgeschlagen.');
+                            throw new Error(formatApiError(data, 'Prune fehlgeschlagen.'));
                         }
                         setMessage('success', buildMessage(data.result, data.note));
                     })
@@ -1039,12 +1113,12 @@
                 if (value === undefined || value === null) return;
                 body.append(key, String(value));
             });
-            return fetch(endpoint, {
+            return fetchJson(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body,
                 credentials: 'same-origin',
-            }).then((resp) => resp.json());
+            });
         }
 
         function updateStatusCounts(data) {
@@ -1242,48 +1316,56 @@
             if (action === 'cancel') {
                 const jobId = button.dataset.jobId;
                 if (!jobId) return;
-                showMessage('success', 'Cancel', `Job #${jobId} wird abgebrochen...`);
+                showMessage('success', 'Abbrechen', `Job #${jobId} wird abgebrochen...`);
                 postAction({ action: 'cancel', job_id: jobId })
                     .then((data) => {
                         if (!data || !data.ok) {
-                            throw new Error(data && data.error ? data.error : 'Cancel fehlgeschlagen.');
+                            const errorMessage = formatApiError(data, 'Abbrechen fehlgeschlagen.');
+                            if (data && Number(data.http_status || 0) === 404) {
+                                const row = button.closest('tr');
+                                if (row) {
+                                    row.remove();
+                                }
+                                pollStatus();
+                            }
+                            throw new Error(errorMessage);
                         }
-                        showMessage('success', 'Cancel', `Job #${jobId} abgebrochen.`);
+                        showMessage('success', 'Abbrechen', `Job #${jobId} abgebrochen.`);
                         pollJobs();
                     })
-                    .catch((err) => showMessage('error', 'Cancel', err.message));
+                    .catch((err) => showMessage('error', 'Abbrechen', err.message));
             }
             if (action === 'delete') {
                 const mediaId = button.dataset.mediaId;
                 const mode = button.dataset.mode;
                 if (!mediaId || !mode) return;
                 if (!window.confirm(`Ergebnisse für Media ${mediaId} (${mode}) löschen?`)) return;
-                showMessage('success', 'Delete', `Delete für Media ${mediaId} (${mode})...`);
+                showMessage('success', 'Löschen', `Löschen für Media ${mediaId} (${mode})...`);
                 postAction({ action: 'delete', media_id: mediaId, mode })
                     .then((data) => {
                         if (!data || !data.ok) {
-                            throw new Error(data && data.error ? data.error : 'Delete fehlgeschlagen.');
+                            throw new Error(formatApiError(data, 'Löschen fehlgeschlagen.'));
                         }
-                        showMessage('success', 'Delete', `Media ${mediaId} (${mode}) gelöscht.`);
+                        showMessage('success', 'Löschen', `Media ${mediaId} (${mode}) gelöscht.`);
                         pollStatus();
                     })
-                    .catch((err) => showMessage('error', 'Delete', err.message));
+                    .catch((err) => showMessage('error', 'Löschen', err.message));
             }
             if (action === 'requeue') {
                 const mediaId = button.dataset.mediaId;
                 const mode = button.dataset.mode;
                 if (!mediaId || !mode) return;
-                showMessage('success', 'Requeue', `Requeue für Media ${mediaId} (${mode})...`);
+                showMessage('success', 'Neu einreihen', `Neu einreihen für Media ${mediaId} (${mode})...`);
                 const filters = { media_id: Number(mediaId), force: 1, all: 1, limit: 1 };
                 postAction({ action: 'enqueue', mode, filters: JSON.stringify(filters) })
                     .then((data) => {
                         if (!data || !data.ok) {
-                            throw new Error(data && data.error ? data.error : 'Requeue fehlgeschlagen.');
+                            throw new Error(formatApiError(data, 'Neu einreihen fehlgeschlagen.'));
                         }
-                        showMessage('success', 'Requeue', `Requeue abgeschlossen (Media ${mediaId}).`);
+                        showMessage('success', 'Neu einreihen', `Neu einreihen abgeschlossen (Media ${mediaId}).`);
                         pollStatus();
                     })
-                    .catch((err) => showMessage('error', 'Requeue', err.message));
+                    .catch((err) => showMessage('error', 'Neu einreihen', err.message));
             }
         }
 
@@ -1303,26 +1385,26 @@
             const config = getRunConfig();
             runRequestInFlight = true;
             setRunControlsDisabled(true);
-            showMessage('success', 'Run', `Batch läuft (${config.batch}, ${config.maxSeconds}s).`);
+            showMessage('success', 'Batch', `Batch läuft (${config.batch}, ${config.maxSeconds}s).`);
             return postAction({ action: 'run', batch: config.batch, max_seconds: config.maxSeconds })
                 .then((data) => {
                     if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy')) {
                         const text = data.status === 'locked'
-                            ? 'Runner locked (ein anderer Run aktiv).'
-                            : `Ollama busy (running ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
+                            ? 'Worker gesperrt (ein anderer Lauf aktiv).'
+                            : `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
                         showMessage('success', 'Status', text);
                         return { status: data.status };
                     }
                     if (!data || !data.ok) {
-                        throw new Error(data && data.error ? data.error : 'Run fehlgeschlagen.');
+                        throw new Error(formatApiError(data, 'Batch fehlgeschlagen.'));
                     }
-                    showMessage('success', 'Run', `Verarbeitet: ${data.processed || 0}, Done: ${data.done || 0}, Errors: ${data.errors || 0}.`);
+                    showMessage('success', 'Batch', `Verarbeitet: ${data.processed || 0}, Fertig: ${data.done || 0}, Fehler: ${data.errors || 0}.`);
                     pollStatus();
                     pollJobs();
                     return { status: 'ok' };
                 })
                 .catch((err) => {
-                    showMessage('error', 'Run', err.message);
+                    showMessage('error', 'Batch', err.message);
                     return { status: 'error' };
                 })
                 .finally(() => {
@@ -1359,17 +1441,17 @@
                     missing_caption: formData.get('missing_caption') ? 1 : 0,
                     all: formData.get('all') ? 1 : 0,
                 };
-                showMessage('success', 'Enqueue', `Enqueue läuft (${mode}).`);
+                showMessage('success', 'Einreihen', `Einreihen läuft (${mode}).`);
                 postAction({ action: 'enqueue', mode, filters: JSON.stringify(filters) })
                     .then((data) => {
                         if (!data || !data.ok) {
-                            throw new Error(data && data.error ? data.error : 'Enqueue fehlgeschlagen.');
+                            throw new Error(formatApiError(data, 'Einreihen fehlgeschlagen.'));
                         }
-                        showMessage('success', 'Enqueue', `Enqueue OK: ${JSON.stringify(data.summary || {})}`);
+                        showMessage('success', 'Einreihen', `Einreihen OK: ${JSON.stringify(data.summary || {})}`);
                         pollStatus();
                         pollJobs();
                     })
-                    .catch((err) => showMessage('error', 'Enqueue', err.message));
+                    .catch((err) => showMessage('error', 'Einreihen', err.message));
             });
         }
 
@@ -1377,17 +1459,17 @@
 
         if (quickEnqueueBtn) {
             quickEnqueueBtn.addEventListener('click', () => {
-                showMessage('success', 'Enqueue', 'Enqueue all läuft.');
+                showMessage('success', 'Einreihen', 'Alles einreihen läuft.');
                 postAction({ action: 'enqueue', mode: 'all' })
                     .then((data) => {
                         if (!data || !data.ok) {
-                            throw new Error(data && data.error ? data.error : 'Enqueue fehlgeschlagen.');
+                            throw new Error(formatApiError(data, 'Einreihen fehlgeschlagen.'));
                         }
-                        showMessage('success', 'Enqueue', `Enqueue OK: ${JSON.stringify(data.summary || {})}`);
+                        showMessage('success', 'Einreihen', `Einreihen OK: ${JSON.stringify(data.summary || {})}`);
                         pollStatus();
                         pollJobs();
                     })
-                    .catch((err) => showMessage('error', 'Enqueue', err.message));
+                    .catch((err) => showMessage('error', 'Einreihen', err.message));
             });
         }
 
@@ -1401,7 +1483,7 @@
             autoRunBtn.addEventListener('click', () => {
                 autoRunEnabled = !autoRunEnabled;
                 autoRunBtn.setAttribute('aria-pressed', autoRunEnabled ? 'true' : 'false');
-                autoRunBtn.textContent = autoRunEnabled ? 'Auto-Run: An' : 'Auto-Run: Aus';
+                autoRunBtn.textContent = autoRunEnabled ? 'Auto-Lauf: An' : 'Auto-Lauf: Aus';
                 if (autoRunEnabled) {
                     triggerAutoRun();
                 }
@@ -1467,24 +1549,24 @@
                 if (value === undefined || value === null) return;
                 body.append(key, String(value));
             });
-            return fetch(endpoint, {
+            return fetchJson(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body,
                 credentials: 'same-origin',
-            }).then((resp) => resp.json());
+            });
         };
 
         button.addEventListener('click', () => {
             if (!mediaId) return;
             button.disabled = true;
-            setMessage('success', 'Enqueue läuft...');
+            setMessage('success', 'Einreihen läuft...');
             postAction({ action: 'enqueue', mode: 'all', media_id: mediaId })
                 .then((data) => {
                     if (!data || !data.ok) {
-                        throw new Error(data && data.error ? data.error : 'Enqueue fehlgeschlagen.');
+                        throw new Error(formatApiError(data, 'Einreihen fehlgeschlagen.'));
                     }
-                    setMessage('success', 'Enqueue OK, starte Run...');
+                    setMessage('success', 'Einreihen OK, starte Batch...');
                     return postAction({
                         action: 'run',
                         batch: Number.isFinite(runBatch) && runBatch > 0 ? runBatch : 2,
@@ -1494,15 +1576,15 @@
                 .then((data) => {
                     if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy')) {
                         const text = data.status === 'locked'
-                            ? 'Runner locked (ein anderer Run aktiv).'
-                            : `Ollama busy (running ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
+                            ? 'Worker gesperrt (ein anderer Lauf aktiv).'
+                            : `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
                         setMessage('success', text);
                         return;
                     }
                     if (!data || !data.ok) {
-                        throw new Error(data && data.error ? data.error : 'Run fehlgeschlagen.');
+                        throw new Error(formatApiError(data, 'Batch fehlgeschlagen.'));
                     }
-                    setMessage('success', `Run OK (processed: ${data.processed || 0}).`);
+                    setMessage('success', `Batch OK (verarbeitet: ${data.processed || 0}).`);
                 })
                 .catch((err) => {
                     setMessage('error', err.message);
