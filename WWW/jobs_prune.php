@@ -7,32 +7,34 @@ require_once __DIR__ . '/../SCRIPTS/operations.php';
 require_once __DIR__ . '/../SCRIPTS/ollama_jobs.php';
 require_once __DIR__ . '/../SCRIPTS/jobs_admin.php';
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['ok' => false, 'error' => 'POST required.'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+header('Content-Type: application/json; charset=utf-8');
+
+$respond = static function (int $code, array $payload): void {
+    http_response_code($code);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
+};
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    $respond(405, ['ok' => false, 'error' => 'POST required.']);
 }
 
 try {
     $config = sv_load_config();
 } catch (Throwable $e) {
-    http_response_code(500);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['ok' => false, 'error' => 'Config-Fehler.'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
+    $respond(500, ['ok' => false, 'error' => 'Config-Fehler.']);
 }
 
-sv_require_internal_access($config, 'jobs_prune');
-
-header('Content-Type: application/json; charset=utf-8');
+$isLoopback = sv_is_loopback_remote_addr();
+$hasInternal = $isLoopback ? true : sv_validate_internal_access($config, 'jobs_prune', false);
+if (!$isLoopback && !$hasInternal) {
+    $respond(403, ['ok' => false, 'error' => 'Forbidden', 'code' => 'forbidden']);
+}
 
 try {
     $pdo = sv_open_pdo($config);
 } catch (Throwable $e) {
-    http_response_code(503);
-    echo json_encode(['ok' => false, 'error' => 'Keine DB-Verbindung.'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
+    $respond(503, ['ok' => false, 'error' => 'Keine DB-Verbindung.']);
 }
 
 $group = is_string($_POST['group'] ?? null) ? trim((string)$_POST['group']) : '';
@@ -64,9 +66,7 @@ if ($group === 'ollama') {
         ? array_values(array_filter(array_map('trim', explode(',', (string)$_POST['job_types']))))
         : [];
 } else {
-    http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'Ungültige Gruppe.'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
+    $respond(400, ['ok' => false, 'error' => 'Ungültige Gruppe.']);
 }
 
 if ($note !== null) {
@@ -101,9 +101,8 @@ try {
         'result' => $result,
     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 } catch (Throwable $e) {
-    http_response_code(400);
-    echo json_encode([
+    $respond(400, [
         'ok' => false,
         'error' => sv_sanitize_error_message($e->getMessage()),
-    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    ]);
 }
