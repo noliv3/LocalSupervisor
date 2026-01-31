@@ -190,7 +190,10 @@ function sv_db_expected_schema(): array
         ],
         'jobs' => [
             'id', 'media_id', 'prompt_id', 'type', 'status', 'created_at', 'updated_at',
-            'forge_request_json', 'forge_response_json', 'error_message',
+            'forge_request_json', 'forge_response_json', 'payload_json', 'error_message',
+            'last_error_code', 'heartbeat_at', 'progress_bits', 'progress_bits_total',
+            'cancel_requested', 'cancelled_at',
+            'worker_pid', 'worker_owner', 'stage', 'stage_changed_at',
         ],
         'media_lifecycle_events' => [
             'id', 'media_id', 'event_type', 'from_status', 'to_status', 'quality_status', 'quality_score',

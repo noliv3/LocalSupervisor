@@ -48,3 +48,36 @@ function sv_ollama_write_trace(array $config, array $trace): ?string
 
     return $target;
 }
+
+function sv_ollama_trace_update(array $config, string $traceFile, array $patch): void
+{
+    $traceFile = trim($traceFile);
+    if ($traceFile === '' || $patch === []) {
+        return;
+    }
+
+    $existing = [];
+    if (is_file($traceFile)) {
+        $raw = @file_get_contents($traceFile);
+        if (is_string($raw) && trim($raw) !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $existing = $decoded;
+            }
+        }
+    }
+
+    $merged = array_replace_recursive($existing, $patch);
+
+    $json = json_encode($merged, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    if ($json === false) {
+        return;
+    }
+
+    $dir = dirname($traceFile);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+    }
+
+    @file_put_contents($traceFile, $json . PHP_EOL);
+}

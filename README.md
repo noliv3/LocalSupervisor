@@ -106,6 +106,11 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **action=delete**
   - `media_id`, `mode` = `caption|title|prompt_eval|tags_normalize|quality|nsfw_classify|prompt_recon|embed|dupe_hints`
 
+### Runner/Tracing Hinweise
+- `WWW/ollama.php?action=run` startet jetzt den CLI-Worker und gibt sofort zurück (kein Web-Prozess-Blocking).
+- Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
+- Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
+
 ### Logpfade
 - **Log-Root:** `paths.logs` aus der Config, sonst `LOGS/`
 - **Ollama-Worker:** `LOGS/ollama_worker.lock.json`, `LOGS/ollama_worker.err.log`
@@ -126,6 +131,11 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Whitelist-Validierung über `ip_whitelist`.
 - Session/Cookie-Handling hängt von `allow_insecure_internal_cookie` ab.
 - Default ist lokal/loopback-orientiert.
+
+## Minimal Tests (manuell, nicht automatisch)
+1. **Ollama down:** Runner starten → keine Jobs werden `running`, Log enthält `ollama_down`.
+2. **Vision-Job groß:** Worker startet Child; nach `max_seconds` wird gekillt → Job endet `error/timeout`, Delete funktioniert.
+3. **tags_normalize:** Bei `connection refused` bleibt der Trace final mit Fehlerdaten gefüllt.
 
 ## Troubleshooting (kurz)
 - **SQLite busy_timeout/WAL:** Werte in `CONFIG/config.php` prüfen (`db.sqlite`).
