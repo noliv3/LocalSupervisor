@@ -238,6 +238,7 @@ if ($action === 'run_once') {
     }
 
     try {
+        sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
         $maxConcurrency = sv_ollama_max_concurrency($config);
         $running = sv_ollama_running_job_count($pdo);
         if ($running >= $maxConcurrency) {
@@ -294,6 +295,8 @@ if ($action === 'enqueue') {
     $buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $since) use ($pdo, $limit): PDOStatement {
         $sql = 'SELECT m.id FROM media m';
         $params = [];
+        $conditions = [];
+        $imageRequired = sv_ollama_mode_requires_image($mode);
 
         if ($mode === 'prompt_recon') {
             $sql .= ' LEFT JOIN media_meta mm_prompt ON mm_prompt.media_id = m.id AND mm_prompt.meta_key = :prompt_key';
@@ -313,8 +316,12 @@ if ($action === 'enqueue') {
                 $params[':mode'] = $mode;
             }
         }
-
-        $conditions = [];
+        if ($imageRequired) {
+            $sql .= ' LEFT JOIN media_meta mm_too_large ON mm_too_large.media_id = m.id AND mm_too_large.meta_key = :too_large_key';
+            $params[':too_large_key'] = 'ollama.too_large_for_vision';
+            $conditions[] = 'm.type = "image"';
+            $conditions[] = 'mm_too_large.id IS NULL';
+        }
         if ($mode === 'prompt_recon') {
             $conditions[] = 'mm_prompt.id IS NULL';
             $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';

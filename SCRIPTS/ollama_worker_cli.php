@@ -76,6 +76,8 @@ try {
         $maxMinutes = null;
     }
 
+    sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
+
     $maxConcurrency = sv_ollama_max_concurrency($config);
     $running = sv_ollama_running_job_count($pdo);
     if ($running >= $maxConcurrency) {

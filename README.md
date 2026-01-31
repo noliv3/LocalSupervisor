@@ -78,6 +78,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ### Ollama Enqueue + Service Loop
 - Prompt-Templates kommen aus `PROMPTS/ollama/*.txt`.
+- Beim Start prüft der Worker die Prompt-Dateien und die Modellverfügbarkeit; fehlende Assets blockieren den Ollama-Worker (globaler Status).
 - Jobs anlegen:
   ```bash
   php SCRIPTS/ollama_enqueue_cli.php --mode=caption|title|prompt_eval|tags_normalize|quality|nsfw_classify|prompt_recon|embed|all --limit=N --since=YYYY-MM-DD --all --missing-title --missing-caption
@@ -93,6 +94,8 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Zustände: `queued` → `running` → `done/error/cancelled` (`pending` ist legacy und wird nur noch gelesen).
 - `running` wird ausschließlich nach einem erfolgreichen Claim/Spawn gesetzt; der Claim setzt `heartbeat_at`.
 - Retry-Backoff wird über `jobs.not_before` gesteuert: Jobs bleiben `queued`, bis der Timestamp erreicht ist.
+- Timeouts können retrybar sein (solange `max_retries` nicht ausgeschöpft ist).
+- Deterministische Vision-Limits werden als `ollama.too_large_for_vision` markiert und bei Vision-Kandidaten übersprungen.
 - Backoff-Konfiguration in `CONFIG/config.php` (`ollama.retry`):
   - `backoff_ms` (Basis, Default 1000ms)
   - `backoff_ms_max` (Cap, Default 30000ms)
@@ -117,6 +120,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ### Runner/Tracing Hinweise
 - `WWW/ollama.php?action=run` startet jetzt den CLI-Worker und gibt sofort zurück (kein Web-Prozess-Blocking).
+- Der Start bestätigt erst nach erfolgreichem Worker-Lock/Heartbeat (kein falsches "started").
 - Unter Windows wird der Worker über PowerShell im Hidden-Window gestartet, damit keine sichtbare Konsole geöffnet wird.
 - Die Windows-Start-Process-Argumente sind gequotet, damit Pfade mit Leerzeichen sauber verarbeitet werden.
 - Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
@@ -124,9 +128,11 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ### Logpfade
 - **Log-Root:** `paths.logs` aus der Config, sonst `LOGS/`
-- **Ollama-Worker:** `LOGS/ollama_worker.lock.json`, `LOGS/ollama_worker.err.log`
+- **Ollama-Worker:** `LOGS/ollama_worker.lock`, `LOGS/ollama_worker.err.log`
+- **Ollama-Launcher:** `LOGS/ollama_launcher.lock`
 - **Ollama-Jobs:** `LOGS/ollama_jobs.jsonl`, `LOGS/ollama_errors.jsonl`
 - **Ollama-Service:** `LOGS/ollama_service.jsonl`
+- **Ollama-Status:** `LOGS/ollama_status.json`
 
 ## Web UI Seiten
 - `mediadb.php`: Listing/Filter der Medien.
