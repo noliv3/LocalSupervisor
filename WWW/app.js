@@ -1077,6 +1077,7 @@
         const messageBox = root.querySelector('[data-ollama-message]');
         const messageTitle = messageBox ? messageBox.querySelector('.action-feedback-title') : null;
         const messageText = messageBox ? messageBox.querySelector('div:nth-child(2)') : null;
+        const systemStatusEl = root.querySelector('[data-ollama-system-status]');
         const quickEnqueueBtn = root.querySelector('[data-ollama-quick-enqueue]');
         const runBtn = root.querySelector('[data-ollama-run]');
         const autoRunBtn = root.querySelector('[data-ollama-auto-run]');
@@ -1158,6 +1159,51 @@
                     lockedEl.textContent = data.runner_locked ? 'ja' : 'nein';
                 }
             }
+        }
+
+        function updateGlobalStatus(data) {
+            if (!systemStatusEl) return;
+            const globalStatus = data.global_status || {};
+            const entries = Object.entries(globalStatus).filter(([, value]) => value && value.active);
+            systemStatusEl.innerHTML = '';
+
+            if (entries.length === 0) {
+                const hint = document.createElement('div');
+                hint.className = 'hint small';
+                hint.textContent = 'Keine aktiven System-Blocker.';
+                systemStatusEl.appendChild(hint);
+                return;
+            }
+
+            const list = document.createElement('div');
+            list.className = 'status-stack';
+            entries.forEach(([key, value]) => {
+                const row = document.createElement('div');
+                row.className = 'action-note error';
+                const label = document.createElement('strong');
+                const labelMap = {
+                    ollama_down: 'Ollama down',
+                    missing_prompts: 'Prompt-Templates fehlen',
+                    missing_models: 'Modelle fehlen',
+                };
+                label.textContent = labelMap[key] || key;
+                const text = document.createElement('div');
+                const message = value.message ? ` ${value.message}` : '';
+                const since = value.since ? ` (seit ${value.since})` : '';
+                text.textContent = `${message}${since}`.trim() || 'aktiv';
+                row.appendChild(label);
+                row.appendChild(text);
+
+                if (value.details && typeof value.details === 'object') {
+                    const details = document.createElement('div');
+                    details.className = 'hint small';
+                    details.textContent = JSON.stringify(value.details);
+                    row.appendChild(details);
+                }
+
+                list.appendChild(row);
+            });
+            systemStatusEl.appendChild(list);
         }
 
         function updateWarnings(row, status, progressKey, heartbeatAt) {
@@ -1285,6 +1331,7 @@
                 .then((data) => {
                     if (data && data.ok) {
                         updateStatusCounts(data);
+                        updateGlobalStatus(data);
                         if (autoRunEnabled) {
                             triggerAutoRun();
                         }
@@ -1388,17 +1435,25 @@
             showMessage('success', 'Batch', `Batch läuft (${config.batch}, ${config.maxSeconds}s).`);
             return postAction({ action: 'run', batch: config.batch, max_seconds: config.maxSeconds })
                 .then((data) => {
-                    if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy')) {
-                        const text = data.status === 'locked'
-                            ? 'Worker gesperrt (ein anderer Lauf aktiv).'
-                            : `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
+                    if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy' || data.status === 'blocked' || data.status === 'start_failed')) {
+                        let text = '';
+                        if (data.status === 'locked') {
+                            text = 'Launcher gesperrt (ein anderer Start läuft).';
+                        } else if (data.status === 'busy') {
+                            text = `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
+                        } else if (data.status === 'blocked') {
+                            text = `Start blockiert (${data.reason || 'preflight'}).`;
+                        } else if (data.status === 'start_failed') {
+                            text = 'Worker-Start nicht verifiziert (kein Lock/Heartbeat).';
+                        }
                         showMessage('success', 'Status', text);
                         return { status: data.status };
                     }
                     if (!data || !data.ok) {
                         throw new Error(formatApiError(data, 'Batch fehlgeschlagen.'));
                     }
-                    showMessage('success', 'Batch', `Verarbeitet: ${data.processed || 0}, Fertig: ${data.done || 0}, Fehler: ${data.errors || 0}.`);
+                    const pidLabel = data.pid ? ` (PID ${data.pid})` : '';
+                    showMessage('success', 'Batch', `Worker gestartet${pidLabel}.`);
                     pollStatus();
                     pollJobs();
                     return { status: 'ok' };

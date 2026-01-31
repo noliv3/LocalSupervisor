@@ -355,6 +355,13 @@ sv_ui_header('Ollama-Dashboard', 'ollama');
     </div>
 
     <div class="panel">
+        <div class="panel-header">Systemstatus</div>
+        <div data-ollama-system-status>
+            <div class="hint small">Status wird geladen…</div>
+        </div>
+    </div>
+
+    <div class="panel">
         <div class="panel-header">Aktionen</div>
         <div class="action-feedback" data-ollama-message>
             <div class="action-feedback-title">Bereit</div>

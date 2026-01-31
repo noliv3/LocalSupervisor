@@ -97,9 +97,61 @@ function sv_ollama_runner_lock_path(array $config): string
     return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_worker.lock';
 }
 
+function sv_ollama_launcher_lock_path(array $config): string
+{
+    $logsRoot = sv_logs_root($config);
+    if (!is_dir($logsRoot)) {
+        @mkdir($logsRoot, 0777, true);
+    }
+
+    return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_launcher.lock';
+}
+
 function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): array
 {
     $lockPath = sv_ollama_runner_lock_path($config);
+    $handle = @fopen($lockPath, 'c+');
+    if ($handle === false) {
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'open_failed',
+        ];
+    }
+
+    $locked = @flock($handle, LOCK_EX | LOCK_NB);
+    if (!$locked) {
+        @fclose($handle);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'locked',
+        ];
+    }
+
+    $payload = [
+        'pid' => function_exists('getmypid') ? (int)getmypid() : null,
+        'started_at' => date('c'),
+        'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
+        'owner' => $owner ?? PHP_SAPI,
+    ];
+    @ftruncate($handle, 0);
+    @fwrite($handle, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    @fflush($handle);
+
+    return [
+        'ok' => true,
+        'handle' => $handle,
+        'path' => $lockPath,
+        'reason' => null,
+    ];
+}
+
+function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): array
+{
+    $lockPath = sv_ollama_launcher_lock_path($config);
     $handle = @fopen($lockPath, 'c+');
     if ($handle === false) {
         return [
@@ -147,6 +199,232 @@ function sv_ollama_release_runner_lock($handle): void
 
     @flock($handle, LOCK_UN);
     @fclose($handle);
+}
+
+function sv_ollama_release_launcher_lock($handle): void
+{
+    if (!is_resource($handle)) {
+        return;
+    }
+
+    @flock($handle, LOCK_UN);
+    @fclose($handle);
+}
+
+function sv_ollama_status_path(array $config): string
+{
+    $logsRoot = sv_logs_root($config);
+    if (!is_dir($logsRoot)) {
+        @mkdir($logsRoot, 0777, true);
+    }
+
+    return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_status.json';
+}
+
+function sv_ollama_read_global_status(array $config): array
+{
+    $path = sv_ollama_status_path($config);
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    $raw = @file_get_contents($path);
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function sv_ollama_write_global_status(array $config, array $status): void
+{
+    $path = sv_ollama_status_path($config);
+    $payload = json_encode($status, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($payload)) {
+        return;
+    }
+    @file_put_contents($path, $payload, LOCK_EX);
+}
+
+function sv_ollama_update_global_status(array $config, string $key, bool $active, ?string $message = null, array $details = []): void
+{
+    $status = sv_ollama_read_global_status($config);
+    $now = date('c');
+    $current = is_array($status[$key] ?? null) ? $status[$key] : [];
+    $since = $current['since'] ?? $now;
+    if ($active && (!isset($current['active']) || !$current['active'])) {
+        $since = $now;
+    }
+
+    $status[$key] = [
+        'active' => $active,
+        'since' => $since,
+        'updated_at' => $now,
+        'message' => $message,
+        'details' => $details,
+    ];
+
+    sv_ollama_write_global_status($config, $status);
+}
+
+function sv_ollama_mode_requires_image(string $mode): bool
+{
+    return in_array($mode, ['caption', 'title', 'prompt_eval', 'quality', 'nsfw_classify'], true);
+}
+
+function sv_ollama_required_prompt_files(): array
+{
+    return [
+        'caption' => 'caption.txt',
+        'title' => 'title.txt',
+        'prompt_eval' => 'prompt_eval.txt',
+        'tags_normalize' => 'tags_normalize.txt',
+        'quality' => 'quality.txt',
+        'prompt_recon' => 'prompt_recon.txt',
+        'nsfw_classify' => 'nsfw_classify.txt',
+    ];
+}
+
+function sv_ollama_check_prompt_templates(array $config): array
+{
+    $ollamaCfg = sv_ollama_config($config);
+    $promptDir = $ollamaCfg['prompts_dir'] ?? null;
+    if (!is_string($promptDir) || trim($promptDir) === '') {
+        $promptDir = sv_base_dir() . DIRECTORY_SEPARATOR . 'PROMPTS' . DIRECTORY_SEPARATOR . 'ollama';
+    }
+    $promptDir = sv_normalize_directory($promptDir);
+
+    $missing = [];
+    foreach (sv_ollama_required_prompt_files() as $mode => $file) {
+        $filePath = $promptDir . DIRECTORY_SEPARATOR . $file;
+        if (!is_file($filePath) || !is_readable($filePath)) {
+            $missing[$mode] = 'missing';
+            continue;
+        }
+        $content = @file_get_contents($filePath);
+        if (!is_string($content) || trim($content) === '') {
+            $missing[$mode] = 'empty';
+        }
+    }
+
+    return [
+        'ok' => $missing === [],
+        'missing' => $missing,
+        'prompt_dir' => $promptDir,
+    ];
+}
+
+function sv_ollama_check_model_availability(array $config): array
+{
+    $ollamaCfg = sv_ollama_config($config);
+    $modelsToCheck = array_filter([
+        $ollamaCfg['model_default'] ?? null,
+        $ollamaCfg['model']['default'] ?? null,
+        $ollamaCfg['model']['vision'] ?? null,
+        $ollamaCfg['model']['text'] ?? null,
+        $ollamaCfg['model']['embed'] ?? null,
+    ], static fn ($value) => is_string($value) && trim($value) !== '');
+    $modelsToCheck = array_values(array_unique(array_map('strval', $modelsToCheck)));
+
+    $modelList = sv_ollama_fetch_model_list($config);
+    if (empty($modelList['ok'])) {
+        return [
+            'ok' => false,
+            'missing' => $modelsToCheck,
+            'error' => $modelList['error'] ?? 'model_list_unavailable',
+        ];
+    }
+
+    $available = array_fill_keys($modelList['models'] ?? [], true);
+    $missing = [];
+    foreach ($modelsToCheck as $modelName) {
+        if (!isset($available[$modelName])) {
+            $missing[] = $modelName;
+        }
+    }
+
+    return [
+        'ok' => $missing === [],
+        'missing' => $missing,
+        'error' => null,
+    ];
+}
+
+function sv_ollama_preflight(PDO $pdo, array $config, callable $logger): array
+{
+    $promptCheck = sv_ollama_check_prompt_templates($config);
+    if (empty($promptCheck['ok'])) {
+        sv_ollama_update_global_status(
+            $config,
+            'missing_prompts',
+            true,
+            'Prompt-Templates fehlen oder sind leer.',
+            [
+                'prompt_dir' => $promptCheck['prompt_dir'] ?? null,
+                'missing' => $promptCheck['missing'] ?? [],
+            ]
+        );
+        $logger('Ollama-Preflight: Prompt-Templates fehlen/leer.');
+        return [
+            'ok' => false,
+            'reason' => 'missing_prompts',
+        ];
+    }
+
+    sv_ollama_update_global_status($config, 'missing_prompts', false);
+
+    $modelCheck = sv_ollama_check_model_availability($config);
+    if (empty($modelCheck['ok'])) {
+        sv_ollama_update_global_status(
+            $config,
+            'missing_models',
+            true,
+            'Ollama-Modelle fehlen.',
+            [
+                'missing' => $modelCheck['missing'] ?? [],
+                'error' => $modelCheck['error'] ?? null,
+            ]
+        );
+        $logger('Ollama-Preflight: Modelle fehlen.');
+        return [
+            'ok' => false,
+            'reason' => 'missing_models',
+        ];
+    }
+
+    sv_ollama_update_global_status($config, 'missing_models', false);
+
+    return [
+        'ok' => true,
+        'reason' => null,
+    ];
+}
+
+function sv_ollama_mark_jobs_blocked_by_ollama(PDO $pdo, array $jobTypes, bool $blocked): void
+{
+    if (!sv_ollama_job_has_column($pdo, 'last_error_code')) {
+        return;
+    }
+    if ($jobTypes === []) {
+        return;
+    }
+
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $statusPlaceholders = '"queued","pending"';
+    $now = date('c');
+    if ($blocked) {
+        $sql = 'UPDATE jobs SET last_error_code = "blocked_by_ollama", error_message = "Ollama down", updated_at = ?'
+            . ' WHERE type IN (' . $placeholders . ') AND status IN (' . $statusPlaceholders . ')';
+        $params = array_merge([$now], $jobTypes);
+    } else {
+        $sql = 'UPDATE jobs SET last_error_code = NULL, error_message = NULL, updated_at = ?'
+            . ' WHERE type IN (' . $placeholders . ') AND status IN (' . $statusPlaceholders . ') AND last_error_code = "blocked_by_ollama"';
+        $params = array_merge([$now], $jobTypes);
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
 }
 
 function sv_ollama_job_type_for_mode(string $mode): string
@@ -494,6 +772,9 @@ function sv_ollama_error_code_for_message(string $message, ?Throwable $imageLoad
     $normalized = strtolower($message);
     if (strpos($normalized, 'parse_error:') === 0 || strpos($normalized, 'parse_error') !== false) {
         return 'parse_error';
+    }
+    if (strpos($normalized, 'too_large_for_vision') !== false || strpos($normalized, 'bildgröße') !== false) {
+        return 'too_large_for_vision';
     }
     if ($imageLoadError !== null || strpos($normalized, 'invalid_image') === 0) {
         return 'invalid_image';
@@ -1748,6 +2029,81 @@ function sv_ollama_resolve_local_image_path(array $mediaRow, array $config): ?st
     return $candidate;
 }
 
+function sv_ollama_downscale_image(string $raw, int $maxBytes): ?array
+{
+    if ($maxBytes <= 0) {
+        return null;
+    }
+    if (!function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) {
+        return null;
+    }
+
+    $image = @imagecreatefromstring($raw);
+    if ($image === false) {
+        return null;
+    }
+
+    $current = $image;
+    $quality = 85;
+    $best = null;
+    $width = imagesx($current);
+    $height = imagesy($current);
+
+    for ($attempt = 0; $attempt < 6; $attempt++) {
+        ob_start();
+        $writeOk = @imagejpeg($current, null, $quality);
+        $binary = ob_get_clean();
+
+        if ($writeOk && is_string($binary) && strlen($binary) > 0) {
+            if (strlen($binary) <= $maxBytes) {
+                $best = $binary;
+                break;
+            }
+        }
+
+        if ($quality > 60) {
+            $quality -= 10;
+            continue;
+        }
+
+        $width = (int)max(1, floor($width * 0.85));
+        $height = (int)max(1, floor($height * 0.85));
+        $resized = @imagescale($current, $width, $height);
+        if ($resized !== false) {
+            if ($current !== $image) {
+                imagedestroy($current);
+            }
+            $current = $resized;
+        }
+        $quality = 85;
+    }
+
+    if ($current !== $image) {
+        imagedestroy($current);
+    }
+    imagedestroy($image);
+
+    if ($best === null) {
+        return null;
+    }
+
+    return [
+        'binary' => $best,
+        'bytes' => strlen($best),
+        'format' => 'jpeg',
+    ];
+}
+
+function sv_ollama_mark_too_large_for_vision(PDO $pdo, int $mediaId, array $details = []): void
+{
+    $payload = [
+        'ts' => date('c'),
+        'details' => $details,
+    ];
+    $json = sv_ollama_encode_json($payload);
+    sv_set_media_meta_value($pdo, $mediaId, 'ollama.too_large_for_vision', $json ?? '1', 'ollama');
+}
+
 function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, array $payload): array
 {
     $source = $payload['image_source'] ?? null;
@@ -1812,7 +2168,15 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
             $mediaPath = $fallbackPath;
         } else {
             if ($maxBytes > 0 && strlen($raw) > $maxBytes) {
-                throw new RuntimeException('Bildgröße zu groß (' . strlen($raw) . ' > ' . $maxBytes . ' Bytes).');
+                $downscaled = sv_ollama_downscale_image($raw, $maxBytes);
+                if (is_array($downscaled)) {
+                    return [
+                        'base64' => base64_encode($downscaled['binary']),
+                        'source' => 'url_downscaled',
+                        'bytes' => $downscaled['bytes'] ?? null,
+                    ];
+                }
+                throw new RuntimeException('too_large_for_vision: ' . strlen($raw) . ' > ' . $maxBytes);
             }
             return [
                 'base64' => base64_encode($raw),
@@ -1838,7 +2202,18 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
     }
 
     if ($maxBytes > 0 && $fileSize !== null && $fileSize > $maxBytes) {
-        throw new RuntimeException('Bildgröße zu groß (' . $fileSize . ' > ' . $maxBytes . ' Bytes).');
+        $raw = @file_get_contents($mediaPath);
+        if ($raw !== false) {
+            $downscaled = sv_ollama_downscale_image($raw, $maxBytes);
+            if (is_array($downscaled)) {
+                return [
+                    'base64' => base64_encode($downscaled['binary']),
+                    'source' => 'path_downscaled',
+                    'bytes' => $downscaled['bytes'] ?? null,
+                ];
+            }
+        }
+        throw new RuntimeException('too_large_for_vision: ' . $fileSize . ' > ' . $maxBytes);
     }
 
     $raw = @file_get_contents($mediaPath);
@@ -1847,7 +2222,15 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
     }
 
     if ($maxBytes > 0 && strlen($raw) > $maxBytes) {
-        throw new RuntimeException('Bildgröße zu groß (' . strlen($raw) . ' > ' . $maxBytes . ' Bytes).');
+        $downscaled = sv_ollama_downscale_image($raw, $maxBytes);
+        if (is_array($downscaled)) {
+            return [
+                'base64' => base64_encode($downscaled['binary']),
+                'source' => 'path_downscaled',
+                'bytes' => $downscaled['bytes'] ?? null,
+            ];
+        }
+        throw new RuntimeException('too_large_for_vision: ' . strlen($raw) . ' > ' . $maxBytes);
     }
 
     return [
@@ -2106,8 +2489,23 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
         'retried' => 0,
     ];
 
+    $preflight = sv_ollama_preflight($pdo, $config, $logger);
+    if (empty($preflight['ok'])) {
+        return $summary;
+    }
+
     $health = sv_ollama_health($config);
     if (empty($health['ok'])) {
+        sv_ollama_mark_jobs_blocked_by_ollama($pdo, $jobTypes, true);
+        sv_ollama_update_global_status(
+            $config,
+            'ollama_down',
+            true,
+            $health['message'] ?? 'Ollama healthcheck fehlgeschlagen.',
+            [
+                'latency_ms' => $health['latency_ms'] ?? null,
+            ]
+        );
         sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
             'ts' => date('c'),
             'event' => 'ollama_down',
@@ -2116,6 +2514,9 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
         ]);
         return $summary;
     }
+
+    sv_ollama_mark_jobs_blocked_by_ollama($pdo, $jobTypes, false);
+    sv_ollama_update_global_status($config, 'ollama_down', false);
 
     while ($summary['total'] < $limit) {
         if (sv_ollama_running_job_count($pdo) >= $maxConcurrency) {
@@ -2180,8 +2581,31 @@ function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, i
     sv_mark_stuck_jobs($pdo, $jobTypes, SV_JOB_STUCK_MINUTES, $logger);
     sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
 
+    $preflight = sv_ollama_preflight($pdo, $config, $logger);
+    if (empty($preflight['ok'])) {
+        return [
+            'ok' => true,
+            'processed' => 0,
+            'done' => 0,
+            'errors' => 0,
+            'cancelled' => 0,
+            'remaining_queued' => 0,
+            'remaining_running' => 0,
+        ];
+    }
+
     $health = sv_ollama_health($config);
     if (empty($health['ok'])) {
+        sv_ollama_mark_jobs_blocked_by_ollama($pdo, $jobTypes, true);
+        sv_ollama_update_global_status(
+            $config,
+            'ollama_down',
+            true,
+            $health['message'] ?? 'Ollama healthcheck fehlgeschlagen.',
+            [
+                'latency_ms' => $health['latency_ms'] ?? null,
+            ]
+        );
         sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
             'ts' => date('c'),
             'event' => 'ollama_down',
@@ -2198,6 +2622,9 @@ function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, i
             'remaining_running' => 0,
         ];
     }
+
+    sv_ollama_mark_jobs_blocked_by_ollama($pdo, $jobTypes, false);
+    sv_ollama_update_global_status($config, 'ollama_down', false);
 
     $processed = 0;
     $done = 0;
@@ -2309,11 +2736,18 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
     $payload['last_started_at'] = date('c');
     sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
 
-    sv_update_job_status($pdo, $jobId, 'running', json_encode([
-        'job_type' => $jobType,
-        'media_id' => $mediaId,
-        'mode' => $mode,
-    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    $jobStatus = isset($cancelState['status']) ? (string)$cancelState['status'] : '';
+    if ($jobStatus !== 'running') {
+        sv_update_job_status($pdo, $jobId, 'running', json_encode([
+            'job_type' => $jobType,
+            'media_id' => $mediaId,
+            'mode' => $mode,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    } else {
+        sv_ollama_update_job_columns($pdo, $jobId, [
+            'heartbeat_at' => date('c'),
+        ], true);
+    }
 
     $progressBits = 200;
     sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
@@ -2923,7 +3357,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 throw new RuntimeException('Prompt-Rekonstruktion benötigt mindestens Caption oder Tags.');
             }
         } else {
-            $imageRequired = true;
+            $imageRequired = sv_ollama_mode_requires_image($mode);
         }
 
         $maxSecondsPerJob = $imageRequired ? $maxSecondsVision : $maxSecondsText;
@@ -3606,6 +4040,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $errorCode = 'ollama_down';
         } elseif (strpos($normalizedError, 'parse_error') !== false) {
             $errorCode = 'parse_error';
+        } elseif (strpos($normalizedError, 'too_large_for_vision') !== false
+            || strpos($normalizedError, 'bildgröße') !== false
+        ) {
+            $errorCode = 'too_large_for_vision';
         } elseif (strpos($normalizedError, 'invalid_image') === 0) {
             $errorCode = 'invalid_image';
         } elseif ($traceHttpStatus !== null && $traceHttpStatus >= 400) {
@@ -3646,7 +4084,15 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $progressBits = 1000;
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, $errorCode);
 
-        if ($attempts <= $maxRetries && $errorCode !== 'timeout') {
+        if ($errorCode === 'too_large_for_vision') {
+            sv_ollama_mark_too_large_for_vision($pdo, $mediaId, [
+                'mode' => $mode,
+                'error' => $errorMessage,
+            ]);
+        }
+
+        $retryable = !in_array($errorCode, ['too_large_for_vision'], true);
+        if ($attempts <= $maxRetries && $retryable) {
             $delaySeconds = sv_ollama_retry_backoff_seconds($config, $attempts);
             $retryAt = date('c', time() + $delaySeconds);
             $payload['retry_not_before'] = $retryAt;

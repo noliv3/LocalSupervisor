@@ -172,7 +172,12 @@ function sv_ollama_health(array $config): array
     $cfg = sv_ollama_config($config);
     $path = '/api/version';
     $url = rtrim($cfg['base_url'], '/') . $path;
-    $timeoutMs = (int)$cfg['timeout_ms'];
+    $timeoutMs = max(
+        (int)($cfg['timeout_ms'] ?? 0),
+        (int)($cfg['timeout_ms_text'] ?? 0),
+        (int)($cfg['timeout_ms_vision'] ?? 0),
+        1000
+    );
 
     $start = microtime(true);
     $context = stream_context_create([
@@ -205,6 +210,63 @@ function sv_ollama_health(array $config): array
         'ok' => false,
         'latency_ms' => $latencyMs,
         'message' => $message,
+    ];
+}
+
+function sv_ollama_fetch_model_list(array $config): array
+{
+    $cfg = sv_ollama_config($config);
+    $path = '/api/tags';
+    $url = rtrim($cfg['base_url'], '/') . $path;
+    $timeoutMs = max(
+        (int)($cfg['timeout_ms'] ?? 0),
+        (int)($cfg['timeout_ms_text'] ?? 0),
+        (int)($cfg['timeout_ms_vision'] ?? 0),
+        1000
+    );
+
+    $start = microtime(true);
+    $context = stream_context_create([
+        'http' => [
+            'method'  => 'GET',
+            'header'  => "Accept: application/json\r\n",
+            'timeout' => $timeoutMs / 1000,
+        ],
+    ]);
+
+    $responseBody = @file_get_contents($url, false, $context);
+    $latencyMs = (int)round((microtime(true) - $start) * 1000);
+    $httpCode = sv_ollama_http_status_code($http_response_header ?? null);
+
+    if ($responseBody === false || $httpCode !== 200) {
+        return [
+            'ok' => false,
+            'models' => [],
+            'latency_ms' => $latencyMs,
+            'http_code' => $httpCode,
+            'error' => 'Ollama Model-Liste nicht erreichbar.',
+        ];
+    }
+
+    $decoded = json_decode($responseBody, true);
+    $models = [];
+    if (is_array($decoded) && isset($decoded['models']) && is_array($decoded['models'])) {
+        foreach ($decoded['models'] as $model) {
+            if (is_array($model) && isset($model['name']) && is_string($model['name'])) {
+                $name = trim($model['name']);
+                if ($name !== '') {
+                    $models[$name] = true;
+                }
+            }
+        }
+    }
+
+    return [
+        'ok' => true,
+        'models' => array_keys($models),
+        'latency_ms' => $latencyMs,
+        'http_code' => $httpCode,
+        'error' => null,
     ];
 }
 

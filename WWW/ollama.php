@@ -125,6 +125,9 @@ if ($action === 'status') {
         $runnerLocked = true;
     }
 
+    $globalStatus = sv_ollama_read_global_status($config);
+    $ollamaDownActive = !empty($globalStatus['ollama_down']['active']);
+
     $respond(200, [
         'ok' => true,
         'counts' => $counts,
@@ -134,6 +137,8 @@ if ($action === 'status') {
         'running' => $running,
         'max_concurrency' => $maxConcurrency,
         'runner_locked' => $runnerLocked,
+        'global_status' => $globalStatus,
+        'blocked_by_ollama' => $ollamaDownActive,
     ]);
 }
 
@@ -178,6 +183,8 @@ if ($action === 'enqueue') {
     $buildCandidateQuery = static function (string $mode, bool $allFlag, ?string $since) use ($pdo, $limit): PDOStatement {
         $sql = 'SELECT m.id FROM media m';
         $params = [];
+        $conditions = [];
+        $imageRequired = sv_ollama_mode_requires_image($mode);
 
         if ($mode === 'prompt_recon') {
             $sql .= ' LEFT JOIN media_meta mm_prompt ON mm_prompt.media_id = m.id AND mm_prompt.meta_key = :prompt_key';
@@ -197,8 +204,12 @@ if ($action === 'enqueue') {
                 $params[':mode'] = $mode;
             }
         }
-
-        $conditions = [];
+        if ($imageRequired) {
+            $sql .= ' LEFT JOIN media_meta mm_too_large ON mm_too_large.media_id = m.id AND mm_too_large.meta_key = :too_large_key';
+            $params[':too_large_key'] = 'ollama.too_large_for_vision';
+            $conditions[] = 'm.type = "image"';
+            $conditions[] = 'mm_too_large.id IS NULL';
+        }
         if ($mode === 'prompt_recon') {
             $conditions[] = 'mm_prompt.id IS NULL';
             $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
@@ -356,16 +367,28 @@ if ($action === 'run') {
     $batch = $batch !== null ? (int)$batch : 5;
     $maxSeconds = $maxSeconds !== null ? (int)$maxSeconds : 20;
 
-    $lock = sv_ollama_acquire_runner_lock($config, 'web:ollama.php');
+    $lock = sv_ollama_acquire_launcher_lock($config, 'web:ollama.php');
     if (empty($lock['ok'])) {
         $respond(200, [
             'ok' => false,
             'status' => 'locked',
-            'reason' => 'runner_locked',
+            'reason' => 'launcher_locked',
         ]);
     }
 
     try {
+        $logger = static function (string $message): void {
+        };
+        $preflight = sv_ollama_preflight($pdo, $config, $logger);
+        if (empty($preflight['ok'])) {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'blocked',
+                'reason' => $preflight['reason'] ?? 'preflight_failed',
+            ]);
+        }
+
+        sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
         $maxConcurrency = sv_ollama_max_concurrency($config);
         $running = sv_ollama_running_job_count($pdo);
         if ($running >= $maxConcurrency) {
@@ -418,14 +441,33 @@ if ($action === 'run') {
             }
         }
 
+        $verified = false;
+        $runnerLocked = false;
+        for ($attempt = 0; $attempt < 6; $attempt++) {
+            $lockProbe = sv_ollama_acquire_runner_lock($config, 'run_verify');
+            if (!empty($lockProbe['ok'])) {
+                sv_ollama_release_runner_lock($lockProbe['handle']);
+                $runnerLocked = false;
+            } elseif (($lockProbe['reason'] ?? '') === 'locked') {
+                $runnerLocked = true;
+            }
+
+            if ($runnerLocked || sv_ollama_running_job_count($pdo) > 0) {
+                $verified = true;
+                break;
+            }
+            usleep(200000);
+        }
+
         $respond(200, [
-            'ok' => true,
-            'status' => 'started',
+            'ok' => $verified,
+            'status' => $verified ? 'started' : 'start_failed',
             'pid' => $pid,
-            'runner_locked' => false,
+            'runner_locked' => $runnerLocked,
+            'verified' => $verified,
         ]);
     } finally {
-        sv_ollama_release_runner_lock($lock['handle']);
+        sv_ollama_release_launcher_lock($lock['handle']);
     }
 }
 
