@@ -89,6 +89,15 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Ergebnisse werden in `ollama_results` und `media_meta` abgelegt.
 - Status und Fehler im Ollama-Dashboard prüfen (siehe Web-UI).
 
+### Ollama Job-States & Retry-Policy
+- Zustände: `queued` → `running` → `done/error/cancelled` (`pending` ist legacy und wird nur noch gelesen).
+- `running` wird ausschließlich nach einem erfolgreichen Claim/Spawn gesetzt; der Claim setzt `heartbeat_at`.
+- Retry-Backoff wird über `jobs.not_before` gesteuert: Jobs bleiben `queued`, bis der Timestamp erreicht ist.
+- Backoff-Konfiguration in `CONFIG/config.php` (`ollama.retry`):
+  - `backoff_ms` (Basis, Default 1000ms)
+  - `backoff_ms_max` (Cap, Default 30000ms)
+- Retries sind für transienten Fehler gedacht; harte Fehler enden in `error`.
+
 ## Ollama (CLI, Internal API, Logs)
 
 ### Internal API Endpoints (Loopback + internal_api_key)
