@@ -65,7 +65,7 @@ function sv_ollama_max_concurrency(array $config): int
     $ollamaCfg = sv_ollama_config($config);
     $maxConcurrency = isset($ollamaCfg['worker']['max_concurrency'])
         ? (int)$ollamaCfg['worker']['max_concurrency']
-        : 2;
+        : 1;
 
     return max(1, $maxConcurrency);
 }
@@ -502,6 +502,57 @@ function sv_ollama_decode_job_payload(array $jobRow): array
     return is_array($payload) ? $payload : [];
 }
 
+function sv_ollama_job_mode_from_row(array $jobRow): ?string
+{
+    $jobType = isset($jobRow['type']) ? (string)$jobRow['type'] : '';
+    $payload = sv_ollama_decode_job_payload($jobRow);
+    $mode = isset($payload['mode']) && is_string($payload['mode']) && trim($payload['mode']) !== ''
+        ? trim($payload['mode'])
+        : null;
+    if ($mode !== null) {
+        return $mode;
+    }
+    if ($jobType !== '') {
+        try {
+            return sv_ollama_mode_for_job_type($jobType);
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+    return null;
+}
+
+function sv_ollama_job_attempt_from_payload(array $payload): int
+{
+    $attempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
+    $attempt = $attempts + 1;
+    return $attempt > 0 ? $attempt : 1;
+}
+
+function sv_ollama_job_trace_file_for_attempt(array $config, int $jobId, string $mode, int $attempt): string
+{
+    return sv_ollama_trace_path($config, $jobId, $mode, $attempt);
+}
+
+function sv_ollama_job_max_seconds(array $config, string $mode): int
+{
+    $ollamaCfg = sv_ollama_config($config);
+    $maxSecondsText = isset($ollamaCfg['worker']['max_seconds_text']) ? (int)$ollamaCfg['worker']['max_seconds_text'] : 60;
+    $maxSecondsVision = isset($ollamaCfg['worker']['max_seconds_vision']) ? (int)$ollamaCfg['worker']['max_seconds_vision'] : 180;
+    $maxSecondsText = max(1, $maxSecondsText);
+    $maxSecondsVision = max(1, $maxSecondsVision);
+
+    $visionModes = [
+        'caption' => true,
+        'title' => true,
+        'prompt_eval' => true,
+        'quality' => true,
+        'nsfw_classify' => true,
+    ];
+
+    return isset($visionModes[$mode]) ? $maxSecondsVision : $maxSecondsText;
+}
+
 function sv_ollama_normalize_payload(int $mediaId, string $mode, array $payload): array
 {
     $payload['media_id'] = $mediaId;
@@ -639,7 +690,7 @@ function sv_ollama_delete_results(PDO $pdo, int $mediaId, string $mode): array
     ];
 }
 
-function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null): array
+function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, bool $force = false): array
 {
     $jobTypes = $mode !== null ? [sv_ollama_job_type_for_mode($mode)] : sv_ollama_job_types();
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
@@ -656,10 +707,26 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null): ar
     $blocked = [];
     $canceledSet = 0;
     $deleted = 0;
+    $force = (bool)$force;
+    $now = date('c');
 
     foreach ($rows as $row) {
         $status = (string)($row['status'] ?? '');
         $jobId = (int)($row['id'] ?? 0);
+        if ($force) {
+            if ($status === 'running') {
+                sv_ollama_update_job_columns($pdo, $jobId, [
+                    'status' => 'cancelled',
+                    'cancel_requested' => 1,
+                    'cancelled_at' => $now,
+                    'heartbeat_at' => $now,
+                    'last_error_code' => 'forced_delete',
+                    'error_message' => 'forced_delete',
+                ], true);
+                $canceledSet++;
+            }
+            continue;
+        }
         if ($status === 'running') {
             if (!empty($row['cancel_requested'])) {
                 $blocked[] = $jobId;
@@ -676,7 +743,7 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null): ar
         }
     }
 
-    if ($blocked !== []) {
+    if (!$force && $blocked !== []) {
         return [
             'deleted' => 0,
             'blocked' => $blocked,
@@ -684,13 +751,27 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null): ar
         ];
     }
 
-    $statusPlaceholders = implode(',', array_fill(0, 3, '?'));
-    $deleteParams = array_merge($jobTypes, [$mediaId], ['done', 'error', 'cancelled']);
-    $deleteStmt = $pdo->prepare(
-        'DELETE FROM jobs WHERE type IN (' . $placeholders . ') AND media_id = ? AND status IN (' . $statusPlaceholders . ')'
-    );
-    $deleteStmt->execute($deleteParams);
+    if ($force) {
+        $deleteStmt = $pdo->prepare(
+            'DELETE FROM jobs WHERE type IN (' . $placeholders . ') AND media_id = ?'
+        );
+        $deleteStmt->execute($params);
+    } else {
+        $statusPlaceholders = implode(',', array_fill(0, 3, '?'));
+        $deleteParams = array_merge($jobTypes, [$mediaId], ['done', 'error', 'cancelled']);
+        $deleteStmt = $pdo->prepare(
+            'DELETE FROM jobs WHERE type IN (' . $placeholders . ') AND media_id = ? AND status IN (' . $statusPlaceholders . ')'
+        );
+        $deleteStmt->execute($deleteParams);
+    }
     $deleted = $deleteStmt->rowCount();
+
+    if ($force) {
+        sv_audit_log($pdo, 'ollama_force_delete', 'media', $mediaId, [
+            'mode' => $mode,
+            'deleted' => $deleted,
+        ]);
+    }
 
     return [
         'deleted' => $deleted,
@@ -1747,7 +1828,236 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
     return [
         'base64' => base64_encode($raw),
         'source' => 'path',
+        'bytes' => strlen($raw),
     ];
+}
+
+function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, callable $logger): array
+{
+    $jobId = (int)($jobRow['id'] ?? 0);
+    $jobType = (string)($jobRow['type'] ?? '');
+    if ($jobId <= 0 || $jobType === '') {
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error' => 'invalid_job',
+        ];
+    }
+
+    $payload = sv_ollama_decode_job_payload($jobRow);
+    $mode = isset($payload['mode']) && is_string($payload['mode']) && trim($payload['mode']) !== ''
+        ? trim($payload['mode'])
+        : sv_ollama_mode_for_job_type($jobType);
+    $attempt = sv_ollama_job_attempt_from_payload($payload);
+    $traceFile = sv_ollama_job_trace_file_for_attempt($config, $jobId, $mode, $attempt);
+
+    $childScript = __DIR__ . '/ollama_job_child_cli.php';
+    $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($childScript)
+        . ' --job-id=' . (int)$jobId
+        . ' --attempt=' . (int)$attempt
+        . ' --trace-file=' . escapeshellarg($traceFile)
+        . ' --owner=' . escapeshellarg('cli:ollama_worker_cli.php');
+
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+
+    $process = @proc_open($command, $descriptors, $pipes, dirname(__DIR__));
+    if (!is_resource($process)) {
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error' => 'child_spawn_failed',
+        ];
+    }
+
+    $status = proc_get_status($process);
+    $pid = isset($status['pid']) ? (int)$status['pid'] : null;
+    sv_ollama_update_job_columns($pdo, $jobId, [
+        'worker_pid' => $pid,
+        'worker_owner' => 'cli:ollama_worker_cli.php',
+        'stage' => 'child_running',
+        'stage_changed_at' => date('c'),
+        'heartbeat_at' => date('c'),
+    ], true);
+
+    if (isset($pipes[0]) && is_resource($pipes[0])) {
+        fclose($pipes[0]);
+    }
+    if (isset($pipes[1]) && is_resource($pipes[1])) {
+        stream_set_blocking($pipes[1], false);
+    }
+    if (isset($pipes[2]) && is_resource($pipes[2])) {
+        stream_set_blocking($pipes[2], false);
+    }
+
+    $maxSeconds = sv_ollama_job_max_seconds($config, $mode);
+    $maxSeconds = max(1, $maxSeconds);
+    $killAfter = $maxSeconds + 5;
+    $startedAt = microtime(true);
+    $lastOutput = '';
+    $lastError = '';
+    $killed = false;
+    $killedReason = null;
+
+    while (true) {
+        $status = proc_get_status($process);
+        if (!$status['running']) {
+            break;
+        }
+
+        $now = microtime(true);
+        if (($now - $startedAt) > $killAfter) {
+            $killed = true;
+            $killedReason = 'timeout';
+        } else {
+            $control = sv_ollama_fetch_job_control($pdo, $jobId);
+            if ($control === [] || sv_ollama_is_cancelled($control)) {
+                $killed = true;
+                $killedReason = 'cancelled';
+            }
+        }
+
+        if ($killed) {
+            break;
+        }
+
+        if (isset($pipes[1]) && is_resource($pipes[1])) {
+            $chunk = stream_get_contents($pipes[1]);
+            if (is_string($chunk) && $chunk !== '') {
+                $lastOutput .= $chunk;
+            }
+        }
+        if (isset($pipes[2]) && is_resource($pipes[2])) {
+            $chunk = stream_get_contents($pipes[2]);
+            if (is_string($chunk) && $chunk !== '') {
+                $lastError .= $chunk;
+            }
+        }
+
+        usleep(200000);
+    }
+
+    if ($killed) {
+        @proc_terminate($process);
+        usleep(200000);
+        $status = proc_get_status($process);
+        if (!empty($status['running'])) {
+            @proc_terminate($process);
+            usleep(200000);
+            $status = proc_get_status($process);
+        }
+        if (!empty($status['running']) && $pid !== null && stripos(PHP_OS, 'WIN') === 0) {
+            @exec('taskkill /F /PID ' . (int)$pid);
+        }
+    }
+
+    if (isset($pipes[1]) && is_resource($pipes[1])) {
+        $chunk = stream_get_contents($pipes[1]);
+        if (is_string($chunk) && $chunk !== '') {
+            $lastOutput .= $chunk;
+        }
+        fclose($pipes[1]);
+    }
+    if (isset($pipes[2]) && is_resource($pipes[2])) {
+        $chunk = stream_get_contents($pipes[2]);
+        if (is_string($chunk) && $chunk !== '') {
+            $lastError .= $chunk;
+        }
+        fclose($pipes[2]);
+    }
+
+    $exitCode = proc_close($process);
+
+    if ($killed) {
+        $now = date('c');
+        $payload['attempts'] = $attempt;
+        $payload['last_error_at'] = $now;
+        $payload['last_error'] = $killedReason === 'timeout' ? 'killed_by_parent_timeout' : 'cancelled_by_parent';
+        sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+
+        $errorCode = $killedReason === 'timeout' ? 'timeout' : 'cancelled';
+        $errorMessage = $killedReason === 'timeout' ? 'killed_by_parent_timeout' : 'cancelled_by_parent';
+        $statusLabel = $killedReason === 'timeout' ? 'error' : 'cancelled';
+
+        if ($killedReason === 'timeout') {
+            sv_update_job_status($pdo, $jobId, 'error', null, $errorMessage);
+        } else {
+            sv_update_job_status($pdo, $jobId, 'cancelled', null, $errorMessage);
+        }
+
+        sv_ollama_update_job_columns($pdo, $jobId, [
+            'last_error_code' => $errorCode,
+            'error_message' => $errorMessage,
+            'heartbeat_at' => $now,
+        ], true);
+        $progressTotal = sv_ollama_progress_bits_total($mode);
+        sv_ollama_touch_job_progress($pdo, $jobId, 1000, $progressTotal, $errorCode);
+
+        sv_ollama_trace_update($config, $traceFile, [
+            'killed' => true,
+            'stage_at_fail' => $killedReason === 'timeout' ? 'child_timeout' : 'child_cancel',
+            'error_code' => $errorCode,
+            'error_message' => $errorMessage,
+            'transport' => null,
+            'latency_ms' => null,
+        ]);
+
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => $now,
+            'event' => 'killed',
+            'job_id' => $jobId,
+            'attempt' => $attempt,
+            'mode' => $mode,
+            'status' => $statusLabel,
+            'error_code' => $errorCode,
+            'error' => $errorMessage,
+            'trace_file' => $traceFile,
+        ]);
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => $now,
+            'event' => 'final',
+            'job_id' => $jobId,
+            'attempt' => $attempt,
+            'mode' => $mode,
+            'status' => $statusLabel,
+            'error_code' => $errorCode,
+            'error' => $errorMessage,
+            'transport' => null,
+            'total_dur_ms' => (int)round((microtime(true) - $startedAt) * 1000),
+        ]);
+
+        return [
+            'job_id' => $jobId,
+            'status' => $statusLabel,
+            'error' => $errorMessage,
+        ];
+    }
+
+    $result = null;
+    $lines = preg_split('/\r?\n/', trim($lastOutput));
+    if (is_array($lines)) {
+        $lastLine = end($lines);
+        if (is_string($lastLine) && $lastLine !== '') {
+            $decoded = json_decode($lastLine, true);
+            if (is_array($decoded)) {
+                $result = $decoded;
+            }
+        }
+    }
+
+    if (!is_array($result)) {
+        $logger('Ollama-Child ohne Ergebnis: exit=' . $exitCode . ' err=' . sv_ollama_truncate_for_log($lastError, 200));
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error' => 'child_no_result',
+        ];
+    }
+
+    return $result;
 }
 
 function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?int $mediaId = null): array
@@ -1771,6 +2081,17 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
         'retried' => 0,
     ];
 
+    $health = sv_ollama_health($config);
+    if (empty($health['ok'])) {
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'ollama_down',
+            'message' => $health['message'] ?? null,
+            'latency_ms' => $health['latency_ms'] ?? null,
+        ]);
+        return $summary;
+    }
+
     while ($summary['total'] < $limit) {
         if (sv_ollama_running_job_count($pdo) >= $maxConcurrency) {
             break;
@@ -1780,7 +2101,7 @@ function sv_process_ollama_job_batch(PDO $pdo, array $config, ?int $limit, calla
             break;
         }
         $summary['total']++;
-        $result = sv_process_ollama_job($pdo, $config, $row, $logger);
+        $result = sv_ollama_run_job_in_child($pdo, $config, $row, $logger);
         if (($result['status'] ?? null) === 'done') {
             $summary['done']++;
         } elseif (($result['status'] ?? null) === 'error') {
@@ -1834,6 +2155,25 @@ function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, i
     sv_mark_stuck_jobs($pdo, $jobTypes, SV_JOB_STUCK_MINUTES, $logger);
     sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
 
+    $health = sv_ollama_health($config);
+    if (empty($health['ok'])) {
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'ollama_down',
+            'message' => $health['message'] ?? null,
+            'latency_ms' => $health['latency_ms'] ?? null,
+        ]);
+        return [
+            'ok' => true,
+            'processed' => 0,
+            'done' => 0,
+            'errors' => 0,
+            'cancelled' => 0,
+            'remaining_queued' => 0,
+            'remaining_running' => 0,
+        ];
+    }
+
     $processed = 0;
     $done = 0;
     $errors = 0;
@@ -1854,7 +2194,7 @@ function sv_ollama_run_batch_with_context(PDO $pdo, array $config, int $batch, i
         }
 
         $processed++;
-        $result = sv_process_ollama_job($pdo, $config, $row, $logger);
+        $result = sv_ollama_run_job_in_child($pdo, $config, $row, $logger);
         $status = (string)($result['status'] ?? '');
         if ($status === 'done') {
             $done++;
@@ -1938,7 +2278,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
     $cancelState = sv_ollama_fetch_job_control($pdo, $jobId);
     if (sv_ollama_is_cancelled($cancelState)) {
-        return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+        return $handleCancelled($stageName);
     }
 
     $payload['last_started_at'] = date('c');
@@ -1975,9 +2315,156 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             throw new RuntimeException('deadline exceeded');
         }
     };
-    $ensureNotCancelled = static function () use ($pdo, $jobId, $context, $logger): ?array {
+    $stageHistory = [];
+    $stageName = 'start';
+    $stageStartedAt = microtime(true);
+    $stageStartedIso = date('c');
+    $stageFinalized = false;
+    $jobStartedAt = microtime(true);
+    $traceTransport = null;
+    $traceLatencyMs = null;
+    $traceHttpStatus = null;
+    $responseRawBody = null;
+    $responseTextSnapshot = null;
+
+    $logStage = static function (string $nextStage, array $extra = []) use (
+        &$stageHistory,
+        &$stageName,
+        &$stageStartedAt,
+        &$stageStartedIso,
+        $config,
+        $jobId,
+        $traceAttempt,
+        $mode,
+        &$traceFile
+    ): void {
+        $now = microtime(true);
+        $durMs = (int)round(($now - $stageStartedAt) * 1000);
+        $entry = [
+            'ts' => $stageStartedIso,
+            'stage' => $stageName,
+            'dur_ms' => $durMs,
+            'extra' => $extra,
+        ];
+        $stageHistory[] = $entry;
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'stage',
+            'job_id' => $jobId,
+            'attempt' => $traceAttempt,
+            'mode' => $mode,
+            'stage' => $stageName,
+            'dur_ms' => $durMs,
+            'transport' => $extra['transport'] ?? null,
+            'bytes' => $extra['bytes'] ?? null,
+            'http_status' => $extra['http_status'] ?? null,
+            'error_code' => $extra['error_code'] ?? null,
+            'error_message' => $extra['error_message'] ?? null,
+            'extra' => $extra,
+        ]);
+        if (is_string($traceFile) && $traceFile !== '') {
+            sv_ollama_trace_update($config, $traceFile, [
+                'stage_history' => $stageHistory,
+                'stage_current' => $nextStage,
+            ]);
+        }
+        $stageName = $nextStage;
+        $stageStartedAt = $now;
+        $stageStartedIso = date('c');
+    };
+
+    $finalizeStage = static function (array $extra = []) use (
+        &$stageHistory,
+        &$stageName,
+        &$stageStartedAt,
+        &$stageStartedIso,
+        &$stageFinalized,
+        $config,
+        $jobId,
+        $traceAttempt,
+        $mode,
+        &$traceFile
+    ): void {
+        if ($stageFinalized) {
+            return;
+        }
+        $stageFinalized = true;
+        $now = microtime(true);
+        $durMs = (int)round(($now - $stageStartedAt) * 1000);
+        $entry = [
+            'ts' => $stageStartedIso,
+            'stage' => $stageName,
+            'dur_ms' => $durMs,
+            'extra' => $extra,
+        ];
+        $stageHistory[] = $entry;
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'stage',
+            'job_id' => $jobId,
+            'attempt' => $traceAttempt,
+            'mode' => $mode,
+            'stage' => $stageName,
+            'dur_ms' => $durMs,
+            'transport' => $extra['transport'] ?? null,
+            'bytes' => $extra['bytes'] ?? null,
+            'http_status' => $extra['http_status'] ?? null,
+            'error_code' => $extra['error_code'] ?? null,
+            'error_message' => $extra['error_message'] ?? null,
+            'extra' => $extra,
+        ]);
+        if (is_string($traceFile) && $traceFile !== '') {
+            sv_ollama_trace_update($config, $traceFile, [
+                'stage_history' => $stageHistory,
+                'stage_current' => null,
+            ]);
+        }
+    };
+
+    $handleCancelled = static function (string $stageAtFail) use (
+        $pdo,
+        $jobId,
+        $context,
+        $logger,
+        &$traceFile,
+        $config,
+        $traceAttempt,
+        $mode,
+        &$finalizeStage,
+        $jobStartedAt
+    ): array {
+        $now = date('c');
+        $finalizeStage([
+            'error_code' => 'cancelled',
+            'error_message' => 'cancelled',
+        ]);
+        if (is_string($traceFile) && $traceFile !== '') {
+            sv_ollama_trace_update($config, $traceFile, [
+                'error_code' => 'cancelled',
+                'error_message' => 'cancelled',
+                'stage_at_fail' => $stageAtFail,
+                'killed' => false,
+            ]);
+        }
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => $now,
+            'event' => 'final',
+            'job_id' => $jobId,
+            'attempt' => $traceAttempt,
+            'mode' => $mode,
+            'status' => 'cancelled',
+            'error_code' => 'cancelled',
+            'error' => 'cancelled',
+            'transport' => null,
+            'total_dur_ms' => (int)round((microtime(true) - $jobStartedAt) * 1000),
+        ]);
+
+        return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+    };
+
+    $ensureNotCancelled = static function () use ($pdo, $jobId, $handleCancelled, &$stageName): ?array {
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
         return null;
     };
@@ -1990,6 +2477,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         if ($mode === 'embed') {
             $maxSecondsPerJob = $maxSecondsText;
             $jobDeadline = microtime(true) + $maxSecondsPerJob;
+            $logStage('embed_input');
 
             if (!sv_ollama_has_embedding_seed($pdo, $mediaId)) {
                 throw new RuntimeException('Keine Embedding-Quelle verfügbar.');
@@ -2000,6 +2488,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 throw new RuntimeException('Kein Embedding-Input vorhanden.');
             }
             $checkDeadline('embed_input');
+            $logStage('embed_options');
 
             $options = isset($payload['options']) && is_array($payload['options']) ? $payload['options'] : [];
             if (isset($payload['model']) && is_string($payload['model']) && trim($payload['model']) !== '') {
@@ -2015,6 +2504,44 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
             }
             $checkDeadline('embed_options');
+            $logStage('embed_request');
+
+            $requestUrl = rtrim((string)($ollamaCfg['base_url'] ?? ''), '/') . '/api/embeddings';
+            $traceBase = [
+                'ts' => date('c'),
+                'job_id' => $jobId,
+                'media_id' => $mediaId,
+                'job_type' => $jobType,
+                'mode' => $mode,
+                'attempt' => $traceAttempt,
+                'model' => $options['model'] ?? null,
+                'request_url' => $requestUrl,
+                'request_format' => null,
+                'timeout_ms' => $options['timeout_ms'] ?? null,
+                'deterministic' => $options['deterministic'] ?? null,
+                'options' => $options,
+                'prompt_id' => 'embed',
+                'template_source' => null,
+                'prompt' => $embedInput,
+                'response_raw_body' => null,
+                'response_text' => null,
+                'response_json' => null,
+                'extracted' => null,
+                'parse_error' => null,
+                'parse_error_detail' => null,
+                'latency_ms' => null,
+                'usage' => null,
+                'stage_history' => $stageHistory,
+                'stage_current' => $stageName,
+            ];
+
+            $traceFile = sv_ollama_write_trace($config, $traceBase);
+            if (is_string($traceFile) && $traceFile !== '') {
+                sv_ollama_trace_update($config, $traceFile, [
+                    'stage_history' => $stageHistory,
+                    'stage_current' => $stageName,
+                ]);
+            }
 
             sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
                 'ts' => date('c'),
@@ -2023,9 +2550,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'media_id' => $mediaId,
                 'job_type' => $jobType,
                 'mode' => $mode,
+                'attempt' => $traceAttempt,
                 'job_max_seconds' => $maxSecondsPerJob,
                 'timeout_ms' => $options['timeout_ms'] ?? null,
-                'trace_file' => null,
+                'trace_file' => $traceFile,
                 'response_len' => null,
                 'raw_body_len' => null,
             ]);
@@ -2033,7 +2561,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $progressBits = 200;
             sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
             if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+                return $handleCancelled($stageName);
             }
 
             $embedModel = (string)$options['model'];
@@ -2061,6 +2589,25 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                     $progressBits = 1000;
                     sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
 
+                    $finalizeStage();
+                    if (is_string($traceFile) && $traceFile !== '') {
+                        sv_ollama_trace_update($config, $traceFile, [
+                            'response_raw_body' => null,
+                            'response_text' => null,
+                            'response_json' => null,
+                            'extracted' => [
+                                'vector_id' => $vectorId,
+                                'deduped' => true,
+                            ],
+                            'parse_error' => false,
+                            'parse_error_detail' => null,
+                            'latency_ms' => null,
+                            'usage' => null,
+                            'stage_history' => $stageHistory,
+                            'stage_current' => null,
+                        ]);
+                    }
+
                     sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
                         'ts' => date('c'),
                         'event' => 'success',
@@ -2068,12 +2615,25 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                         'media_id' => $mediaId,
                         'job_type' => $jobType,
                         'mode' => $mode,
+                        'attempt' => $traceAttempt,
                         'model' => $embedModel,
                         'input_hash' => $inputHash,
                         'deduped' => true,
-                        'trace_file' => null,
+                        'trace_file' => $traceFile,
                         'response_len' => null,
                         'raw_body_len' => null,
+                    ]);
+                    sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                        'ts' => date('c'),
+                        'event' => 'final',
+                        'job_id' => $jobId,
+                        'attempt' => $traceAttempt,
+                        'mode' => $mode,
+                        'status' => 'done',
+                        'error_code' => null,
+                        'error' => null,
+                        'transport' => null,
+                        'total_dur_ms' => (int)round((microtime(true) - $jobStartedAt) * 1000),
                     ]);
 
                     return [
@@ -2090,13 +2650,21 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $progressBits = 200;
             sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
             if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+                return $handleCancelled($stageName);
             }
 
             $checkDeadline('embed_request_pre');
             sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
             $response = sv_ollama_embed_text($config, $embedInput, $options);
             $checkDeadline('embed_request_post');
+            $traceTransport = $response['transport'] ?? null;
+            $traceHttpStatus = $response['http_status'] ?? null;
+            $traceLatencyMs = $response['latency_ms'] ?? null;
+            $logStage('embed_parse', [
+                'transport' => $traceTransport,
+                'http_status' => $traceHttpStatus,
+                'latency_ms' => $traceLatencyMs,
+            ]);
             if (empty($response['ok'])) {
                 $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
                 throw new RuntimeException($error);
@@ -2105,7 +2673,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $progressBits = 600;
             sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
             if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+                return $handleCancelled($stageName);
             }
             $checkDeadline('embed_response');
 
@@ -2130,9 +2698,11 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $progressBits = 900;
             sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
             if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-                return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+                return $handleCancelled($stageName);
             }
             $checkDeadline('embed_parse');
+
+            $logStage('embed_persist');
 
             $cancelledResult = $ensureNotCancelled();
             if ($cancelledResult !== null) {
@@ -2205,6 +2775,25 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $progressBits = 900;
             sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
 
+            $finalizeStage();
+            if (is_string($traceFile) && $traceFile !== '') {
+                sv_ollama_trace_update($config, $traceFile, [
+                    'response_raw_body' => null,
+                    'response_text' => null,
+                    'response_json' => null,
+                    'extracted' => [
+                        'dims' => $dims,
+                        'vector_id' => $vectorId,
+                    ],
+                    'parse_error' => false,
+                    'parse_error_detail' => null,
+                    'latency_ms' => $traceLatencyMs,
+                    'usage' => $response['usage'] ?? null,
+                    'stage_history' => $stageHistory,
+                    'stage_current' => null,
+                ]);
+            }
+
             sv_update_job_status($pdo, $jobId, 'done', json_encode([
                 'job_type' => $jobType,
                 'media_id' => $mediaId,
@@ -2234,12 +2823,25 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'media_id' => $mediaId,
                 'job_type' => $jobType,
                 'mode' => $mode,
+                'attempt' => $traceAttempt,
                 'model' => $embedModel,
                 'input_hash' => $inputHash,
                 'dims' => $dims,
-                'trace_file' => null,
+                'trace_file' => $traceFile,
                 'response_len' => null,
                 'raw_body_len' => null,
+            ]);
+            sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                'ts' => date('c'),
+                'event' => 'final',
+                'job_id' => $jobId,
+                'attempt' => $traceAttempt,
+                'mode' => $mode,
+                'status' => 'done',
+                'error_code' => null,
+                'error' => null,
+                'transport' => $traceTransport,
+                'total_dur_ms' => (int)round((microtime(true) - $jobStartedAt) * 1000),
             ]);
 
             return [
@@ -2301,11 +2903,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
 
         $maxSecondsPerJob = $imageRequired ? $maxSecondsVision : $maxSecondsText;
         $jobDeadline = microtime(true) + $maxSecondsPerJob;
+        $logStage('prompt_build');
 
         $progressBits = 200;
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
 
         $checkDeadline('prompt_build');
@@ -2332,6 +2935,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $options['deterministic'] = $ollamaCfg['deterministic']['enabled'] ?? true;
         }
         $checkDeadline('options_ready');
+        $logStage($imageRequired ? 'image_load' : 'request');
 
         $traceBase = [
             'ts' => date('c'),
@@ -2357,9 +2961,17 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'parse_error_detail' => null,
             'latency_ms' => null,
             'usage' => null,
+            'stage_history' => $stageHistory,
+            'stage_current' => $stageName,
         ];
 
         $traceFile = sv_ollama_write_trace($config, $traceBase);
+        if (is_string($traceFile) && $traceFile !== '') {
+            sv_ollama_trace_update($config, $traceFile, [
+                'stage_history' => $stageHistory,
+                'stage_current' => $stageName,
+            ]);
+        }
 
         sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
             'ts' => date('c'),
@@ -2368,6 +2980,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'media_id' => $mediaId,
             'job_type' => $jobType,
             'mode' => $mode,
+            'attempt' => $traceAttempt,
             'job_max_seconds' => $maxSecondsPerJob,
             'timeout_ms' => $options['timeout_ms'] ?? null,
             'trace_file' => $traceFile,
@@ -2388,12 +3001,15 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 throw new RuntimeException('Bilddaten fehlen.');
             }
             $checkDeadline('image_load_post');
+            $logStage('request', [
+                'bytes' => $imageData['bytes'] ?? null,
+            ]);
         }
 
         $progressBits = 200;
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
 
         $checkDeadline('request_pre');
@@ -2404,6 +3020,14 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $response = sv_ollama_generate_text($config, $prompt, $options);
         }
         $checkDeadline('request_post');
+        $traceTransport = $response['transport'] ?? null;
+        $traceHttpStatus = $response['http_status'] ?? null;
+        $traceLatencyMs = $response['latency_ms'] ?? null;
+        $logStage('response_parse', [
+            'transport' => $traceTransport,
+            'http_status' => $traceHttpStatus,
+            'latency_ms' => $traceLatencyMs,
+        ]);
         if (empty($response['ok'])) {
             $error = isset($response['error']) ? (string)$response['error'] : 'Ollama-Request fehlgeschlagen.';
             throw new RuntimeException($error);
@@ -2412,18 +3036,19 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $progressBits = 600;
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
         $checkDeadline('response_ready');
 
         $progressBits = 600;
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal);
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
 
         $responseJson = is_array($response['response_json'] ?? null) ? $response['response_json'] : null;
         $responseText = isset($response['response_text']) && is_string($response['response_text']) ? $response['response_text'] : null;
+        $responseTextSnapshot = $responseText;
         $responseRawBody = isset($response['raw_body']) && is_string($response['raw_body']) ? $response['raw_body'] : null;
         $parseError = !empty($response['parse_error']);
         $jsonModes = [
@@ -2551,18 +3176,6 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'prompt' => $promptReconPrompt,
         ];
 
-        $finalTrace = $traceBase;
-        $finalTrace['trace_file'] = $traceFile;
-        $finalTrace['response_raw_body'] = $responseRawBody;
-        $finalTrace['response_text'] = $responseText;
-        $finalTrace['response_json'] = $responseJson;
-        $finalTrace['extracted'] = $extracted;
-        $finalTrace['parse_error'] = $parseError;
-        $finalTrace['parse_error_detail'] = $parseErrorDetail;
-        $finalTrace['latency_ms'] = $response['latency_ms'] ?? null;
-        $finalTrace['usage'] = $response['usage'] ?? null;
-        $traceFile = sv_ollama_write_trace($config, $finalTrace);
-
         if ($mode === 'tags_normalize') {
             if ($parseError) {
                 $progressBits = 900;
@@ -2645,9 +3258,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $progressBits = 900;
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, $parseError ? 'parse_error' : null);
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
         $checkDeadline('parse_ready');
+        $logStage('persist');
 
         $cancelledResult = $ensureNotCancelled();
         if ($cancelledResult !== null) {
@@ -2894,6 +3508,23 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'parse_error' => $parseError,
         ]);
 
+        $finalizeStage();
+        $finalTrace = $traceBase;
+        $finalTrace['trace_file'] = $traceFile;
+        $finalTrace['response_raw_body'] = $responseRawBody;
+        $finalTrace['response_text'] = $responseText;
+        $finalTrace['response_json'] = $responseJson;
+        $finalTrace['extracted'] = $extracted;
+        $finalTrace['parse_error'] = $parseError;
+        $finalTrace['parse_error_detail'] = $parseErrorDetail;
+        $finalTrace['latency_ms'] = $traceLatencyMs ?? ($response['latency_ms'] ?? null);
+        $finalTrace['usage'] = $response['usage'] ?? null;
+        $finalTrace['transport'] = $traceTransport;
+        $finalTrace['http_status'] = $traceHttpStatus;
+        $finalTrace['stage_history'] = $stageHistory;
+        $finalTrace['stage_current'] = null;
+        $traceFile = sv_ollama_write_trace($config, $finalTrace);
+
         sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
             'ts' => date('c'),
             'event' => 'success',
@@ -2901,6 +3532,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'media_id' => $mediaId,
             'job_type' => $jobType,
             'mode' => $mode,
+            'attempt' => $traceAttempt,
             'prompt_preview' => $promptLog,
             'response_preview' => $responseLog,
             'model' => $response['model'] ?? $options['model'],
@@ -2908,6 +3540,18 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'trace_file' => $traceFile,
             'response_len' => $responseLen,
             'raw_body_len' => $rawBodyLen,
+        ]);
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'final',
+            'job_id' => $jobId,
+            'attempt' => $traceAttempt,
+            'mode' => $mode,
+            'status' => 'done',
+            'error_code' => null,
+            'error' => null,
+            'transport' => $traceTransport,
+            'total_dur_ms' => (int)round((microtime(true) - $jobStartedAt) * 1000),
         ]);
 
         return [
@@ -2919,7 +3563,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         ];
     } catch (Throwable $e) {
         if (sv_ollama_is_cancelled(sv_ollama_fetch_job_control($pdo, $jobId))) {
-            return sv_ollama_mark_cancelled($pdo, $jobId, $context, $logger);
+            return $handleCancelled($stageName);
         }
 
         $errorMessage = sv_sanitize_scanner_log_snippet($e->getMessage(), 300);
@@ -2930,14 +3574,44 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $errorCode = 'unexpected';
         if ($deadlineExceeded || strpos($normalizedError, 'deadline exceeded') !== false || strpos($normalizedError, 'timed out') !== false || strpos($normalizedError, 'timeout') !== false) {
             $errorCode = 'timeout';
+        } elseif (strpos($normalizedError, 'connection refused') !== false
+            || strpos($normalizedError, 'failed to open stream') !== false
+            || strpos($normalizedError, 'verbindung verweigert') !== false
+        ) {
+            $errorCode = 'ollama_down';
         } elseif (strpos($normalizedError, 'parse_error') !== false) {
             $errorCode = 'parse_error';
+        } elseif (strpos($normalizedError, 'invalid_image') === 0) {
+            $errorCode = 'invalid_image';
+        } elseif ($traceHttpStatus !== null && $traceHttpStatus >= 400) {
+            $errorCode = 'http_error';
         } elseif (preg_match('/\\bhttp\\s+\\d{3}\\b/i', $errorMessage)) {
             $errorCode = 'http_error';
         }
 
         $lastErrorCode = $errorCode;
         $lastErrorMessage = $errorMessage;
+        $finalizeStage([
+            'error_code' => $errorCode,
+            'error_message' => $errorMessage,
+            'transport' => $traceTransport,
+            'http_status' => $traceHttpStatus,
+        ]);
+        if (is_string($traceFile) && $traceFile !== '') {
+            sv_ollama_trace_update($config, $traceFile, [
+                'error_code' => $errorCode,
+                'error_message' => $errorMessage,
+                'stage_at_fail' => $stageName,
+                'response_raw_body' => $responseRawBody,
+                'response_text' => $responseTextSnapshot,
+                'transport' => $traceTransport,
+                'latency_ms' => $traceLatencyMs,
+                'http_status' => $traceHttpStatus,
+                'killed' => false,
+                'stage_history' => $stageHistory,
+                'stage_current' => null,
+            ]);
+        }
         $attempts++;
         $payload['attempts'] = $attempts;
         $payload['last_error_at'] = date('c');
@@ -2961,12 +3635,25 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'media_id' => $mediaId,
                 'job_type' => $jobType,
                 'mode' => $mode,
+                'attempt' => $traceAttempt,
                 'attempts' => $attempts,
                 'last_error_code' => $errorCode,
                 'error' => $errorMessage,
                 'trace_file' => $traceFile,
                 'response_len' => null,
                 'raw_body_len' => null,
+            ]);
+            sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                'ts' => date('c'),
+                'event' => 'final',
+                'job_id' => $jobId,
+                'attempt' => $traceAttempt,
+                'mode' => $mode,
+                'status' => 'retry',
+                'error_code' => $errorCode,
+                'error' => $errorMessage,
+                'transport' => $traceTransport,
+                'total_dur_ms' => (int)round((microtime(true) - $jobStartedAt) * 1000),
             ]);
 
             $logger('Ollama-Job Retry (' . $attempts . '/' . $maxRetries . '): ' . $errorMessage);
@@ -3000,11 +3687,24 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'media_id' => $mediaId,
             'job_type' => $jobType,
             'mode' => $mode,
+            'attempt' => $traceAttempt,
             'last_error_code' => $errorCode,
             'error' => $errorMessage,
             'trace_file' => $traceFile,
             'response_len' => null,
             'raw_body_len' => null,
+        ]);
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => date('c'),
+            'event' => 'final',
+            'job_id' => $jobId,
+            'attempt' => $traceAttempt,
+            'mode' => $mode,
+            'status' => 'error',
+            'error_code' => $errorCode,
+            'error' => $errorMessage,
+            'transport' => $traceTransport,
+            'total_dur_ms' => (int)round((microtime(true) - $jobStartedAt) * 1000),
         ]);
 
         sv_ollama_log_jsonl($config, 'ollama_errors.jsonl', [
@@ -3028,6 +3728,7 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'error' => $errorMessage,
         ];
     } finally {
+        $finalizeStage();
         $finalState = sv_ollama_fetch_job_control($pdo, $jobId);
         $finalStatus = isset($finalState['status']) ? (string)$finalState['status'] : '';
         if ($finalStatus === 'running') {

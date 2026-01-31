@@ -377,12 +377,49 @@ if ($action === 'run') {
             ]);
         }
 
-        $result = sv_ollama_run_batch_with_context($pdo, $config, $batch, $maxSeconds, static function (): void {
-        });
-        if (empty($result['ok'])) {
-            $respond(500, $result);
+        $workerScript = realpath(__DIR__ . '/../SCRIPTS/ollama_worker_cli.php');
+        if ($workerScript === false) {
+            $respond(500, ['ok' => false, 'error' => 'Worker script missing.']);
         }
-        $respond(200, $result);
+        $batchArg = '--batch=' . $batch;
+        $maxBatchesArg = '--max-batches=1';
+        $pid = null;
+
+        if (stripos(PHP_OS, 'WIN') === 0) {
+            $cmd = 'cmd /C start /B ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
+            $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
+            if (is_resource($process)) {
+                if (isset($pipes[1]) && is_resource($pipes[1])) {
+                    fclose($pipes[1]);
+                }
+                if (isset($pipes[2]) && is_resource($pipes[2])) {
+                    fclose($pipes[2]);
+                }
+                proc_close($process);
+            }
+        } else {
+            $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
+            $cmd = 'sh -c ' . escapeshellarg($command . ' > /dev/null 2>&1 & echo $!');
+            $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
+            if (is_resource($process)) {
+                if (isset($pipes[1]) && is_resource($pipes[1])) {
+                    $pidOutput = stream_get_contents($pipes[1]);
+                    $pid = is_string($pidOutput) ? (int)trim($pidOutput) : null;
+                    fclose($pipes[1]);
+                }
+                if (isset($pipes[2]) && is_resource($pipes[2])) {
+                    fclose($pipes[2]);
+                }
+                proc_close($process);
+            }
+        }
+
+        $respond(200, [
+            'ok' => true,
+            'status' => 'started',
+            'pid' => $pid,
+            'runner_locked' => false,
+        ]);
     } finally {
         sv_ollama_release_runner_lock($lock['handle']);
     }
@@ -416,8 +453,10 @@ if ($action === 'cancel') {
 if ($action === 'delete') {
     $mediaId = $_POST['media_id'] ?? ($jsonBody['media_id'] ?? null);
     $mode = $_POST['mode'] ?? ($jsonBody['mode'] ?? null);
+    $force = $_POST['force'] ?? ($jsonBody['force'] ?? null);
     $mediaId = $mediaId !== null ? (int)$mediaId : 0;
     $mode = is_string($mode) ? trim($mode) : '';
+    $force = $force !== null ? (int)$force : 0;
     if ($mediaId <= 0) {
         $respond(400, ['ok' => false, 'error' => 'Invalid media_id.']);
     }
@@ -438,10 +477,10 @@ if ($action === 'delete') {
             'cancel_requested_set' => 0,
         ];
         if ($mode !== 'dupe_hints') {
-            $jobDelete = sv_ollama_delete_jobs($pdo, $mediaId, $mode);
+            $jobDelete = sv_ollama_delete_jobs($pdo, $mediaId, $mode, $force === 1);
         }
 
-        if (!empty($jobDelete['blocked'])) {
+        if (!empty($jobDelete['blocked']) && $force !== 1) {
             $pdo->rollBack();
             $respond(409, [
                 'ok' => false,
