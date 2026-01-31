@@ -175,12 +175,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     media_id            INTEGER NOT NULL,
     prompt_id           INTEGER,
     type                TEXT NOT NULL,        -- regenerate, variation, upscale, other
-    status              TEXT NOT NULL,        -- pending, running, done, error, cancelled
+    status              TEXT NOT NULL,        -- queued, running, done, error, cancelled (pending=legacy)
     cancel_requested    INTEGER NOT NULL DEFAULT 0,
     cancelled_at        TEXT,
     progress_bits       INTEGER NOT NULL DEFAULT 0,
     progress_bits_total INTEGER NOT NULL DEFAULT 0,
     heartbeat_at        TEXT,
+    not_before          TEXT,
     last_error_code     TEXT,
     created_at          TEXT NOT NULL,
     updated_at          TEXT,

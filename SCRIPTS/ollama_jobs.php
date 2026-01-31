@@ -269,6 +269,20 @@ function sv_ollama_update_job_columns(PDO $pdo, int $jobId, array $fields, bool 
     $stmt->execute($params);
 }
 
+function sv_ollama_retry_backoff_seconds(array $config, int $attempts): int
+{
+    $ollamaCfg = sv_ollama_config($config);
+    $retryCfg = $ollamaCfg['retry'] ?? [];
+    $baseMs = isset($retryCfg['backoff_ms']) ? (int)$retryCfg['backoff_ms'] : 1000;
+    $maxMs = isset($retryCfg['backoff_ms_max']) ? (int)$retryCfg['backoff_ms_max'] : 30000;
+    $baseMs = max(100, $baseMs);
+    $maxMs = max($baseMs, $maxMs);
+    $exp = max(0, $attempts - 1);
+    $delayMs = min($maxMs, (int)round($baseMs * (2 ** $exp)));
+
+    return (int)max(1, (int)ceil($delayMs / 1000));
+}
+
 function sv_ollama_watchdog_stale_running(PDO $pdo, array $config, int $minutes = 10, string $action = 'requeue'): int
 {
     if (!sv_ollama_job_has_column($pdo, 'heartbeat_at')) {
@@ -1077,6 +1091,10 @@ function sv_ollama_fetch_pending_jobs(PDO $pdo, array $jobTypes, int $limit, ?in
         $sql .= ', payload_json';
     }
     $sql .= ' FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("pending","queued")';
+    if (sv_ollama_job_has_column($pdo, 'not_before')) {
+        $sql .= ' AND (not_before IS NULL OR not_before <= ?)';
+        $params[] = date('c');
+    }
     if ($mediaId !== null && $mediaId > 0) {
         $sql .= ' AND media_id = ?';
         $params[] = $mediaId;
@@ -1116,6 +1134,10 @@ function sv_ollama_claim_pending_job(PDO $pdo, array $jobTypes, ?int $mediaId = 
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
     $params = $jobTypes;
     $baseSql = 'SELECT id FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("pending","queued")';
+    if (sv_ollama_job_has_column($pdo, 'not_before')) {
+        $baseSql .= ' AND (not_before IS NULL OR not_before <= ?)';
+        $params[] = date('c');
+    }
     if ($mediaId !== null && $mediaId > 0) {
         $baseSql .= ' AND media_id = ?';
         $params[] = $mediaId;
@@ -1135,6 +1157,9 @@ function sv_ollama_claim_pending_job(PDO $pdo, array $jobTypes, ?int $mediaId = 
         $updateSql = 'UPDATE jobs SET status = "running", heartbeat_at = :heartbeat_at';
         if (sv_ollama_job_has_column($pdo, 'started_at')) {
             $updateSql .= ', started_at = :started_at';
+        }
+        if (sv_ollama_job_has_column($pdo, 'not_before')) {
+            $updateSql .= ', not_before = NULL';
         }
         $updateSql .= ' WHERE id = :id AND status IN ("pending","queued")';
         $updateParams = [
@@ -3622,10 +3647,15 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, $errorCode);
 
         if ($attempts <= $maxRetries && $errorCode !== 'timeout') {
-            sv_update_job_status($pdo, $jobId, 'pending', null, $errorMessage);
+            $delaySeconds = sv_ollama_retry_backoff_seconds($config, $attempts);
+            $retryAt = date('c', time() + $delaySeconds);
+            $payload['retry_not_before'] = $retryAt;
+            sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+            sv_update_job_status($pdo, $jobId, 'queued', null, $errorMessage);
             sv_ollama_update_job_columns($pdo, $jobId, [
                 'last_error_code' => $errorCode,
                 'heartbeat_at' => date('c'),
+                'not_before' => $retryAt,
             ], true);
 
             sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
@@ -3637,6 +3667,8 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 'mode' => $mode,
                 'attempt' => $traceAttempt,
                 'attempts' => $attempts,
+                'retry_after_s' => $delaySeconds,
+                'not_before' => $retryAt,
                 'last_error_code' => $errorCode,
                 'error' => $errorMessage,
                 'trace_file' => $traceFile,

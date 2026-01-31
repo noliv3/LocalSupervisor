@@ -86,7 +86,8 @@ return [
         'prompt_eval_fallback_separator' => ', ',
         'retry' => [
             'max_attempts' => 3,
-            'backoff_ms'   => 500,
+            'backoff_ms'   => 1000,
+            'backoff_ms_max' => 30000,
         ],
         'deterministic' => [
             'enabled'     => true,
