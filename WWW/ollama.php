@@ -386,7 +386,11 @@ if ($action === 'run') {
         $pid = null;
 
         if (stripos(PHP_OS, 'WIN') === 0) {
-            $cmd = 'cmd /C start /B ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
+            $phpBinary = escapeshellarg(PHP_BINARY);
+            $workerArg = escapeshellarg($workerScript);
+            $argList = $maxBatchesArg . ' ' . $batchArg;
+            $psCommand = 'Start-Process -WindowStyle Hidden -FilePath ' . $phpBinary . ' -ArgumentList ' . escapeshellarg($workerArg . ' ' . $argList);
+            $cmd = 'powershell -NoProfile -WindowStyle Hidden -Command ' . escapeshellarg($psCommand);
             $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
             if (is_resource($process)) {
                 if (isset($pipes[1]) && is_resource($pipes[1])) {
