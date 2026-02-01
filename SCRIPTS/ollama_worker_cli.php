@@ -56,13 +56,35 @@ $logger = function (string $msg): void {
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
+$workerPid = function_exists('getmypid') ? (int)getmypid() : null;
+$updateWorkerStatus = static function (bool $active, string $message, array $details = []) use ($config, $workerPid): void {
+    $baseDetails = [
+        'pid' => $workerPid,
+        'owner' => 'cli:ollama_worker_cli.php',
+    ];
+    sv_ollama_update_global_status($config, 'worker_active', $active, $message, array_merge($baseDetails, $details));
+};
+
 $lock = sv_ollama_acquire_runner_lock($config, 'cli:ollama_worker_cli.php');
 if (empty($lock['ok'])) {
     $writeErrLog('Ollama-Worker bereits aktiv (Lock), neuer Start abgebrochen.');
     exit(0);
 }
 
+$batchCount = 0;
+$aggregate = [
+    'total' => 0,
+    'done' => 0,
+    'error' => 0,
+    'skipped' => 0,
+    'retried' => 0,
+];
+
 try {
+    $updateWorkerStatus(true, 'started', [
+        'loop' => $loop ? 1 : 0,
+        'sleep_ms' => $sleepMs,
+    ]);
     sv_run_migrations_if_needed($pdo, $config, $logger);
 
     $batchSize = $batchSize ?? $limit;
@@ -85,15 +107,6 @@ try {
         exit(0);
     }
 
-    $batchCount = 0;
-    $aggregate = [
-        'total' => 0,
-        'done' => 0,
-        'error' => 0,
-        'skipped' => 0,
-        'retried' => 0,
-    ];
-
     $startedAt = time();
     while (true) {
         $summary = sv_process_ollama_job_batch($pdo, $config, $batchSize, $logger, $mediaId);
@@ -101,6 +114,10 @@ try {
             $aggregate[$key] = $value + (int)($summary[$key] ?? 0);
         }
         $batchCount++;
+        $updateWorkerStatus(true, 'heartbeat', [
+            'batch' => $batchCount,
+            'processed' => (int)($summary['total'] ?? 0),
+        ]);
 
         $total = (int)($summary['total'] ?? 0);
         if ($maxBatches !== null && $batchCount >= $maxBatches) {
@@ -136,5 +153,9 @@ try {
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 } finally {
+    $updateWorkerStatus(false, 'stopped', [
+        'batches' => $batchCount,
+        'total' => (int)($aggregate['total'] ?? 0),
+    ]);
     sv_ollama_release_runner_lock($lock['handle'] ?? null);
 }
