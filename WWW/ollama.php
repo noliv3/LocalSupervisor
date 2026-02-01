@@ -420,21 +420,6 @@ if ($action === 'run') {
         $spawnOk = false;
         $spawnStatus = null;
         if (stripos(PHP_OS, 'WIN') === 0) {
-            $winQuote = static function (string $value): string {
-                $value = str_replace('/', '\\', $value);
-                $value = str_replace('"', '\\"', $value);
-                return '"' . $value . '"';
-            };
-            $cmd = 'cmd.exe /C start "" /B ' . $winQuote($phpCli) . ' ' . $winQuote($workerScript)
-                . ' ' . $maxBatchesArg . ' ' . $batchArg
-                . ' >> ' . $winQuote($spawnOutLog) . ' 2>> ' . $winQuote($spawnErrLog);
-            $handle = @popen($cmd, 'r');
-            if (is_resource($handle)) {
-                $spawned = true;
-                pclose($handle);
-            } else {
-                $error = error_get_last();
-                $spawnError = $error['message'] ?? 'popen_failed';
             $phpBinary = PHP_BINARY;
             $psPhpBinary = str_replace('"', '`"', $phpBinary);
             $workerArg = '"' . str_replace('"', '`"', $workerScript) . '" ' . $maxBatchesArg . ' ' . $batchArg;
@@ -450,11 +435,15 @@ if ($action === 'run') {
                 }
                 proc_close($process);
                 $spawnOk = true;
+                $spawned = true;
             } else {
                 $spawnMethod = 'exec';
+                $output = [];
+                $statusCode = null;
                 @exec($cmd, $output, $statusCode);
                 $spawnStatus = $statusCode;
                 $spawnOk = $statusCode === 0;
+                $spawned = $spawnOk;
             }
         } else {
             $command = escapeshellarg($phpCli) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
@@ -465,7 +454,6 @@ if ($action === 'run') {
             $cmd = 'sh -c ' . escapeshellarg($shellCommand);
             $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
             if (is_resource($process)) {
-                $spawned = true;
                 if (isset($pipes[1]) && is_resource($pipes[1])) {
                     $pidOutput = stream_get_contents($pipes[1]);
                     $pid = is_string($pidOutput) ? (int)trim($pidOutput) : null;
@@ -475,11 +463,11 @@ if ($action === 'run') {
                     fclose($pipes[2]);
                 }
                 proc_close($process);
+                $spawnOk = true;
+                $spawned = true;
             } else {
                 $error = error_get_last();
                 $spawnError = $error['message'] ?? 'proc_open_failed';
-                $spawnOk = $pid !== null;
-            } else {
                 $spawnMethod = 'exec';
                 $output = [];
                 $statusCode = null;
@@ -489,6 +477,7 @@ if ($action === 'run') {
                     $pid = (int)trim((string)end($output));
                 }
                 $spawnOk = $pid !== null && $statusCode === 0;
+                $spawned = $spawnOk;
             }
         }
 
@@ -537,7 +526,6 @@ if ($action === 'run') {
 
         $verified = false;
         $runnerLocked = false;
-        for ($attempt = 0; $attempt < 12; $attempt++) {
         $workerRecent = false;
         $pidAlive = null;
         $verifyAttempts = 12;
