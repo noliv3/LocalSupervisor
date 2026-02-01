@@ -400,6 +400,7 @@ if ($action === 'run') {
             ]);
         }
 
+        $phpCli = sv_get_php_cli($config);
         $workerScript = realpath(__DIR__ . '/../SCRIPTS/ollama_worker_cli.php');
         if ($workerScript === false) {
             $respond(500, ['ok' => false, 'error' => 'Worker script missing.']);
@@ -407,11 +408,33 @@ if ($action === 'run') {
         $batchArg = '--batch=' . $batch;
         $maxBatchesArg = '--max-batches=1';
         $pid = null;
+        $spawned = false;
+        $spawnError = null;
+        $spawnOutLog = $logsPath . '/ollama_worker_spawn.out.log';
+        $spawnErrLog = $logsPath . '/ollama_worker_spawn.err.log';
+        $spawnLast = $logsPath . '/ollama_worker_spawn.last.json';
+        $cmd = '';
+        $args = [$maxBatchesArg, $batchArg];
 
         $spawnMethod = 'proc_open';
         $spawnOk = false;
         $spawnStatus = null;
         if (stripos(PHP_OS, 'WIN') === 0) {
+            $winQuote = static function (string $value): string {
+                $value = str_replace('/', '\\', $value);
+                $value = str_replace('"', '\\"', $value);
+                return '"' . $value . '"';
+            };
+            $cmd = 'cmd.exe /C start "" /B ' . $winQuote($phpCli) . ' ' . $winQuote($workerScript)
+                . ' ' . $maxBatchesArg . ' ' . $batchArg
+                . ' >> ' . $winQuote($spawnOutLog) . ' 2>> ' . $winQuote($spawnErrLog);
+            $handle = @popen($cmd, 'r');
+            if (is_resource($handle)) {
+                $spawned = true;
+                pclose($handle);
+            } else {
+                $error = error_get_last();
+                $spawnError = $error['message'] ?? 'popen_failed';
             $phpBinary = PHP_BINARY;
             $psPhpBinary = str_replace('"', '`"', $phpBinary);
             $workerArg = '"' . str_replace('"', '`"', $workerScript) . '" ' . $maxBatchesArg . ' ' . $batchArg;
@@ -434,10 +457,15 @@ if ($action === 'run') {
                 $spawnOk = $statusCode === 0;
             }
         } else {
-            $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
-            $cmd = 'sh -c ' . escapeshellarg($command . ' > /dev/null 2>&1 & echo $!');
+            $command = escapeshellarg($phpCli) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
+            $shellCommand = 'nohup ' . $command
+                . ' >> ' . escapeshellarg($spawnOutLog)
+                . ' 2>> ' . escapeshellarg($spawnErrLog)
+                . ' & echo $!';
+            $cmd = 'sh -c ' . escapeshellarg($shellCommand);
             $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
             if (is_resource($process)) {
+                $spawned = true;
                 if (isset($pipes[1]) && is_resource($pipes[1])) {
                     $pidOutput = stream_get_contents($pipes[1]);
                     $pid = is_string($pidOutput) ? (int)trim($pidOutput) : null;
@@ -447,6 +475,9 @@ if ($action === 'run') {
                     fclose($pipes[2]);
                 }
                 proc_close($process);
+            } else {
+                $error = error_get_last();
+                $spawnError = $error['message'] ?? 'proc_open_failed';
                 $spawnOk = $pid !== null;
             } else {
                 $spawnMethod = 'exec';
@@ -461,8 +492,52 @@ if ($action === 'run') {
             }
         }
 
+        $spawnLastPayload = [
+            'ts' => date('c'),
+            'php' => $phpCli,
+            'script' => $workerScript,
+            'args' => $args,
+            'cmd' => $cmd,
+            'spawned' => $spawned,
+            'error' => $spawnError,
+            'pid' => $pid,
+            'logs' => [
+                'out' => $spawnOutLog,
+                'err' => $spawnErrLog,
+            ],
+        ];
+        @file_put_contents(
+            $spawnLast,
+            json_encode($spawnLastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+        );
+
+        $errSnippet = null;
+        if (is_file($spawnErrLog)) {
+            $errContents = @file_get_contents($spawnErrLog);
+            if (is_string($errContents) && $errContents !== '') {
+                $errSnippet = mb_substr($errContents, -800);
+            }
+        }
+
+        if (!$spawned) {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'start_failed',
+                'reason' => 'start_failed',
+                'spawned' => $spawned,
+                'spawn_error' => $spawnError,
+                'err_snippet' => $errSnippet,
+                'spawn_last' => $spawnLast,
+                'spawn_logs' => [
+                    'out' => $spawnOutLog,
+                    'err' => $spawnErrLog,
+                ],
+            ]);
+        }
+
         $verified = false;
         $runnerLocked = false;
+        for ($attempt = 0; $attempt < 12; $attempt++) {
         $workerRecent = false;
         $pidAlive = null;
         $verifyAttempts = 12;
@@ -489,14 +564,22 @@ if ($action === 'run') {
         $respond(200, [
             'ok' => $verified,
             'status' => $verified ? 'started' : 'start_failed',
+            'reason' => $verified ? null : 'start_failed',
             'pid' => $pid,
             'pid_alive' => $pidAlive,
             'spawn_method' => $spawnMethod,
             'spawn_ok' => $spawnOk,
             'spawn_status' => $spawnStatus,
             'runner_locked' => $runnerLocked,
-            'worker_recent' => $workerRecent,
             'verified' => $verified,
+            'spawned' => $spawned,
+            'spawn_error' => $spawnError,
+            'err_snippet' => $errSnippet,
+            'spawn_last' => $spawnLast,
+            'spawn_logs' => [
+                'out' => $spawnOutLog,
+                'err' => $spawnErrLog,
+            ],
             'verify_attempts' => $verifyAttempts,
         ]);
     } finally {
