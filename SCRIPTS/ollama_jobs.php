@@ -268,6 +268,35 @@ function sv_ollama_update_global_status(array $config, string $key, bool $active
     sv_ollama_write_global_status($config, $status);
 }
 
+function sv_ollama_worker_status_snapshot(array $config): array
+{
+    $status = sv_ollama_read_global_status($config);
+    $worker = is_array($status['worker_active'] ?? null) ? $status['worker_active'] : [];
+    $updatedAt = is_string($worker['updated_at'] ?? null) ? $worker['updated_at'] : '';
+    $updatedTs = $updatedAt !== '' ? strtotime($updatedAt) : false;
+
+    return [
+        'active' => !empty($worker['active']),
+        'updated_at' => $updatedAt,
+        'updated_ts' => $updatedTs === false ? null : (int)$updatedTs,
+        'details' => is_array($worker['details'] ?? null) ? $worker['details'] : [],
+    ];
+}
+
+function sv_ollama_worker_recent(array $config, int $maxAgeSeconds): bool
+{
+    $snapshot = sv_ollama_worker_status_snapshot($config);
+    if (!empty($snapshot['active'])) {
+        return true;
+    }
+    $updatedTs = $snapshot['updated_ts'] ?? null;
+    if ($updatedTs === null) {
+        return false;
+    }
+
+    return (time() - $updatedTs) <= $maxAgeSeconds;
+}
+
 function sv_ollama_mode_requires_image(string $mode): bool
 {
     return in_array($mode, ['caption', 'title', 'prompt_eval', 'quality', 'nsfw_classify'], true);

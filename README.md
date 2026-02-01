@@ -120,11 +120,12 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ### Runner/Tracing Hinweise
 - `WWW/ollama.php?action=run` startet jetzt den CLI-Worker und gibt sofort zurück (kein Web-Prozess-Blocking).
-- Der Start bestätigt erst nach erfolgreichem Worker-Lock/Heartbeat (kein falsches "started").
+- Der Start bestätigt erst nach erfolgreichem Worker-Lock/Heartbeat oder frischem Worker-Status (kein falsches "started").
 - Unter Windows wird der Worker über PowerShell im Hidden-Window gestartet, damit keine sichtbare Konsole geöffnet wird.
 - Die Windows-Start-Process-Argumente sind gequotet, damit Pfade mit Leerzeichen sauber verarbeitet werden.
 - Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
 - Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
+- Der Worker schreibt `worker_active` in `LOGS/ollama_status.json` (Heartbeat), damit Start/Status verlässlich geprüft werden kann.
 
 ### Logpfade
 - **Log-Root:** `paths.logs` aus der Config, sonst `LOGS/`

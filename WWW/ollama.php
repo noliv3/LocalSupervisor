@@ -443,6 +443,7 @@ if ($action === 'run') {
 
         $verified = false;
         $runnerLocked = false;
+        $workerRecent = false;
         for ($attempt = 0; $attempt < 6; $attempt++) {
             $lockProbe = sv_ollama_acquire_runner_lock($config, 'run_verify');
             if (!empty($lockProbe['ok'])) {
@@ -452,7 +453,8 @@ if ($action === 'run') {
                 $runnerLocked = true;
             }
 
-            if ($runnerLocked || sv_ollama_running_job_count($pdo) > 0) {
+            $workerRecent = sv_ollama_worker_recent($config, 8);
+            if ($runnerLocked || $workerRecent || sv_ollama_running_job_count($pdo) > 0) {
                 $verified = true;
                 break;
             }
@@ -464,6 +466,7 @@ if ($action === 'run') {
             'status' => $verified ? 'started' : 'start_failed',
             'pid' => $pid,
             'runner_locked' => $runnerLocked,
+            'worker_recent' => $workerRecent,
             'verified' => $verified,
         ]);
     } finally {
