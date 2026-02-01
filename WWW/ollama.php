@@ -400,6 +400,7 @@ if ($action === 'run') {
             ]);
         }
 
+        $phpCli = sv_get_php_cli($config);
         $workerScript = realpath(__DIR__ . '/../SCRIPTS/ollama_worker_cli.php');
         if ($workerScript === false) {
             $respond(500, ['ok' => false, 'error' => 'Worker script missing.']);
@@ -407,28 +408,41 @@ if ($action === 'run') {
         $batchArg = '--batch=' . $batch;
         $maxBatchesArg = '--max-batches=1';
         $pid = null;
+        $spawned = false;
+        $spawnError = null;
+        $spawnOutLog = $logsPath . '/ollama_worker_spawn.out.log';
+        $spawnErrLog = $logsPath . '/ollama_worker_spawn.err.log';
+        $spawnLast = $logsPath . '/ollama_worker_spawn.last.json';
+        $cmd = '';
+        $args = [$maxBatchesArg, $batchArg];
 
         if (stripos(PHP_OS, 'WIN') === 0) {
-            $phpBinary = PHP_BINARY;
-            $psPhpBinary = str_replace('"', '`"', $phpBinary);
-            $workerArg = '"' . str_replace('"', '`"', $workerScript) . '" ' . $maxBatchesArg . ' ' . $batchArg;
-            $psCommand = 'Start-Process -WindowStyle Hidden -FilePath "' . $psPhpBinary . '" -ArgumentList "' . $workerArg . '"';
-            $cmd = 'powershell -NoProfile -WindowStyle Hidden -Command ' . escapeshellarg($psCommand);
-            $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
-            if (is_resource($process)) {
-                if (isset($pipes[1]) && is_resource($pipes[1])) {
-                    fclose($pipes[1]);
-                }
-                if (isset($pipes[2]) && is_resource($pipes[2])) {
-                    fclose($pipes[2]);
-                }
-                proc_close($process);
+            $winQuote = static function (string $value): string {
+                $value = str_replace('/', '\\', $value);
+                $value = str_replace('"', '\\"', $value);
+                return '"' . $value . '"';
+            };
+            $cmd = 'cmd.exe /C start "" /B ' . $winQuote($phpCli) . ' ' . $winQuote($workerScript)
+                . ' ' . $maxBatchesArg . ' ' . $batchArg
+                . ' >> ' . $winQuote($spawnOutLog) . ' 2>> ' . $winQuote($spawnErrLog);
+            $handle = @popen($cmd, 'r');
+            if (is_resource($handle)) {
+                $spawned = true;
+                pclose($handle);
+            } else {
+                $error = error_get_last();
+                $spawnError = $error['message'] ?? 'popen_failed';
             }
         } else {
-            $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
-            $cmd = 'sh -c ' . escapeshellarg($command . ' > /dev/null 2>&1 & echo $!');
+            $command = escapeshellarg($phpCli) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
+            $shellCommand = 'nohup ' . $command
+                . ' >> ' . escapeshellarg($spawnOutLog)
+                . ' 2>> ' . escapeshellarg($spawnErrLog)
+                . ' & echo $!';
+            $cmd = 'sh -c ' . escapeshellarg($shellCommand);
             $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
             if (is_resource($process)) {
+                $spawned = true;
                 if (isset($pipes[1]) && is_resource($pipes[1])) {
                     $pidOutput = stream_get_contents($pipes[1]);
                     $pid = is_string($pidOutput) ? (int)trim($pidOutput) : null;
@@ -438,23 +452,64 @@ if ($action === 'run') {
                     fclose($pipes[2]);
                 }
                 proc_close($process);
+            } else {
+                $error = error_get_last();
+                $spawnError = $error['message'] ?? 'proc_open_failed';
             }
+        }
+
+        $spawnLastPayload = [
+            'ts' => date('c'),
+            'php' => $phpCli,
+            'script' => $workerScript,
+            'args' => $args,
+            'cmd' => $cmd,
+            'spawned' => $spawned,
+            'error' => $spawnError,
+            'pid' => $pid,
+            'logs' => [
+                'out' => $spawnOutLog,
+                'err' => $spawnErrLog,
+            ],
+        ];
+        @file_put_contents(
+            $spawnLast,
+            json_encode($spawnLastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+        );
+
+        $errSnippet = null;
+        if (is_file($spawnErrLog)) {
+            $errContents = @file_get_contents($spawnErrLog);
+            if (is_string($errContents) && $errContents !== '') {
+                $errSnippet = mb_substr($errContents, -800);
+            }
+        }
+
+        if (!$spawned) {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'start_failed',
+                'reason' => 'start_failed',
+                'spawned' => $spawned,
+                'spawn_error' => $spawnError,
+                'err_snippet' => $errSnippet,
+                'spawn_last' => $spawnLast,
+                'spawn_logs' => [
+                    'out' => $spawnOutLog,
+                    'err' => $spawnErrLog,
+                ],
+            ]);
         }
 
         $verified = false;
         $runnerLocked = false;
-        $workerRecent = false;
-        for ($attempt = 0; $attempt < 6; $attempt++) {
+        for ($attempt = 0; $attempt < 12; $attempt++) {
             $lockProbe = sv_ollama_acquire_runner_lock($config, 'run_verify');
             if (!empty($lockProbe['ok'])) {
                 sv_ollama_release_runner_lock($lockProbe['handle']);
                 $runnerLocked = false;
             } elseif (($lockProbe['reason'] ?? '') === 'locked') {
                 $runnerLocked = true;
-            }
-
-            $workerRecent = sv_ollama_worker_recent($config, 8);
-            if ($runnerLocked || $workerRecent || sv_ollama_running_job_count($pdo) > 0) {
                 $verified = true;
                 break;
             }
@@ -464,10 +519,18 @@ if ($action === 'run') {
         $respond(200, [
             'ok' => $verified,
             'status' => $verified ? 'started' : 'start_failed',
+            'reason' => $verified ? null : 'start_failed',
             'pid' => $pid,
             'runner_locked' => $runnerLocked,
-            'worker_recent' => $workerRecent,
             'verified' => $verified,
+            'spawned' => $spawned,
+            'spawn_error' => $spawnError,
+            'err_snippet' => $errSnippet,
+            'spawn_last' => $spawnLast,
+            'spawn_logs' => [
+                'out' => $spawnOutLog,
+                'err' => $spawnErrLog,
+            ],
         ]);
     } finally {
         sv_ollama_release_launcher_lock($lock['handle']);

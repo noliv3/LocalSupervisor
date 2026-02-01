@@ -2289,11 +2289,26 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
     $traceFile = sv_ollama_job_trace_file_for_attempt($config, $jobId, $mode, $attempt);
 
     $childScript = __DIR__ . '/ollama_job_child_cli.php';
-    $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($childScript)
-        . ' --job-id=' . (int)$jobId
-        . ' --attempt=' . (int)$attempt
-        . ' --trace-file=' . escapeshellarg($traceFile)
-        . ' --owner=' . escapeshellarg('cli:ollama_worker_cli.php');
+    $phpCli = sv_get_php_cli($config);
+    $owner = 'cli:ollama_worker_cli.php';
+    if (stripos(PHP_OS, 'WIN') === 0) {
+        $winQuote = static function (string $value): string {
+            $value = str_replace('/', '\\', $value);
+            $value = str_replace('"', '\\"', $value);
+            return '"' . $value . '"';
+        };
+        $command = $winQuote($phpCli) . ' ' . $winQuote($childScript)
+            . ' --job-id=' . (int)$jobId
+            . ' --attempt=' . (int)$attempt
+            . ' --trace-file=' . $winQuote($traceFile)
+            . ' --owner=' . $winQuote($owner);
+    } else {
+        $command = escapeshellarg($phpCli) . ' ' . escapeshellarg($childScript)
+            . ' --job-id=' . (int)$jobId
+            . ' --attempt=' . (int)$attempt
+            . ' --trace-file=' . escapeshellarg($traceFile)
+            . ' --owner=' . escapeshellarg($owner);
+    }
 
     $descriptors = [
         0 => ['pipe', 'r'],
@@ -2303,6 +2318,39 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
 
     $process = @proc_open($command, $descriptors, $pipes, dirname(__DIR__));
     if (!is_resource($process)) {
+        $now = date('c');
+        $payload['attempts'] = $attempt;
+        $payload['last_error_at'] = $now;
+        $payload['last_error'] = 'proc_open_failed';
+        sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+
+        sv_update_job_status($pdo, $jobId, 'error', null, 'proc_open_failed');
+        sv_ollama_update_job_columns($pdo, $jobId, [
+            'last_error_code' => 'child_spawn_failed',
+            'error_message' => 'proc_open_failed',
+            'stage' => 'child_spawn_failed',
+            'stage_changed_at' => $now,
+            'heartbeat_at' => $now,
+            'worker_owner' => $owner,
+        ], true);
+        $progressTotal = sv_ollama_progress_bits_total($mode);
+        sv_ollama_touch_job_progress($pdo, $jobId, 1000, $progressTotal, 'child_spawn_failed');
+        sv_ollama_trace_update($config, $traceFile, [
+            'stage_at_fail' => 'child_spawn_failed',
+            'error_code' => 'child_spawn_failed',
+            'error_message' => 'proc_open_failed',
+        ]);
+        sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+            'ts' => $now,
+            'event' => 'final',
+            'job_id' => $jobId,
+            'attempt' => $attempt,
+            'mode' => $mode,
+            'status' => 'error',
+            'error_code' => 'child_spawn_failed',
+            'error' => 'proc_open_failed',
+            'cmd' => $command,
+        ]);
         return [
             'job_id' => $jobId,
             'status' => 'error',
@@ -2314,7 +2362,7 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
     $pid = isset($status['pid']) ? (int)$status['pid'] : null;
     sv_ollama_update_job_columns($pdo, $jobId, [
         'worker_pid' => $pid,
-        'worker_owner' => 'cli:ollama_worker_cli.php',
+        'worker_owner' => $owner,
         'stage' => 'child_running',
         'stage_changed_at' => date('c'),
         'heartbeat_at' => date('c'),
