@@ -408,6 +408,9 @@ if ($action === 'run') {
         $maxBatchesArg = '--max-batches=1';
         $pid = null;
 
+        $spawnMethod = 'proc_open';
+        $spawnOk = false;
+        $spawnStatus = null;
         if (stripos(PHP_OS, 'WIN') === 0) {
             $phpBinary = PHP_BINARY;
             $psPhpBinary = str_replace('"', '`"', $phpBinary);
@@ -423,6 +426,12 @@ if ($action === 'run') {
                     fclose($pipes[2]);
                 }
                 proc_close($process);
+                $spawnOk = true;
+            } else {
+                $spawnMethod = 'exec';
+                @exec($cmd, $output, $statusCode);
+                $spawnStatus = $statusCode;
+                $spawnOk = $statusCode === 0;
             }
         } else {
             $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
@@ -438,13 +447,26 @@ if ($action === 'run') {
                     fclose($pipes[2]);
                 }
                 proc_close($process);
+                $spawnOk = $pid !== null;
+            } else {
+                $spawnMethod = 'exec';
+                $output = [];
+                $statusCode = null;
+                @exec($cmd, $output, $statusCode);
+                $spawnStatus = $statusCode;
+                if (is_array($output) && $output !== []) {
+                    $pid = (int)trim((string)end($output));
+                }
+                $spawnOk = $pid !== null && $statusCode === 0;
             }
         }
 
         $verified = false;
         $runnerLocked = false;
         $workerRecent = false;
-        for ($attempt = 0; $attempt < 6; $attempt++) {
+        $pidAlive = null;
+        $verifyAttempts = 12;
+        for ($attempt = 0; $attempt < $verifyAttempts; $attempt++) {
             $lockProbe = sv_ollama_acquire_runner_lock($config, 'run_verify');
             if (!empty($lockProbe['ok'])) {
                 sv_ollama_release_runner_lock($lockProbe['handle']);
@@ -454,20 +476,28 @@ if ($action === 'run') {
             }
 
             $workerRecent = sv_ollama_worker_recent($config, 8);
-            if ($runnerLocked || $workerRecent || sv_ollama_running_job_count($pdo) > 0) {
+            if ($pid !== null && function_exists('posix_kill')) {
+                $pidAlive = @posix_kill((int)$pid, 0);
+            }
+            if ($runnerLocked || $workerRecent || $pidAlive || sv_ollama_running_job_count($pdo) > 0) {
                 $verified = true;
                 break;
             }
-            usleep(200000);
+            usleep(250000);
         }
 
         $respond(200, [
             'ok' => $verified,
             'status' => $verified ? 'started' : 'start_failed',
             'pid' => $pid,
+            'pid_alive' => $pidAlive,
+            'spawn_method' => $spawnMethod,
+            'spawn_ok' => $spawnOk,
+            'spawn_status' => $spawnStatus,
             'runner_locked' => $runnerLocked,
             'worker_recent' => $workerRecent,
             'verified' => $verified,
+            'verify_attempts' => $verifyAttempts,
         ]);
     } finally {
         sv_ollama_release_launcher_lock($lock['handle']);
