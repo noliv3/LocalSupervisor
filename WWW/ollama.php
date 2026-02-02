@@ -369,6 +369,13 @@ if ($action === 'run') {
 
     $lock = sv_ollama_acquire_launcher_lock($config, 'web:ollama.php');
     if (empty($lock['ok'])) {
+        if (($lock['reason'] ?? null) === 'log_root_unavailable') {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'blocked',
+                'reason' => 'log_root_unavailable',
+            ]);
+        }
         $respond(200, [
             'ok' => false,
             'status' => 'locked',
@@ -387,6 +394,19 @@ if ($action === 'run') {
                 'reason' => $preflight['reason'] ?? 'preflight_failed',
             ]);
         }
+
+        $logsError = null;
+        $logsRoot = sv_ensure_logs_root($config, $logsError);
+        if ($logsRoot === null) {
+            sv_log_system_error($config, 'ollama_run_log_root_unavailable', ['error' => $logsError]);
+            $respond(200, [
+                'ok' => false,
+                'status' => 'blocked',
+                'reason' => 'log_root_unavailable',
+                'log_error' => $logsError,
+            ]);
+        }
+        $logsPath = $logsRoot;
 
         sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
         $maxConcurrency = sv_ollama_max_concurrency($config);
@@ -420,10 +440,13 @@ if ($action === 'run') {
         $spawnOk = false;
         $spawnStatus = null;
         if (stripos(PHP_OS, 'WIN') === 0) {
-            $phpBinary = PHP_BINARY;
+            $phpBinary = $phpCli !== '' ? $phpCli : PHP_BINARY;
             $psPhpBinary = str_replace('"', '`"', $phpBinary);
             $workerArg = '"' . str_replace('"', '`"', $workerScript) . '" ' . $maxBatchesArg . ' ' . $batchArg;
-            $psCommand = 'Start-Process -WindowStyle Hidden -FilePath "' . $psPhpBinary . '" -ArgumentList "' . $workerArg . '"';
+            $psOutLog = str_replace('"', '`"', $spawnOutLog);
+            $psErrLog = str_replace('"', '`"', $spawnErrLog);
+            $psCommand = 'Start-Process -WindowStyle Hidden -FilePath "' . $psPhpBinary . '" -ArgumentList "' . $workerArg . '"'
+                . ' -RedirectStandardOutput "' . $psOutLog . '" -RedirectStandardError "' . $psErrLog . '"';
             $cmd = 'powershell -NoProfile -WindowStyle Hidden -Command ' . escapeshellarg($psCommand);
             $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
             if (is_resource($process)) {
@@ -495,10 +518,21 @@ if ($action === 'run') {
                 'err' => $spawnErrLog,
             ],
         ];
-        @file_put_contents(
-            $spawnLast,
-            json_encode($spawnLastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-        );
+        $spawnLastJson = json_encode($spawnLastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($spawnLastJson !== false) {
+            $written = file_put_contents($spawnLast, $spawnLastJson);
+            if ($written === false) {
+                $error = error_get_last();
+                sv_log_system_error($config, 'ollama_spawn_last_write_failed', [
+                    'path' => $spawnLast,
+                    'error' => $error['message'] ?? null,
+                ]);
+            }
+        } else {
+            sv_log_system_error($config, 'ollama_spawn_last_encode_failed', [
+                'path' => $spawnLast,
+            ]);
+        }
 
         $errSnippet = null;
         if (is_file($spawnErrLog)) {
@@ -528,8 +562,11 @@ if ($action === 'run') {
         $runnerLocked = false;
         $workerRecent = false;
         $pidAlive = null;
-        $verifyAttempts = 12;
-        for ($attempt = 0; $attempt < $verifyAttempts; $attempt++) {
+        $verifyWindow = max(1, $maxSeconds);
+        $verifyAttempts = 0;
+        $deadline = microtime(true) + $verifyWindow;
+        do {
+            $verifyAttempts++;
             $lockProbe = sv_ollama_acquire_runner_lock($config, 'run_verify');
             if (!empty($lockProbe['ok'])) {
                 sv_ollama_release_runner_lock($lockProbe['handle']);
@@ -547,7 +584,7 @@ if ($action === 'run') {
                 break;
             }
             usleep(250000);
-        }
+        } while (microtime(true) < $deadline);
 
         $respond(200, [
             'ok' => $verified,

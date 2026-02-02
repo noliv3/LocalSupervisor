@@ -16,15 +16,22 @@ try {
     exit(1);
 }
 
-$logsRoot = sv_logs_root($config);
-if (!is_dir($logsRoot)) {
-    @mkdir($logsRoot, 0777, true);
+$logsError = null;
+$logsRoot = sv_ensure_logs_root($config, $logsError);
+$errLogPath = null;
+if ($logsRoot === null) {
+    sv_log_system_error($config, 'ollama_worker_log_root_unavailable', ['error' => $logsError]);
+} else {
+    $errLogPath = $logsRoot . '/ollama_worker.err.log';
 }
-$errLogPath = $logsRoot . '/ollama_worker.err.log';
 
 $writeErrLog = static function (string $message) use ($errLogPath): void {
     $line = '[' . date('c') . '] ' . $message . PHP_EOL;
-    @file_put_contents($errLogPath, $line, FILE_APPEND);
+    if ($errLogPath === null) {
+        fwrite(STDERR, $line);
+        return;
+    }
+    file_put_contents($errLogPath, $line, FILE_APPEND);
 };
 
 $loop = false;

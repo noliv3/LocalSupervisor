@@ -89,29 +89,48 @@ function sv_ollama_running_job_count(PDO $pdo): int
 
 function sv_ollama_runner_lock_path(array $config): string
 {
-    $logsRoot = sv_logs_root($config);
-    if (!is_dir($logsRoot)) {
-        @mkdir($logsRoot, 0777, true);
-    }
-
-    return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_worker.lock';
+    return sv_log_path($config, 'ollama_worker.lock');
 }
 
 function sv_ollama_launcher_lock_path(array $config): string
 {
-    $logsRoot = sv_logs_root($config);
-    if (!is_dir($logsRoot)) {
-        @mkdir($logsRoot, 0777, true);
+    return sv_log_path($config, 'ollama_launcher.lock');
+}
+
+function sv_ollama_prepare_logs_root(array $config, string $context, ?string &$error = null): ?string
+{
+    $logsRoot = sv_ensure_logs_root($config, $error);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'ollama_log_root_unavailable', [
+            'context' => $context,
+            'error' => $error,
+        ]);
     }
 
-    return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_launcher.lock';
+    return $logsRoot;
 }
 
 function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): array
 {
-    $lockPath = sv_ollama_runner_lock_path($config);
-    $handle = @fopen($lockPath, 'c+');
+    $logsError = null;
+    $logsRoot = sv_ollama_prepare_logs_root($config, 'runner_lock', $logsError);
+    if ($logsRoot === null) {
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => sv_ollama_runner_lock_path($config),
+            'reason' => 'log_root_unavailable',
+        ];
+    }
+
+    $lockPath = $logsRoot . DIRECTORY_SEPARATOR . 'ollama_worker.lock';
+    $handle = fopen($lockPath, 'c+');
     if ($handle === false) {
+        $error = error_get_last();
+        sv_log_system_error($config, 'ollama_runner_lock_open_failed', [
+            'path' => $lockPath,
+            'error' => $error['message'] ?? null,
+        ]);
         return [
             'ok' => false,
             'handle' => null,
@@ -137,9 +156,23 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
         'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
         'owner' => $owner ?? PHP_SAPI,
     ];
-    @ftruncate($handle, 0);
-    @fwrite($handle, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-    @fflush($handle);
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($encoded === false) {
+        sv_log_system_error($config, 'ollama_runner_lock_encode_failed', [
+            'path' => $lockPath,
+        ]);
+    } else {
+        ftruncate($handle, 0);
+        $written = fwrite($handle, $encoded);
+        if ($written === false) {
+            $error = error_get_last();
+            sv_log_system_error($config, 'ollama_runner_lock_write_failed', [
+                'path' => $lockPath,
+                'error' => $error['message'] ?? null,
+            ]);
+        }
+        fflush($handle);
+    }
 
     return [
         'ok' => true,
@@ -151,9 +184,25 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
 
 function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): array
 {
-    $lockPath = sv_ollama_launcher_lock_path($config);
-    $handle = @fopen($lockPath, 'c+');
+    $logsError = null;
+    $logsRoot = sv_ollama_prepare_logs_root($config, 'launcher_lock', $logsError);
+    if ($logsRoot === null) {
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => sv_ollama_launcher_lock_path($config),
+            'reason' => 'log_root_unavailable',
+        ];
+    }
+
+    $lockPath = $logsRoot . DIRECTORY_SEPARATOR . 'ollama_launcher.lock';
+    $handle = fopen($lockPath, 'c+');
     if ($handle === false) {
+        $error = error_get_last();
+        sv_log_system_error($config, 'ollama_launcher_lock_open_failed', [
+            'path' => $lockPath,
+            'error' => $error['message'] ?? null,
+        ]);
         return [
             'ok' => false,
             'handle' => null,
@@ -179,9 +228,23 @@ function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): 
         'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
         'owner' => $owner ?? PHP_SAPI,
     ];
-    @ftruncate($handle, 0);
-    @fwrite($handle, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-    @fflush($handle);
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($encoded === false) {
+        sv_log_system_error($config, 'ollama_launcher_lock_encode_failed', [
+            'path' => $lockPath,
+        ]);
+    } else {
+        ftruncate($handle, 0);
+        $written = fwrite($handle, $encoded);
+        if ($written === false) {
+            $error = error_get_last();
+            sv_log_system_error($config, 'ollama_launcher_lock_write_failed', [
+                'path' => $lockPath,
+                'error' => $error['message'] ?? null,
+            ]);
+        }
+        fflush($handle);
+    }
 
     return [
         'ok' => true,
@@ -213,23 +276,31 @@ function sv_ollama_release_launcher_lock($handle): void
 
 function sv_ollama_status_path(array $config): string
 {
-    $logsRoot = sv_logs_root($config);
-    if (!is_dir($logsRoot)) {
-        @mkdir($logsRoot, 0777, true);
-    }
-
-    return $logsRoot . DIRECTORY_SEPARATOR . 'ollama_status.json';
+    return sv_log_path($config, 'ollama_status.json');
 }
 
 function sv_ollama_read_global_status(array $config): array
 {
-    $path = sv_ollama_status_path($config);
+    $logsError = null;
+    $logsRoot = sv_ollama_prepare_logs_root($config, 'status_read', $logsError);
+    if ($logsRoot === null) {
+        return [];
+    }
+
+    $path = $logsRoot . DIRECTORY_SEPARATOR . 'ollama_status.json';
     if (!is_file($path) || !is_readable($path)) {
         return [];
     }
 
-    $raw = @file_get_contents($path);
+    $raw = file_get_contents($path);
     if (!is_string($raw) || trim($raw) === '') {
+        if (!is_string($raw)) {
+            $error = error_get_last();
+            sv_log_system_error($config, 'ollama_status_read_failed', [
+                'path' => $path,
+                'error' => $error['message'] ?? null,
+            ]);
+        }
         return [];
     }
 
@@ -239,12 +310,28 @@ function sv_ollama_read_global_status(array $config): array
 
 function sv_ollama_write_global_status(array $config, array $status): void
 {
-    $path = sv_ollama_status_path($config);
-    $payload = json_encode($status, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    if (!is_string($payload)) {
+    $logsError = null;
+    $logsRoot = sv_ollama_prepare_logs_root($config, 'status_write', $logsError);
+    if ($logsRoot === null) {
         return;
     }
-    @file_put_contents($path, $payload, LOCK_EX);
+
+    $path = $logsRoot . DIRECTORY_SEPARATOR . 'ollama_status.json';
+    $payload = json_encode($status, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($payload)) {
+        sv_log_system_error($config, 'ollama_status_encode_failed', [
+            'path' => $path,
+        ]);
+        return;
+    }
+    $result = file_put_contents($path, $payload, LOCK_EX);
+    if ($result === false) {
+        $error = error_get_last();
+        sv_log_system_error($config, 'ollama_status_write_failed', [
+            'path' => $path,
+            'error' => $error['message'] ?? null,
+        ]);
+    }
 }
 
 function sv_ollama_update_global_status(array $config, string $key, bool $active, ?string $message = null, array $details = []): void
