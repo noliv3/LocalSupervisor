@@ -1228,9 +1228,9 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
     return $result;
 }
 
-function sv_forge_model_cache_path(): string
+function sv_forge_model_cache_path(array $config): string
 {
-    return sv_base_dir() . '/LOGS/forge_models.cache.json';
+    return sv_log_path($config, 'forge_models.cache.json');
 }
 
 function sv_forge_normalize_models(array $modelsRaw, string $fallback): array
@@ -1280,7 +1280,7 @@ function sv_forge_normalize_models(array $modelsRaw, string $fallback): array
 
 function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds = SV_FORGE_MODEL_CACHE_TTL): array
 {
-    $cacheFile = sv_forge_model_cache_path();
+    $cacheFile = sv_forge_model_cache_path($config);
     $now       = time();
     $ttl       = max(10, $ttlSeconds);
     $result    = [
@@ -2148,22 +2148,67 @@ function sv_spawn_forge_worker_for_media(
     }
 
     $cooldownSeconds = isset($config['forge']['spawn_cooldown']) ? max(1, (int)$config['forge']['spawn_cooldown']) : 15;
-    $lockPath        = sv_base_dir() . '/LOGS/forge_worker_spawn.lock';
-    $spawnOutLog     = sv_base_dir() . '/LOGS/forge_worker_spawn.out.log';
-    $spawnErrLog     = sv_base_dir() . '/LOGS/forge_worker_spawn.err.log';
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'forge_worker_spawn_log_root_unavailable', ['error' => $logsError]);
+        if ($jobId !== null) {
+            sv_merge_job_response_metadata($pdo, $jobId, [
+                '_sv_worker_spawned'          => false,
+                '_sv_worker_spawn_skipped'    => true,
+                '_sv_worker_spawn_reason'     => 'log_dir_unwritable',
+                '_sv_worker_spawn_error'      => $logsError,
+                '_sv_worker_spawn_attempt'    => date('c'),
+                'worker_spawn'                => 'skipped',
+                'worker_spawn_cmd'            => null,
+                'worker_spawn_err_snippet'    => null,
+                'worker_spawn_log_paths'      => [],
+            ]);
+        }
+        return [
+            'pid'          => null,
+            'started'      => date('c'),
+            'unknown'      => false,
+            'skipped'      => true,
+            'reason'       => 'log_dir_unwritable',
+            'state'        => 'skipped',
+            'cmd'          => null,
+            'err_snippet'  => $logsError,
+            'log_paths'    => [],
+        ];
+    }
+
+    $lockPath        = $logsRoot . '/forge_worker_spawn.lock';
+    $spawnLastPath   = $logsRoot . '/forge_worker_spawn.last.json';
+    $spawnOutLog     = $logsRoot . '/forge_worker_spawn.out.log';
+    $spawnErrLog     = $logsRoot . '/forge_worker_spawn.err.log';
     $logPaths        = [
         'stdout' => $spawnOutLog,
         'stderr' => $spawnErrLog,
     ];
 
     $now            = time();
-    $lastSpawnAt    = is_file($lockPath) ? (int)@file_get_contents($lockPath) : null;
+    $lastSpawnAt    = null;
+    if (is_file($spawnLastPath)) {
+        $raw = file_get_contents($spawnLastPath);
+        if ($raw === false) {
+            sv_log_system_error($config, 'forge_worker_spawn_last_read_failed', ['path' => $spawnLastPath]);
+        } else {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded) && isset($decoded['last_spawn_at'])) {
+                $lastSpawnAt = (int)$decoded['last_spawn_at'];
+            }
+        }
+    }
     $cooldownActive = $lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds;
     $remaining      = $cooldownActive ? max(0, $cooldownSeconds - ($now - $lastSpawnAt)) : 0;
 
-    $recordSpawnLog = function (string $state, string $reason) use ($spawnErrLog): void {
+    $recordSpawnLog = function (string $state, string $reason) use ($spawnErrLog, $config): void {
         $line = '[' . date('c') . '] ' . $state . ': ' . $reason . PHP_EOL;
-        @file_put_contents($spawnErrLog, $line, FILE_APPEND);
+        $result = file_put_contents($spawnErrLog, $line, FILE_APPEND);
+        if ($result === false) {
+            sv_log_system_error($config, 'forge_worker_spawn_log_write_failed', ['path' => $spawnErrLog]);
+        }
     };
 
     if ($cooldownActive) {
@@ -2198,7 +2243,39 @@ function sv_spawn_forge_worker_for_media(
         ];
     }
 
-    @file_put_contents($lockPath, (string)$now);
+    $lockHandle = fopen($lockPath, 'c+');
+    if ($lockHandle === false) {
+        $recordSpawnLog('error', 'spawn_lock_open_failed');
+        return [
+            'pid'          => null,
+            'started'      => date('c', $now),
+            'unknown'      => false,
+            'skipped'      => true,
+            'reason'       => 'spawn_lock_open_failed',
+            'state'        => 'skipped',
+            'cmd'          => null,
+            'err_snippet'  => 'spawn_lock_open_failed',
+            'log_paths'    => $logPaths,
+        ];
+    }
+
+    $hasLock = flock($lockHandle, LOCK_EX | LOCK_NB);
+    if (!$hasLock) {
+        fclose($lockHandle);
+        $recordSpawnLog('skipped', 'spawn_lock_busy');
+        return [
+            'pid'          => null,
+            'started'      => date('c', $now),
+            'unknown'      => false,
+            'skipped'      => true,
+            'reason'       => 'spawn_lock_busy',
+            'state'        => 'skipped',
+            'cmd'          => null,
+            'err_snippet'  => 'spawn_lock_busy',
+            'log_paths'    => $logPaths,
+        ];
+    }
+
     $effectiveLimit = $limit === null ? 1 : max(1, (int)$limit);
     $baseDir        = sv_base_dir();
     $script         = $baseDir . '/SCRIPTS/forge_worker_cli.php';
@@ -2228,7 +2305,7 @@ function sv_spawn_forge_worker_for_media(
                 . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
                 . ' >> ' . $toWindowsPath($spawnOutLog) . ' 2>> ' . $toWindowsPath($spawnErrLog);
 
-            $proc = @popen($spawnCmd, 'r');
+            $proc = popen($spawnCmd, 'r');
             if ($proc !== false) {
                 pclose($proc);
                 $spawned    = true;
@@ -2243,7 +2320,7 @@ function sv_spawn_forge_worker_for_media(
                 . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
                 . ' >> ' . escapeshellarg($spawnOutLog) . ' 2>> ' . escapeshellarg($spawnErrLog) . ' & echo $!';
 
-            $output = @shell_exec($spawnCmd);
+            $output = shell_exec($spawnCmd);
             if ($output !== null && trim((string)$output) !== '') {
                 $pid = (int)trim((string)$output);
                 if ($pid <= 0) {
@@ -2261,15 +2338,33 @@ function sv_spawn_forge_worker_for_media(
         }
 
         $recordSpawnLog($spawnState === 'spawned' ? 'spawned' : 'error', $spawnError === null ? 'ok' : $spawnError);
-        $errLog = @file_get_contents($spawnErrLog);
+        $errLog = file_get_contents($spawnErrLog);
         if ($errLog !== false && $errLog !== '') {
             $errSnippet = substr($errLog, -200);
+        } elseif ($errLog === false) {
+            sv_log_system_error($config, 'forge_worker_spawn_errlog_read_failed', ['path' => $spawnErrLog]);
         }
     }
 
     if ($spawned) {
         sv_record_forge_worker_meta($pdo, $mediaId, $pid, $startedAt);
     }
+
+    $lastPayload = [
+        'last_spawn_at' => $now,
+        'started_at' => $startedAt,
+        'command' => $spawnCmd,
+        'logs' => $logPaths,
+        'media_id' => $mediaId,
+        'limit' => $effectiveLimit,
+    ];
+    $lastJson = json_encode($lastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($lastJson === false || file_put_contents($spawnLastPath, $lastJson) === false) {
+        sv_log_system_error($config, 'forge_worker_spawn_last_write_failed', ['path' => $spawnLastPath]);
+    }
+
+    flock($lockHandle, LOCK_UN);
+    fclose($lockHandle);
 
     if ($jobId !== null) {
         sv_merge_job_response_metadata($pdo, $jobId, [
@@ -3181,43 +3276,68 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
 
     $baseDir         = sv_base_dir();
     $script          = $baseDir . '/SCRIPTS/scan_worker_cli.php';
-    $spawnLockPath   = $baseDir . '/LOGS/scan_worker_spawn.lock';
-    $spawnLastPath   = $baseDir . '/LOGS/scan_worker_spawn.last.json';
-    $spawnOutLog     = $baseDir . '/LOGS/scan_worker.out.log';
-    $spawnErrLog     = $baseDir . '/LOGS/scan_worker.err.log';
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'scan_worker_spawn_log_root_unavailable', ['error' => $logsError]);
+        return [
+            'pid'     => null,
+            'running' => false,
+            'unknown' => false,
+            'skipped' => true,
+            'reason'  => 'log_dir_unwritable',
+        ];
+    }
+    $spawnLockPath   = $logsRoot . '/scan_worker_spawn.lock';
+    $spawnLastPath   = $logsRoot . '/scan_worker_spawn.last.json';
+    $spawnOutLog     = $logsRoot . '/scan_worker.out.log';
+    $spawnErrLog     = $logsRoot . '/scan_worker.err.log';
     $cooldownSeconds = 10;
     $logPaths        = [
         'stdout' => $spawnOutLog,
         'stderr' => $spawnErrLog,
     ];
 
-    $lockHandle = @fopen($spawnLockPath, 'c+');
+    $lockHandle = fopen($spawnLockPath, 'c+');
     if ($lockHandle === false) {
+        sv_log_system_error($config, 'scan_worker_spawn_lock_open_failed', ['path' => $spawnLockPath]);
         return [
             'pid'     => null,
-            'running' => true,
-            'unknown' => true,
+            'running' => false,
+            'unknown' => false,
             'skipped' => true,
-            'reason'  => 'spawn_lock_or_cooldown',
+            'reason'  => 'spawn_lock_open_failed',
         ];
     }
-    $hasLock = @flock($lockHandle, LOCK_EX | LOCK_NB);
+    $hasLock = flock($lockHandle, LOCK_EX | LOCK_NB);
 
     $now            = time();
-    $lastSpawnAt    = is_file($spawnLockPath) ? (int)@file_get_contents($spawnLockPath) : null;
+    $lastSpawnAt    = null;
+    if (is_file($spawnLastPath)) {
+        $raw = file_get_contents($spawnLastPath);
+        if ($raw === false) {
+            sv_log_system_error($config, 'scan_worker_spawn_last_read_failed', ['path' => $spawnLastPath]);
+        } else {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded) && isset($decoded['last_spawn_at'])) {
+                $lastSpawnAt = (int)$decoded['last_spawn_at'];
+            }
+        }
+    }
     $cooldownActive = $lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds;
 
     if (!$hasLock || $cooldownActive) {
         if ($hasLock) {
-            @flock($lockHandle, LOCK_UN);
+            flock($lockHandle, LOCK_UN);
         }
-        @fclose($lockHandle);
+        fclose($lockHandle);
+        $reason = !$hasLock ? 'spawn_lock_busy' : 'spawn_cooldown';
         return [
             'pid'     => null,
-            'running' => true,
-            'unknown' => true,
+            'running' => false,
+            'unknown' => false,
             'skipped' => true,
-            'reason'  => 'spawn_lock_or_cooldown',
+            'reason'  => $reason,
         ];
     }
 
@@ -3273,10 +3393,6 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     $spawned   = false;
     $spawnErr  = null;
 
-    @ftruncate($lockHandle, 0);
-    @fwrite($lockHandle, (string)$now);
-    @fflush($lockHandle);
-
     $logger('Starte Scan-Worker: ' . $cmd);
 
     if ($isWindows) {
@@ -3285,7 +3401,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         };
         $spawnCmd = 'cmd.exe /C start "" /B ' . $cmd
             . ' >> ' . $toWindowsPath($spawnOutLog) . ' 2>> ' . $toWindowsPath($spawnErrLog);
-        $proc = @popen($spawnCmd, 'r');
+        $proc = popen($spawnCmd, 'r');
         if ($proc !== false) {
             pclose($proc);
             $spawned = true;
@@ -3296,7 +3412,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     } else {
         $spawnCmd = 'nohup ' . $cmd
             . ' >> ' . escapeshellarg($spawnOutLog) . ' 2>> ' . escapeshellarg($spawnErrLog) . ' & echo $!';
-        $output = @shell_exec($spawnCmd);
+        $output = shell_exec($spawnCmd);
         if ($output !== null && trim($output) !== '') {
             $pid = (int)trim($output);
             if ($pid <= 0) {
@@ -3321,13 +3437,14 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'media_id'    => $mediaId,
         ],
     ];
-    @file_put_contents(
-        $spawnLastPath,
-        json_encode($lastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-    );
+    $lastPayload['last_spawn_at'] = $now;
+    $lastJson = json_encode($lastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($lastJson === false || file_put_contents($spawnLastPath, $lastJson) === false) {
+        sv_log_system_error($config, 'scan_worker_spawn_last_write_failed', ['path' => $spawnLastPath]);
+    }
 
-    @flock($lockHandle, LOCK_UN);
-    @fclose($lockHandle);
+    flock($lockHandle, LOCK_UN);
+    fclose($lockHandle);
 
     return [
         'pid'     => $pid,
@@ -4130,10 +4247,19 @@ function sv_requeue_job(PDO $pdo, int $jobId, callable $logger): array
 
 function sv_log_scan_worker_event(string $message): void
 {
-    $baseDir = sv_base_dir();
-    $path = $baseDir . '/LOGS/scan_worker.err.log';
+    $config = sv_load_config();
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'scan_worker_log_root_unavailable', ['error' => $logsError]);
+        return;
+    }
+    $path = $logsRoot . '/scan_worker.err.log';
     $line = '[' . date('c') . '] ' . $message . PHP_EOL;
-    @file_put_contents($path, $line, FILE_APPEND);
+    $result = file_put_contents($path, $line, FILE_APPEND);
+    if ($result === false) {
+        sv_log_system_error($config, 'scan_worker_log_write_failed', ['path' => $path]);
+    }
 }
 
 function sv_fetch_job_status(PDO $pdo, int $jobId): string
@@ -6201,25 +6327,40 @@ function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callabl
     return $count;
 }
 
-function sv_log_forge_paths(array $paths): void
+function sv_log_forge_paths(array $config, array $paths): void
 {
-    $runtimeLog = sv_base_dir() . '/LOGS/forge_worker_runtime.log';
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'forge_worker_log_root_unavailable', ['error' => $logsError]);
+        return;
+    }
+    $runtimeLog = $logsRoot . '/forge_worker_runtime.log';
     $shortened  = [];
 
     foreach ($paths as $key => $value) {
         $shortened[$key] = sv_safe_path_label((string)$value);
     }
 
-    @file_put_contents(
+    $result = file_put_contents(
         $runtimeLog,
         sprintf('[%s] forge_paths %s', date('c'), json_encode($shortened, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
         FILE_APPEND
     );
+    if ($result === false) {
+        sv_log_system_error($config, 'forge_worker_runtime_log_write_failed', ['path' => $runtimeLog]);
+    }
 }
 
-function sv_log_forge_job_runtime(int $jobId, int $mediaId, string $mode, array $data = []): void
+function sv_log_forge_job_runtime(array $config, int $jobId, int $mediaId, string $mode, array $data = []): void
 {
-    $runtimeLog = sv_base_dir() . '/LOGS/forge_worker_runtime.log';
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'forge_worker_log_root_unavailable', ['error' => $logsError]);
+        return;
+    }
+    $runtimeLog = $logsRoot . '/forge_worker_runtime.log';
     $payload = [
         'job_id'   => $jobId,
         'media_id' => $mediaId,
@@ -6245,11 +6386,14 @@ function sv_log_forge_job_runtime(int $jobId, int $mediaId, string $mode, array 
         $payload['reason'] = sv_sanitize_error_message((string)$data['reason']);
     }
 
-    @file_put_contents(
+    $result = file_put_contents(
         $runtimeLog,
         sprintf('[%s] forge_job %s', date('c'), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
         FILE_APPEND
     );
+    if ($result === false) {
+        sv_log_system_error($config, 'forge_worker_runtime_log_write_failed', ['path' => $runtimeLog]);
+    }
 }
 
 function sv_fail_job_on_empty_path(PDO $pdo, int $jobId, string $name, $value): void
@@ -6450,7 +6594,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
     sv_fail_job_on_empty_path($pdo, $jobId, 'temp_output_path', $plannedTempOutputPath);
     sv_fail_job_on_empty_path($pdo, $jobId, 'final_target_path', $finalTargetPath);
 
-    sv_log_forge_paths([
+    sv_log_forge_paths($config, [
         'job_id'             => $jobId,
         'original_media_path'=> $path,
         'backup_path'        => $plannedBackupPath,
@@ -6561,7 +6705,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
             $responseJson = json_encode($responsePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             sv_update_job_status($pdo, $jobId, 'done', $responseJson, null);
-            sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
+            sv_log_forge_job_runtime($config, $jobId, $mediaId, $regenMode, [
                 'replaced'       => false,
                 'preview_path'   => $previewPath,
                 'error'          => null,
@@ -6684,7 +6828,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'backup_path'       => $backupPath,
         ]);
 
-        sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
+        sv_log_forge_job_runtime($config, $jobId, $mediaId, $regenMode, [
             'replaced'   => true,
             'backup_path'=> $backupPath,
             'error'      => null,
@@ -6748,7 +6892,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             @unlink($backupPath);
         }
 
-        sv_log_forge_job_runtime($jobId, $mediaId, $regenMode, [
+        sv_log_forge_job_runtime($config, $jobId, $mediaId, $regenMode, [
             'replaced' => false,
             'error'    => $e->getMessage(),
         ]);
@@ -8796,8 +8940,7 @@ function sv_collect_dashboard_view_model(PDO $pdo, array $config, array $options
         $forgeOverview = [];
     }
 
-    $logDir = (string)($config['paths']['logs'] ?? (sv_base_dir() . '/LOGS'));
-    $logDir = rtrim(str_replace('\\', '/', $logDir), '/');
+    $logDir = sv_logs_root($config);
     $gitStatus = sv_dashboard_read_runtime_json($logDir . '/git_status.json', 160);
     $gitLast   = sv_dashboard_read_runtime_json($logDir . '/git_update.last.json', 200);
 

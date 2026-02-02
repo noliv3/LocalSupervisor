@@ -2,10 +2,11 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
+require_once __DIR__ . '/../SCRIPTS/logging.php';
 
-$baseDir = sv_base_dir();
+$config = sv_load_config();
 $version = 'unknown';
-$statusPath = $baseDir . '/LOGS/git_status.json';
+$statusPath = sv_logs_root($config) . '/git_status.json';
 if (is_file($statusPath)) {
     $raw = file_get_contents($statusPath);
     if ($raw !== false) {

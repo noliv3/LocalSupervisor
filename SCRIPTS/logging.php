@@ -11,6 +11,58 @@ function sv_logs_root(array $config): string
     return sv_normalize_directory($root);
 }
 
+function sv_log_path(array $config, string $filename): string
+{
+    $clean = ltrim(str_replace('\\', '/', $filename), '/');
+    return sv_logs_root($config) . DIRECTORY_SEPARATOR . $clean;
+}
+
+function sv_ensure_logs_root(array $config, ?string &$error = null): ?string
+{
+    $root = sv_logs_root($config);
+    if (!is_dir($root)) {
+        if (!mkdir($root, 0777, true) && !is_dir($root)) {
+            $error = 'log_root_create_failed';
+            return null;
+        }
+    }
+
+    if (!is_writable($root)) {
+        $error = 'log_root_not_writable';
+        return null;
+    }
+
+    return $root;
+}
+
+function sv_log_system_error(array $config, string $message, array $context = []): void
+{
+    $root = sv_logs_root($config);
+    if (!is_dir($root)) {
+        if (!mkdir($root, 0777, true) && !is_dir($root)) {
+            error_log('[sv_log_system_error] ' . $message . ' | log_root_unavailable');
+            return;
+        }
+    }
+
+    $payload = [
+        'ts' => date('c'),
+        'message' => $message,
+        'context' => $context,
+    ];
+    $line = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($line === false) {
+        error_log('[sv_log_system_error] ' . $message . ' | json_encode_failed');
+        return;
+    }
+
+    $logFile = $root . DIRECTORY_SEPARATOR . 'system_errors.jsonl';
+    $result = file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+    if ($result === false) {
+        error_log('[sv_log_system_error] ' . $message . ' | write_failed');
+    }
+}
+
 function sv_rotate_logs(string $dir, string $prefix, int $retention): void
 {
     $files = glob($dir . DIRECTORY_SEPARATOR . $prefix . '_*.log');

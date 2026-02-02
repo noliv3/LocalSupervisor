@@ -135,6 +135,9 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **Ollama-Jobs:** `LOGS/ollama_jobs.jsonl`, `LOGS/ollama_errors.jsonl`
 - **Ollama-Service:** `LOGS/ollama_service.jsonl`
 - **Ollama-Status:** `LOGS/ollama_status.json`
+- **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`
+- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`
+- **System-Fehlerlog:** `LOGS/system_errors.jsonl` (kritische IO/Spawn-Fehler)
 
 ## Web UI Seiten
 - `mediadb.php`: Listing/Filter der Medien.

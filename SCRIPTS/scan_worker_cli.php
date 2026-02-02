@@ -16,37 +16,23 @@ try {
     exit(1);
 }
 
-$baseDir = sv_base_dir();
-$lockPath = $baseDir . '/LOGS/scan_worker.lock.json';
-$errLogPath = $baseDir . '/LOGS/scan_worker.err.log';
+$logsError = null;
+$logsRoot = sv_ensure_logs_root($config, $logsError);
+if ($logsRoot === null) {
+    sv_log_system_error($config, 'scan_worker_log_root_unavailable', ['error' => $logsError]);
+    fwrite(STDERR, "Log-Root nicht verfügbar: " . ($logsError ?? 'unbekannt') . "\n");
+    exit(1);
+}
 
-$isPidAlive = static function (int $pid): bool {
-    if ($pid <= 0) {
-        return false;
-    }
-    if (function_exists('posix_kill')) {
-        return @posix_kill($pid, 0);
-    }
-    $isWindows = stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false;
-    if ($isWindows) {
-        $cmd = 'tasklist /FI ' . escapeshellarg('PID eq ' . $pid);
-        $output = @shell_exec($cmd);
-        if (!is_string($output)) {
-            return false;
-        }
-        return stripos($output, (string)$pid) !== false;
-    }
-    $cmd = 'ps -p ' . (int)$pid . ' -o pid=';
-    $output = @shell_exec($cmd);
-    if (!is_string($output)) {
-        return false;
-    }
-    return trim($output) !== '';
-};
+$lockPath = $logsRoot . '/scan_worker.lock.json';
+$errLogPath = $logsRoot . '/scan_worker.err.log';
 
 $writeErrLog = static function (string $message) use ($errLogPath): void {
     $line = '[' . date('c') . '] ' . $message . PHP_EOL;
-    @file_put_contents($errLogPath, $line, FILE_APPEND);
+    $result = file_put_contents($errLogPath, $line, FILE_APPEND);
+    if ($result === false) {
+        error_log('[scan_worker_cli] Failed to write error log: ' . $message);
+    }
 };
 
 $pid = getmypid();
@@ -54,14 +40,26 @@ $cmdline = implode(' ', $argv);
 $host = function_exists('gethostname') ? (string)gethostname() : 'unknown';
 
 if (is_file($lockPath)) {
-    $raw = @file_get_contents($lockPath);
-    $data = is_string($raw) ? json_decode($raw, true) : null;
-    $existingPid = isset($data['pid']) ? (int)$data['pid'] : 0;
-    if ($existingPid > 0 && $isPidAlive($existingPid)) {
-        $writeErrLog('Scan-Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
-        exit(0);
+    $raw = file_get_contents($lockPath);
+    if ($raw === false) {
+        $writeErrLog('Scan-Worker Lock konnte nicht gelesen werden.');
+        sv_log_system_error($config, 'scan_worker_lock_read_failed', ['path' => $lockPath]);
+        exit(1);
     }
-    @unlink($lockPath);
+    $data = json_decode($raw, true);
+    $existingPid = is_array($data) && isset($data['pid']) ? (int)$data['pid'] : 0;
+    if ($existingPid > 0) {
+        $pidInfo = sv_is_pid_running($existingPid);
+        if (!empty($pidInfo['running'])) {
+            $writeErrLog('Scan-Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
+            exit(0);
+        }
+    }
+    if (!unlink($lockPath)) {
+        $writeErrLog('Scan-Worker Lock konnte nicht entfernt werden.');
+        sv_log_system_error($config, 'scan_worker_lock_remove_failed', ['path' => $lockPath]);
+        exit(1);
+    }
 }
 
 $lockPayload = [
@@ -70,7 +68,12 @@ $lockPayload = [
     'host'       => $host,
     'cmdline'    => $cmdline,
 ];
-@file_put_contents($lockPath, json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+$lockJson = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
+    $writeErrLog('Scan-Worker Lock konnte nicht geschrieben werden.');
+    sv_log_system_error($config, 'scan_worker_lock_write_failed', ['path' => $lockPath]);
+    exit(1);
+}
 
 $limit      = null;
 $pathFilter = null;
@@ -114,7 +117,8 @@ try {
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 } finally {
-    if (is_file($lockPath)) {
-        @unlink($lockPath);
+    if (is_file($lockPath) && !unlink($lockPath)) {
+        $writeErrLog('Scan-Worker Lock konnte nicht entfernt werden (finally).');
+        sv_log_system_error($config, 'scan_worker_lock_remove_failed_finally', ['path' => $lockPath]);
     }
 }
