@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../common.php';
 require_once __DIR__ . '/../db_helpers.php';
 require_once __DIR__ . '/../operations.php';
+require_once __DIR__ . '/../ollama_jobs.php';
 require_once __DIR__ . '/ollama_analyze_image.php';
 
 const SV_JOB_TYPE_OLLAMA_ANALYZE = 'ollama_analyze';
@@ -73,6 +74,216 @@ function sv_ollama_fetch_next_job(PDO $pdo): ?array
     return $row;
 }
 
+function sv_ollama_analyze_lock_path(array $config): string
+{
+    return sv_log_path($config, 'ollama_analyze_runner.lock');
+}
+
+function sv_ollama_acquire_analyze_lock(array $config): array
+{
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'ollama_analyze_log_root_unavailable', ['error' => $logsError]);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => null,
+            'reason' => 'log_root_unavailable',
+        ];
+    }
+
+    $lockPath = sv_ollama_analyze_lock_path($config);
+    $handle = fopen($lockPath, 'c+');
+    if ($handle === false) {
+        sv_log_system_error($config, 'ollama_analyze_lock_open_failed', ['path' => $lockPath]);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'open_failed',
+        ];
+    }
+
+    $locked = flock($handle, LOCK_EX | LOCK_NB);
+    if (!$locked) {
+        fclose($handle);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'locked',
+        ];
+    }
+
+    $payload = [
+        'pid' => function_exists('getmypid') ? (int)getmypid() : null,
+        'started_at' => date('c'),
+        'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
+        'owner' => 'ollama_job_runner',
+    ];
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json !== false) {
+        ftruncate($handle, 0);
+        fwrite($handle, $json);
+        fflush($handle);
+    }
+
+    return [
+        'ok' => true,
+        'handle' => $handle,
+        'path' => $lockPath,
+        'reason' => null,
+    ];
+}
+
+function sv_ollama_release_analyze_lock(?$handle): void
+{
+    if (!is_resource($handle)) {
+        return;
+    }
+    flock($handle, LOCK_UN);
+    fclose($handle);
+}
+
+function sv_ollama_claim_analyze_job(PDO $pdo): ?array
+{
+    $hasNotBefore = sv_ollama_job_has_column($pdo, 'not_before');
+    $sql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("pending", "queued")';
+    if ($hasNotBefore) {
+        $sql .= ' AND (not_before IS NULL OR not_before <= :now)';
+    }
+    $sql .= ' ORDER BY id ASC LIMIT 1';
+
+    $pdo->beginTransaction();
+    try {
+        $stmt = $pdo->prepare($sql);
+        $params = [':type' => SV_JOB_TYPE_OLLAMA_ANALYZE];
+        if ($hasNotBefore) {
+            $params[':now'] = date('c');
+        }
+        $stmt->execute($params);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($row)) {
+            $pdo->commit();
+            return null;
+        }
+
+        $jobId = (int)($row['id'] ?? 0);
+        if ($jobId <= 0) {
+            $pdo->commit();
+            return null;
+        }
+
+        $now = date('c');
+        $updateSql = 'UPDATE jobs SET status = "running", updated_at = :updated_at, heartbeat_at = :heartbeat_at';
+        if ($hasNotBefore) {
+            $updateSql .= ', not_before = NULL';
+        }
+        $updateSql .= ' WHERE id = :id AND status IN ("pending", "queued")';
+        $updateStmt = $pdo->prepare($updateSql);
+        $updateStmt->execute([
+            ':updated_at' => $now,
+            ':heartbeat_at' => $now,
+            ':id' => $jobId,
+        ]);
+
+        if ($updateStmt->rowCount() === 0) {
+            $pdo->rollBack();
+            return null;
+        }
+
+        $pdo->commit();
+        $row['status'] = 'running';
+        $row['heartbeat_at'] = $now;
+        return $row;
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
+}
+
+function sv_ollama_analyze_cancel_requested(PDO $pdo, int $jobId): bool
+{
+    $stmt = $pdo->prepare('SELECT cancel_requested FROM jobs WHERE id = :id');
+    $stmt->execute([':id' => $jobId]);
+    $value = $stmt->fetchColumn();
+    return (int)$value === 1;
+}
+
+function sv_ollama_analyze_mark_canceled(PDO $pdo, int $jobId, array $payload, string $reason): void
+{
+    $payload['canceled_at'] = date('c');
+    $payload['cancel_reason'] = $reason;
+    sv_update_job_status(
+        $pdo,
+        $jobId,
+        SV_JOB_STATUS_CANCELED,
+        json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        $reason
+    );
+    $stmt = $pdo->prepare('UPDATE jobs SET cancelled_at = :cancelled_at, updated_at = :updated_at WHERE id = :id');
+    $now = date('c');
+    $stmt->execute([
+        ':cancelled_at' => $now,
+        ':updated_at' => $now,
+        ':id' => $jobId,
+    ]);
+}
+
+function sv_ollama_analyze_retry_or_fail(PDO $pdo, array $config, int $jobId, array $response, string $message, string $errorCode): array
+{
+    $ollamaCfg = sv_ollama_config($config);
+    $maxAttempts = (int)($ollamaCfg['retry']['max_attempts'] ?? 3);
+    $attempts = isset($response['_sv_attempts']) ? (int)$response['_sv_attempts'] : 0;
+    $attempts++;
+    $response['_sv_attempts'] = $attempts;
+    $response['_sv_error_code'] = $errorCode;
+    $response['_sv_error_message'] = $message;
+    $response['_sv_last_attempt_at'] = date('c');
+
+    if ($attempts <= $maxAttempts) {
+        $delaySeconds = sv_ollama_retry_backoff_seconds($config, $attempts);
+        $retryAt = date('c', time() + $delaySeconds);
+        $response['_sv_retry_not_before'] = $retryAt;
+        sv_update_job_status(
+            $pdo,
+            $jobId,
+            'queued',
+            json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            $message
+        );
+        if (sv_ollama_job_has_column($pdo, 'not_before')) {
+            $stmt = $pdo->prepare('UPDATE jobs SET not_before = :not_before WHERE id = :id');
+            $stmt->execute([
+                ':not_before' => $retryAt,
+                ':id' => $jobId,
+            ]);
+        }
+        return [
+            'status' => 'retry',
+            'message' => $message,
+            'job_id' => $jobId,
+            'retry_after_s' => $delaySeconds,
+            'retry_not_before' => $retryAt,
+        ];
+    }
+
+    sv_update_job_status(
+        $pdo,
+        $jobId,
+        'error',
+        json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        $message
+    );
+
+    return [
+        'status' => 'error',
+        'message' => $message,
+        'job_id' => $jobId,
+    ];
+}
+
 function sv_ollama_decode_payload(array $jobRow): array
 {
     $payloadJson = null;
@@ -97,54 +308,68 @@ function sv_ollama_decode_payload(array $jobRow): array
 
 function sv_process_ollama_analyze_job(PDO $pdo, array $config): array
 {
-    if (sv_ollama_job_running_exists($pdo)) {
+    $lock = sv_ollama_acquire_analyze_lock($config);
+    if (empty($lock['ok'])) {
         return [
             'status' => 'skipped',
-            'message' => 'Ollama-Analyze Job läuft bereits.',
+            'message' => 'Ollama-Analyze Runner bereits aktiv (Lock).',
+            'reason' => $lock['reason'] ?? 'lock_failed',
         ];
     }
 
-    $jobRow = sv_ollama_fetch_next_job($pdo);
-    if ($jobRow === null) {
-        return [
-            'status' => 'empty',
-            'message' => 'Keine Ollama-Analyze Jobs vorhanden.',
-        ];
-    }
-
-    $jobId = (int)($jobRow['id'] ?? 0);
-    if ($jobId <= 0) {
-        return [
-            'status' => 'error',
-            'message' => 'Ungültige Job-ID.',
-        ];
-    }
-
-    $payload = sv_ollama_decode_payload($jobRow);
-    $mediaId = (int)($payload['media_id'] ?? $jobRow['media_id'] ?? 0);
-    $modelOverride = isset($payload['model']) && is_string($payload['model']) ? $payload['model'] : null;
-
-    if ($mediaId <= 0) {
-        sv_update_job_status($pdo, $jobId, 'error', null, 'Media-ID fehlt.');
-        return [
-            'status' => 'error',
-            'message' => 'Media-ID fehlt.',
-        ];
-    }
-
-    sv_update_job_status($pdo, $jobId, 'running', json_encode([
-        'media_id' => $mediaId,
-        'job_type' => SV_JOB_TYPE_OLLAMA_ANALYZE,
-    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-
+    $jobRow = null;
     try {
+        sv_mark_stuck_jobs($pdo, [SV_JOB_TYPE_OLLAMA_ANALYZE], SV_JOB_STUCK_MINUTES);
+
+        $jobRow = sv_ollama_claim_analyze_job($pdo);
+        if ($jobRow === null) {
+            return [
+                'status' => 'empty',
+                'message' => 'Keine Ollama-Analyze Jobs vorhanden.',
+            ];
+        }
+
+        $jobId = (int)($jobRow['id'] ?? 0);
+        if ($jobId <= 0) {
+            return [
+                'status' => 'error',
+                'message' => 'Ungültige Job-ID.',
+            ];
+        }
+
+        $payload = sv_ollama_decode_payload($jobRow);
+        $mediaId = (int)($payload['media_id'] ?? $jobRow['media_id'] ?? 0);
+        $modelOverride = isset($payload['model']) && is_string($payload['model']) ? $payload['model'] : null;
+
+        if ($mediaId <= 0) {
+            return sv_ollama_analyze_retry_or_fail($pdo, $config, $jobId, $payload, 'Media-ID fehlt.', 'missing_media_id');
+        }
+
+        if (sv_ollama_analyze_cancel_requested($pdo, $jobId)) {
+            sv_ollama_analyze_mark_canceled($pdo, $jobId, [
+                'media_id' => $mediaId,
+                'job_type' => SV_JOB_TYPE_OLLAMA_ANALYZE,
+            ], 'cancel_requested');
+            return [
+                'status' => 'canceled',
+                'message' => 'Ollama-Analyze Job abgebrochen.',
+                'job_id' => $jobId,
+                'media_id' => $mediaId,
+            ];
+        }
+
+        sv_update_job_status($pdo, $jobId, 'running', json_encode([
+            'media_id' => $mediaId,
+            'job_type' => SV_JOB_TYPE_OLLAMA_ANALYZE,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
         $result = sv_ollama_analyze_image($pdo, $config, $mediaId, $modelOverride);
         $modelUsed = $result['model'] ?? ($modelOverride ?? '');
         $normalized = $result['normalized'] ?? [];
         $parseError = !empty($result['parse_error']);
 
         if (!is_array($normalized)) {
-            throw new RuntimeException('Ollama-Ergebnis konnte nicht normalisiert werden.');
+            return sv_ollama_analyze_retry_or_fail($pdo, $config, $jobId, $payload, 'Ollama-Ergebnis konnte nicht normalisiert werden.', 'normalize_failed');
         }
 
         sv_ollama_store_result($pdo, $mediaId, (string)$modelUsed, $normalized, $parseError);
@@ -165,14 +390,18 @@ function sv_process_ollama_analyze_job(PDO $pdo, array $config): array
             'media_id' => $mediaId,
         ];
     } catch (Throwable $e) {
-        sv_update_job_status($pdo, $jobId, 'error', null, $e->getMessage());
+        $payload = ['job_type' => SV_JOB_TYPE_OLLAMA_ANALYZE];
+        $jobId = isset($jobRow['id']) ? (int)$jobRow['id'] : 0;
+        if ($jobId > 0) {
+            return sv_ollama_analyze_retry_or_fail($pdo, $config, $jobId, $payload, $e->getMessage(), 'exception');
+        }
 
         return [
             'status' => 'error',
             'message' => $e->getMessage(),
-            'job_id' => $jobId,
-            'media_id' => $mediaId,
         ];
+    } finally {
+        sv_ollama_release_analyze_lock($lock['handle'] ?? null);
     }
 }
 
