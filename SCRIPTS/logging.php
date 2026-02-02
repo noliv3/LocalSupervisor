@@ -23,12 +23,14 @@ function sv_ensure_logs_root(array $config, ?string &$error = null): ?string
     if (!is_dir($root)) {
         if (!mkdir($root, 0777, true) && !is_dir($root)) {
             $error = 'log_root_create_failed';
+            error_log('[sv_ensure_logs_root] ' . $error . ' path=' . $root);
             return null;
         }
     }
 
     if (!is_writable($root)) {
         $error = 'log_root_not_writable';
+        error_log('[sv_ensure_logs_root] ' . $error . ' path=' . $root);
         return null;
     }
 
@@ -74,7 +76,9 @@ function sv_rotate_logs(string $dir, string $prefix, int $retention): void
     $surplus = array_slice($files, $retention);
     foreach ($surplus as $file) {
         if (is_file($file)) {
-            @unlink($file);
+            if (!unlink($file)) {
+                error_log('[sv_rotate_logs] log_delete_failed file=' . $file);
+            }
         }
     }
 }
@@ -84,7 +88,9 @@ function sv_prepare_log_file(array $config, string $type, bool $unique, int $ret
     $logsRoot = sv_logs_root($config);
     $channelDir = $logsRoot . DIRECTORY_SEPARATOR . $type;
     if (!is_dir($channelDir)) {
-        @mkdir($channelDir, 0777, true);
+        if (!mkdir($channelDir, 0777, true) && !is_dir($channelDir)) {
+            error_log('[sv_prepare_log_file] log_channel_create_failed type=' . $type . ' path=' . $channelDir);
+        }
     }
 
     $suffix = $unique ? date('Ymd_His') : date('Ymd');
@@ -99,27 +105,36 @@ function sv_write_jsonl_log(array $config, string $filename, array $payload, int
 {
     $logsRoot = sv_logs_root($config);
     if (!is_dir($logsRoot)) {
-        @mkdir($logsRoot, 0777, true);
+        if (!mkdir($logsRoot, 0777, true) && !is_dir($logsRoot)) {
+            error_log('[sv_write_jsonl_log] log_root_create_failed path=' . $logsRoot);
+            return;
+        }
     }
 
     $logFile = $logsRoot . DIRECTORY_SEPARATOR . $filename;
     $prefix = pathinfo($filename, PATHINFO_FILENAME);
 
     if (is_file($logFile)) {
-        $mtime = @filemtime($logFile);
+        $mtime = filemtime($logFile);
         if ($mtime !== false && date('Ymd', $mtime) !== date('Ymd')) {
             $archive = $logsRoot . DIRECTORY_SEPARATOR . $prefix . '_' . date('Ymd', $mtime) . '.log';
-            @rename($logFile, $archive);
+            if (!rename($logFile, $archive)) {
+                error_log('[sv_write_jsonl_log] log_rotate_rename_failed from=' . $logFile . ' to=' . $archive);
+            }
             sv_rotate_logs($logsRoot, $prefix, $retention);
         }
     }
 
     $line = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($line === false) {
+        error_log('[sv_write_jsonl_log] json_encode_failed file=' . $logFile);
         return;
     }
 
-    file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+    $result = file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+    if ($result === false) {
+        error_log('[sv_write_jsonl_log] log_write_failed file=' . $logFile);
+    }
 }
 
 function sv_operation_logger(?string $logFile, ?array &$buffer = null): callable
@@ -127,7 +142,9 @@ function sv_operation_logger(?string $logFile, ?array &$buffer = null): callable
     if ($logFile !== null) {
         $dir = dirname($logFile);
         if (!is_dir($dir)) {
-            @mkdir($dir, 0777, true);
+            if (!mkdir($dir, 0777, true) && !is_dir($dir)) {
+                error_log('[sv_operation_logger] log_dir_create_failed path=' . $dir);
+            }
         }
     }
 
@@ -137,7 +154,10 @@ function sv_operation_logger(?string $logFile, ?array &$buffer = null): callable
             $buffer[] = $line;
         }
         if ($logFile !== null) {
-            file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+            $result = file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+            if ($result === false) {
+                error_log('[sv_operation_logger] log_write_failed file=' . $logFile);
+            }
         }
     };
 }
@@ -158,5 +178,8 @@ function sv_security_log(array $config, string $message, array $context = []): v
         $line .= ' | ' . json_encode($context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 
-    file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+    $result = file_put_contents($logFile, $line . PHP_EOL, FILE_APPEND);
+    if ($result === false) {
+        error_log('[sv_security_log] log_write_failed file=' . $logFile);
+    }
 }

@@ -35,6 +35,23 @@ $writeErrLog = static function (string $message) use ($errLogPath): void {
     }
 };
 
+$lockQuarantine = static function (string $reason) use ($lockPath, $writeErrLog, $config): void {
+    $timestamp = date('Ymd_His');
+    $brokenPath = $lockPath . '.broken.' . $timestamp;
+    if (rename($lockPath, $brokenPath)) {
+        $writeErrLog($reason . ': ' . $lockPath . ' -> ' . $brokenPath);
+        sv_log_system_error($config, 'scan_worker_lock_quarantined', ['path' => $lockPath, 'reason' => $reason]);
+        return;
+    }
+    if (!unlink($lockPath)) {
+        $writeErrLog('Scan-Worker Lock konnte nicht entfernt werden (' . $reason . ').');
+        sv_log_system_error($config, 'scan_worker_lock_remove_failed', ['path' => $lockPath, 'reason' => $reason]);
+        exit(1);
+    }
+    $writeErrLog($reason . ': ' . $lockPath);
+    sv_log_system_error($config, 'scan_worker_lock_removed', ['path' => $lockPath, 'reason' => $reason]);
+};
+
 $pid = getmypid();
 $cmdline = implode(' ', $argv);
 $host = function_exists('gethostname') ? (string)gethostname() : 'unknown';
@@ -44,21 +61,19 @@ if (is_file($lockPath)) {
     if ($raw === false) {
         $writeErrLog('Scan-Worker Lock konnte nicht gelesen werden.');
         sv_log_system_error($config, 'scan_worker_lock_read_failed', ['path' => $lockPath]);
-        exit(1);
-    }
-    $data = json_decode($raw, true);
-    $existingPid = is_array($data) && isset($data['pid']) ? (int)$data['pid'] : 0;
-    if ($existingPid > 0) {
-        $pidInfo = sv_is_pid_running($existingPid);
-        if (!empty($pidInfo['running'])) {
-            $writeErrLog('Scan-Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
-            exit(0);
+        $lockQuarantine('broken_lock_quarantined');
+    } else {
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            $lockQuarantine('broken_lock_quarantined');
+        } else {
+            $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+            if ($heartbeat !== false && (time() - $heartbeat) <= 30) {
+                $writeErrLog('Scan-Worker bereits aktiv (Lock Heartbeat), neuer Start abgebrochen.');
+                exit(0);
+            }
+            $lockQuarantine('stale_lock_removed');
         }
-    }
-    if (!unlink($lockPath)) {
-        $writeErrLog('Scan-Worker Lock konnte nicht entfernt werden.');
-        sv_log_system_error($config, 'scan_worker_lock_remove_failed', ['path' => $lockPath]);
-        exit(1);
     }
 }
 
@@ -67,6 +82,7 @@ $lockPayload = [
     'started_at' => date('c'),
     'host'       => $host,
     'cmdline'    => $cmdline,
+    'heartbeat_at' => date('c'),
 ];
 $lockJson = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
@@ -88,7 +104,24 @@ foreach (array_slice($argv, 1) as $arg) {
     }
 }
 
-$logger = function (string $msg): void {
+$lastHeartbeat = 0;
+$updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockPath, $config, $writeErrLog): void {
+    $now = time();
+    if (!$force && ($now - $lastHeartbeat) < 10) {
+        return;
+    }
+    $lastHeartbeat = $now;
+    $lockPayload['heartbeat_at'] = date('c', $now);
+    $lockJson = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
+        $writeErrLog('Scan-Worker Heartbeat konnte nicht geschrieben werden.');
+        sv_log_system_error($config, 'scan_worker_heartbeat_write_failed', ['path' => $lockPath]);
+        throw new RuntimeException('scan_worker_heartbeat_write_failed');
+    }
+};
+
+$logger = function (string $msg) use ($updateHeartbeat): void {
+    $updateHeartbeat();
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
@@ -101,7 +134,9 @@ try {
             'rescan_limit'   => 10,
         ];
     }
+    $updateHeartbeat(true);
     $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger, $pathFilter, $mediaId, $options);
+    $updateHeartbeat(true);
     $line = sprintf(
         'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d | Rescan: %d | Scan: %d | Backfill: %d',
         (int)($summary['total'] ?? 0),

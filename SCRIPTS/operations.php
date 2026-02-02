@@ -401,13 +401,36 @@ function sv_is_pid_running(int $pid): array
 
     $osFamily = PHP_OS_FAMILY ?? PHP_OS;
     if (stripos((string)$osFamily, 'Windows') !== false) {
-        $output = @shell_exec('tasklist /FI "PID eq ' . (int)$pid . '" 2> NUL');
+        $output = @shell_exec('tasklist /FO CSV /NH /FI "PID eq ' . (int)$pid . '" 2> NUL');
         if ($output === null) {
             return ['running' => false, 'unknown' => true];
         }
 
+        $lines = preg_split('/\r\n|\r|\n/', trim($output));
+        if ($lines === false || $lines === []) {
+            return ['running' => false, 'unknown' => false];
+        }
+
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '' || stripos($trimmed, 'INFO:') === 0) {
+                continue;
+            }
+            $cols = str_getcsv($trimmed);
+            if (!is_array($cols) || count($cols) < 2) {
+                continue;
+            }
+            $pidValue = (int)trim((string)$cols[1], "\" \t");
+            if ($pidValue === $pid) {
+                return [
+                    'running' => true,
+                    'unknown' => false,
+                ];
+            }
+        }
+
         return [
-            'running' => stripos($output, (string)$pid) !== false,
+            'running' => false,
             'unknown' => false,
         ];
     }
@@ -1481,6 +1504,16 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
         ];
     }
 
+    $claimReason = null;
+    if (!sv_claim_job_running($pdo, $jobId, SV_FORGE_JOB_STATUSES, ['dispatch' => 'forge'], $claimReason)) {
+        $logger('Forge-Dispatch übersprungen: Claim fehlgeschlagen (' . ($claimReason ?? 'claim_failed') . ').');
+        return [
+            'dispatched' => false,
+            'status'     => 'queued',
+            'error'      => $claimReason ?? 'claim_failed_or_already_running',
+        ];
+    }
+
     $url      = sv_forge_build_url($endpoint['base_url'], sv_forge_target_path($payload));
     $timeout  = $endpoint['timeout'];
     $headers  = [
@@ -1520,7 +1553,6 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
     if ($httpCode !== null && $httpCode >= 200 && $httpCode < 300 && $responseBody !== false) {
         $status = 'running';
         $logger('Forge-Dispatch erfolgreich, Status auf running gesetzt.');
-        sv_update_job_status($pdo, $jobId, $status, $responseJson, null);
 
         sv_audit_log($pdo, 'forge_job_dispatched', 'jobs', $jobId, [
             'status'      => $status,
@@ -2609,7 +2641,7 @@ function sv_create_scan_backfill_job(PDO $pdo, array $config, array $options, ca
     }
 
     $existingStmt = $pdo->prepare(
-        'SELECT id FROM jobs WHERE type = :type AND status IN ("queued","running") ORDER BY id DESC LIMIT 1'
+        'SELECT id FROM jobs WHERE type = :type AND status = "queued" ORDER BY id DESC LIMIT 1'
     );
     $existingStmt->execute([':type' => SV_JOB_TYPE_SCAN_BACKFILL_TAGS]);
     $existingId = (int)$existingStmt->fetchColumn();
@@ -2750,7 +2782,7 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
     sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_job_enqueue');
 
     $existing = $pdo->prepare(
-        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued","running") ORDER BY id DESC LIMIT 1'
+        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status = "queued" ORDER BY id DESC LIMIT 1'
     );
     $existing->execute([
         ':media_id' => $mediaId,
@@ -2820,6 +2852,16 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         return sv_finalize_canceled_job($pdo, $jobId, ['media_id' => $mediaId], $logger, 'rescan pre-start');
     }
 
+    $claimReason = null;
+    if (!sv_claim_job_running($pdo, $jobId, ['queued'], ['media_id' => $mediaId], $claimReason)) {
+        $logger('Rescan-Job #' . $jobId . ' nicht übernommen: ' . ($claimReason ?? 'claim_failed'));
+        return [
+            'job_id' => $jobId,
+            'status' => 'skipped',
+            'error'  => $claimReason ?? 'claim_failed_or_already_running',
+        ];
+    }
+
     $payload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true) ?: [];
     $logger('Starte Rescan-Job #' . $jobId . ' für Media #' . $mediaId);
 
@@ -2835,14 +2877,6 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
 
     $startedAt = date('c');
     $response['started_at'] = $startedAt;
-
-    sv_update_job_status(
-        $pdo,
-        $jobId,
-        'running',
-        json_encode(['started_at' => $startedAt], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-        null
-    );
 
     try {
         $stmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
@@ -3049,27 +3083,31 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
         $enqueued = $payloadEnqueued;
     }
 
+    $claimReason = null;
+    $claimPayload = [
+        'mode' => $mode,
+        'progress' => [
+            'processed' => $processed,
+            'enqueued'  => $enqueued,
+            'deduped'   => $deduped,
+            'last_id'   => $lastId,
+        ],
+    ];
+    if (!sv_claim_job_running($pdo, $jobId, ['queued'], $claimPayload, $claimReason)) {
+        $jobLogger('Backfill-Job nicht übernommen: ' . ($claimReason ?? 'claim_failed'));
+        return [
+            'job_id' => $jobId,
+            'status' => 'skipped',
+            'error'  => $claimReason ?? 'claim_failed_or_already_running',
+        ];
+    }
+
     $jobLogger('Starte Backfill (' . $mode . '), chunk=' . $chunk . ($max !== null ? ', max=' . $max : '') . ', cap=' . $maxEnqueuePerRun);
 
     $cancelCheck = static function () use ($pdo, $jobId): bool {
         return sv_is_job_canceled($pdo, $jobId);
     };
 
-    sv_update_job_status(
-        $pdo,
-        $jobId,
-        'running',
-        json_encode([
-            'mode'     => $mode,
-            'progress' => [
-                'processed' => $processed,
-                'enqueued'  => $enqueued,
-                'deduped'   => $deduped,
-                'last_id'   => $lastId,
-            ],
-        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-        null
-    );
     sv_update_job_checkpoint_payload($pdo, $jobId, array_filter([
         'mode'            => $mode,
         'chunk'           => $chunk,
@@ -3285,13 +3323,17 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'running' => false,
             'unknown' => false,
             'skipped' => true,
+            'spawned' => false,
             'reason'  => 'log_dir_unwritable',
+            'reason_code' => 'log_dir_unwritable',
+            'message' => 'Log-Root nicht verfügbar.',
         ];
     }
     $spawnLockPath   = $logsRoot . '/scan_worker_spawn.lock';
     $spawnLastPath   = $logsRoot . '/scan_worker_spawn.last.json';
     $spawnOutLog     = $logsRoot . '/scan_worker.out.log';
     $spawnErrLog     = $logsRoot . '/scan_worker.err.log';
+    $workerLockPath  = $logsRoot . '/scan_worker.lock.json';
     $cooldownSeconds = 10;
     $logPaths        = [
         'stdout' => $spawnOutLog,
@@ -3306,7 +3348,10 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'running' => false,
             'unknown' => false,
             'skipped' => true,
+            'spawned' => false,
             'reason'  => 'spawn_lock_open_failed',
+            'reason_code' => 'spawn_lock_open_failed',
+            'message' => 'Spawn-Lock konnte nicht geöffnet werden.',
         ];
     }
     $hasLock = flock($lockHandle, LOCK_EX | LOCK_NB);
@@ -3337,7 +3382,10 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'running' => false,
             'unknown' => false,
             'skipped' => true,
+            'spawned' => false,
             'reason'  => $reason,
+            'reason_code' => $reason,
+            'message' => $reason === 'spawn_cooldown' ? 'Spawn im Cooldown.' : 'Spawn-Lock belegt.',
         ];
     }
 
@@ -3443,6 +3491,53 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         sv_log_system_error($config, 'scan_worker_spawn_last_write_failed', ['path' => $spawnLastPath]);
     }
 
+    $verifyWindowSeconds = 10;
+    $lockVerified = false;
+    $pidVerified = false;
+    $lockReason = null;
+    $checkLock = static function () use ($workerLockPath, $verifyWindowSeconds): array {
+        if (!is_file($workerLockPath)) {
+            return ['ok' => false, 'reason' => 'lock_missing'];
+        }
+        $raw = file_get_contents($workerLockPath);
+        if ($raw === false) {
+            return ['ok' => false, 'reason' => 'lock_read_failed'];
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            return ['ok' => false, 'reason' => 'lock_json_invalid'];
+        }
+        $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+        if ($heartbeat === false) {
+            return ['ok' => false, 'reason' => 'lock_heartbeat_invalid'];
+        }
+        if ((time() - $heartbeat) > $verifyWindowSeconds) {
+            return ['ok' => false, 'reason' => 'lock_heartbeat_stale'];
+        }
+        return ['ok' => true, 'reason' => null];
+    };
+    $deadline = time() + $verifyWindowSeconds;
+    while (time() <= $deadline) {
+        if ($pid !== null) {
+            $pidInfo = sv_is_pid_running($pid);
+            if (!($pidInfo['unknown'] ?? false) && ($pidInfo['running'] ?? false)) {
+                $pidVerified = true;
+                break;
+            }
+        }
+        $lockCheck = $checkLock();
+        $lockReason = $lockCheck['reason'] ?? null;
+        if (!empty($lockCheck['ok'])) {
+            $lockVerified = true;
+            break;
+        }
+        usleep(200000);
+    }
+    $verified = $spawned && ($pidVerified || $lockVerified);
+    if (!$verified && $spawnErr === null) {
+        $spawnErr = 'start_not_verified';
+    }
+
     flock($lockHandle, LOCK_UN);
     fclose($lockHandle);
 
@@ -3450,8 +3545,15 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         'pid'     => $pid,
         'started' => $startedAt,
         'unknown' => $unknown,
-        'skipped' => !$spawned,
+        'running' => $verified,
+        'skipped' => !$verified,
+        'spawned' => $verified,
         'reason'  => $spawnErr,
+        'reason_code' => $verified ? 'start_verified' : 'start_not_verified',
+        'message' => $verified
+            ? 'Scan-Worker-Start verifiziert.'
+            : 'Scan-Worker-Start nicht verifiziert' . ($lockReason !== null ? ' (' . $lockReason . ')' : '.'),
+        'log_paths' => $logPaths,
     ];
 }
 
@@ -3461,12 +3563,27 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
         throw new RuntimeException('Internal-Key erforderlich, um Update zu starten.');
     }
 
+    $logsError = null;
+    $logsRoot = sv_ensure_logs_root($config, $logsError);
+    if ($logsRoot === null) {
+        sv_log_system_error($config, 'update_center_log_root_unavailable', ['error' => $logsError]);
+        return [
+            'spawned'     => false,
+            'started'     => date('c'),
+            'error'       => 'Log-Root nicht verfügbar.',
+            'reason_code' => 'log_root_unavailable',
+            'message'     => 'Log-Root nicht verfügbar.',
+        ];
+    }
+
     $baseDir = sv_base_dir();
     $script  = $baseDir . '/start.ps1';
     if (!is_file($script)) {
         return [
-            'spawned' => false,
-            'error'   => 'start.ps1 fehlt.',
+            'spawned'     => false,
+            'error'       => 'start.ps1 fehlt.',
+            'reason_code' => 'script_missing',
+            'message'     => 'start.ps1 fehlt.',
         ];
     }
 
@@ -3478,32 +3595,69 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
     $startedAt = date('c');
     $spawned   = false;
     $error     = null;
+    $pid       = null;
+    $unknown   = false;
+    $outLog    = $logsRoot . '/update_center.out.log';
+    $errLog    = $logsRoot . '/update_center.err.log';
 
     if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
-        $cmd = 'start /B "" powershell -NoProfile -ExecutionPolicy Bypass -File '
-            . escapeshellarg($script) . ' -Action ' . escapeshellarg($action);
-        $proc = @popen($cmd, 'r');
-        if ($proc !== false) {
-            pclose($proc);
-            $spawned = true;
+        $psCommand = 'powershell -NoProfile -Command '
+            . escapeshellarg(
+                '$p = Start-Process -FilePath powershell -ArgumentList '
+                . "'-NoProfile','-ExecutionPolicy','Bypass','-File','" . str_replace("'", "''", $script) . "','-Action','" . str_replace("'", "''", $action) . "'"
+                . ' -RedirectStandardOutput "' . str_replace('/', '\\', $outLog) . '" -RedirectStandardError "' . str_replace('/', '\\', $errLog) . '" -PassThru;'
+                . ' if ($p) { $p.Id }'
+            );
+        $output = @shell_exec($psCommand);
+        if ($output !== null && trim($output) !== '') {
+            $pid = (int)trim($output);
+            if ($pid <= 0) {
+                $pid = null;
+            }
         } else {
+            $unknown = true;
             $error = 'Update-Start fehlgeschlagen.';
         }
+        $spawned = $pid !== null;
     } else {
         $cmd = 'nohup pwsh -NoProfile -File ' . escapeshellarg($script) . ' -Action ' . escapeshellarg($action)
-            . ' > /dev/null 2>&1 & echo $!';
+            . ' >> ' . escapeshellarg($outLog) . ' 2>> ' . escapeshellarg($errLog) . ' & echo $!';
         $output = @shell_exec($cmd);
         if ($output !== null && trim($output) !== '') {
-            $spawned = true;
+            $pid = (int)trim($output);
+            if ($pid <= 0) {
+                $pid = null;
+            }
+            $spawned = $pid !== null;
         } else {
             $error = 'Update-Start fehlgeschlagen.';
         }
     }
 
+    $verified = false;
+    if ($pid !== null) {
+        $pidInfo = sv_is_pid_running($pid);
+        if (!($pidInfo['unknown'] ?? false) && ($pidInfo['running'] ?? false)) {
+            $verified = true;
+        }
+    }
+    if (!$verified) {
+        $spawned = false;
+        $error = $error ?? 'Start nicht verifiziert.';
+    }
+
     return [
-        'spawned'   => $spawned,
-        'started'   => $startedAt,
-        'error'     => $error,
+        'spawned'     => $spawned,
+        'started'     => $startedAt,
+        'pid'         => $pid,
+        'unknown'     => $unknown,
+        'error'       => $error,
+        'reason_code' => $spawned ? 'start_verified' : 'start_not_verified',
+        'message'     => $spawned ? 'Update-Start verifiziert.' : 'Update-Start nicht verifiziert.',
+        'log_paths'   => [
+            'stdout' => $outLog,
+            'stderr' => $errLog,
+        ],
     ];
 }
 
@@ -3531,7 +3685,15 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
         return sv_finalize_canceled_job($pdo, $jobId, ['path' => $path], $logger, 'scan pre-start');
     }
 
-    sv_update_job_status($pdo, $jobId, 'running');
+    $claimReason = null;
+    if (!sv_claim_job_running($pdo, $jobId, ['queued'], ['path' => $path], $claimReason)) {
+        $logger('Scan-Job #' . $jobId . ' nicht übernommen: ' . ($claimReason ?? 'claim_failed'));
+        return [
+            'job_id' => $jobId,
+            'status' => 'skipped',
+            'error'  => $claimReason ?? 'claim_failed_or_already_running',
+        ];
+    }
     $jobLogger('Beginne Scan für ' . sv_safe_path_label($path) . ($limit !== null ? ' (limit=' . $limit . ')' : ''));
 
     $cancelCheck = static function () use ($pdo, $jobId): bool {
@@ -3585,12 +3747,13 @@ function sv_process_scan_job_batch(
     array $options = []
 ): array
 {
-    sv_mark_stuck_jobs($pdo, sv_scan_job_types(), SV_JOB_STUCK_MINUTES, $logger);
+    sv_recover_stuck_jobs($pdo, sv_scan_job_types(), SV_JOB_STUCK_MINUTES, $logger);
 
     $remaining = $limit !== null && $limit > 0 ? (int)$limit : null;
     $processed = 0;
     $done      = 0;
     $errors    = 0;
+    $skipped   = 0;
     $rescanProcessed = 0;
     $scanProcessed   = 0;
     $backfillProcessed = 0;
@@ -3609,7 +3772,7 @@ function sv_process_scan_job_batch(
     $backfillRemaining = $backfillLimit !== null
         ? ($remaining !== null ? min($remaining, $backfillLimit) : $backfillLimit)
         : $remaining;
-    $backfillSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
+    $backfillSql = 'SELECT * FROM jobs WHERE type = :type AND status = "queued" ORDER BY id ASC';
     if ($backfillRemaining !== null) {
         $backfillSql .= ' LIMIT :limit';
     }
@@ -3640,8 +3803,10 @@ function sv_process_scan_job_batch(
             }
             $logger('Verarbeite Backfill-Job #' . $jobId);
             $result = sv_process_scan_backfill_job($pdo, $config, $jobRow, $logger);
-            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === 'running') {
+            if (($result['status'] ?? '') === 'done') {
                 $done++;
+            } elseif (($result['status'] ?? '') === 'skipped') {
+                $skipped++;
             } elseif (($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
                 $done++;
             } else {
@@ -3666,7 +3831,7 @@ function sv_process_scan_job_batch(
     $rescanRemaining = $rescanLimit !== null
         ? ($remaining !== null ? min($remaining, $rescanLimit) : $rescanLimit)
         : $remaining;
-    $rescanSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running")';
+    $rescanSql = 'SELECT * FROM jobs WHERE type = :type AND status = "queued"';
     if ($mediaId !== null && $mediaId > 0) {
         $rescanSql .= ' AND media_id = :media_id';
     }
@@ -3707,6 +3872,8 @@ function sv_process_scan_job_batch(
             $result = sv_process_rescan_media_job($pdo, $config, $jobRow, $logger);
             if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
                 $done++;
+            } elseif (($result['status'] ?? '') === 'skipped') {
+                $skipped++;
             } else {
                 $errors++;
             }
@@ -3729,7 +3896,7 @@ function sv_process_scan_job_batch(
     $scanRemaining = $scanLimit !== null
         ? ($remaining !== null ? min($remaining, $scanLimit) : $scanLimit)
         : $remaining;
-    $scanSql = 'SELECT * FROM jobs WHERE type = :type AND status IN ("queued", "running") ORDER BY id ASC';
+    $scanSql = 'SELECT * FROM jobs WHERE type = :type AND status = "queued" ORDER BY id ASC';
     if ($scanRemaining !== null) {
         $scanSql .= ' LIMIT :limit';
     }
@@ -3769,8 +3936,14 @@ function sv_process_scan_job_batch(
                 $scanRemaining--;
             }
             $logger('Verarbeite Scan-Job #' . $jobId . ' (' . $jobPath . ')');
-            sv_process_single_scan_job($pdo, $config, $jobRow, $logger);
-            $done++;
+            $result = sv_process_single_scan_job($pdo, $config, $jobRow, $logger);
+            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
+                $done++;
+            } elseif (($result['status'] ?? '') === 'skipped') {
+                $skipped++;
+            } else {
+                $errors++;
+            }
         } catch (Throwable $e) {
             $errors++;
             $safeError = sv_sanitize_error_message($e->getMessage());
@@ -3787,6 +3960,7 @@ function sv_process_scan_job_batch(
         'total'   => $processed,
         'done'    => $done,
         'error'   => $errors,
+        'skipped' => $skipped,
         'rescan'  => $rescanProcessed,
         'scan'    => $scanProcessed,
         'backfill'=> $backfillProcessed,
@@ -4020,7 +4194,7 @@ function sv_enqueue_library_rename_jobs(PDO $pdo, array $config, int $limit, int
     $skipped        = 0;
 
     $checkJob = $pdo->prepare(
-        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued", "running") LIMIT 1'
+        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status = "queued" LIMIT 1'
     );
 
     $insertJob = $pdo->prepare(
@@ -4127,11 +4301,15 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
             sv_update_job_status($pdo, $jobId, $status, $responseJson, $errorMsg);
         };
 
-        $updateStatus('running', null, [
+        $claimReason = null;
+        if (!sv_claim_job_running($pdo, $jobId, ['queued'], [
             'from_path' => $from,
             'to_path'   => $to,
             'hash'      => $hash,
-        ]);
+        ], $claimReason)) {
+            $logger('Library-Rename Job #' . $jobId . ' übersprungen (claim failed): ' . ($claimReason ?? 'claim_failed'));
+            continue;
+        }
 
         try {
             if ($from === '' || $to === '' || $hash === '') {
@@ -6175,6 +6353,55 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
     });
 }
 
+function sv_claim_job_running(PDO $pdo, int $jobId, array $allowedStatuses, ?array $response = null, ?string &$reason = null): bool
+{
+    $allowedStatuses = array_values(array_filter(array_map('strval', $allowedStatuses), static fn ($status) => $status !== ''));
+    if ($allowedStatuses === []) {
+        $reason = 'claim_status_missing';
+        return false;
+    }
+
+    $now = date('c');
+    $existingJson = sv_db_exec_retry(static function () use ($pdo, $jobId) {
+        $stmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
+        $stmt->execute([':id' => $jobId]);
+        return $stmt->fetchColumn();
+    });
+    $existingData = is_string($existingJson) ? json_decode($existingJson, true) : null;
+    $existingData = is_array($existingData) ? $existingData : [];
+
+    $responseData = $existingData;
+    if (is_array($response)) {
+        $responseData = array_merge($responseData, $response);
+    }
+    if (empty($responseData['started_at'])) {
+        $responseData['started_at'] = $now;
+    }
+
+    $responseJson = json_encode($responseData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($responseJson === false) {
+        error_log('[sv_claim_job_running] response_encode_failed job_id=' . $jobId);
+        $responseJson = null;
+    }
+
+    $placeholders = implode(',', array_fill(0, count($allowedStatuses), '?'));
+    $updated = sv_db_exec_retry(static function () use ($pdo, $responseJson, $now, $jobId, $allowedStatuses, $placeholders): int {
+        $stmt = $pdo->prepare(
+            'UPDATE jobs SET status = "running", forge_response_json = COALESCE(?, forge_response_json), error_message = NULL, updated_at = ?'
+            . ' WHERE id = ? AND status IN (' . $placeholders . ')'
+        );
+        $stmt->execute(array_merge([$responseJson, $now, $jobId], $allowedStatuses));
+        return $stmt->rowCount();
+    });
+
+    if ($updated === 1) {
+        return true;
+    }
+
+    $reason = 'claim_failed_or_already_running';
+    return false;
+}
+
 function sv_format_job_age(?int $seconds): ?string
 {
     if ($seconds === null) {
@@ -6274,7 +6501,7 @@ function sv_job_stuck_info(array $row, array $response, int $timeoutMinutes): ar
     ];
 }
 
-function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callable $logger = null): int
+function sv_recover_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callable $logger = null): int
 {
     $types = array_values(array_filter(array_map('strval', $types), static fn ($t) => $t !== ''));
     if ($types === []) {
@@ -6310,12 +6537,13 @@ function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callabl
             (int)$row['id'],
             'error',
             json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-            'job stuck timeout (' . $reason . ')'
+            'stuck_timeout'
         );
         $count++;
 
         sv_audit_log($pdo, 'job_stuck_timeout', 'jobs', (int)$row['id'], [
-            'error'        => 'job stuck timeout (' . $reason . ')',
+            'error'        => 'stuck_timeout',
+            'detail'       => $reason,
             'marked_at'    => $now,
             'types_scoped' => $types,
         ]);
@@ -6325,6 +6553,11 @@ function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callabl
     }
 
     return $count;
+}
+
+function sv_mark_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?callable $logger = null): int
+{
+    return sv_recover_stuck_jobs($pdo, $types, $maxAgeMinutes, $logger);
 }
 
 function sv_log_forge_paths(array $config, array $paths): void
@@ -6601,8 +6834,6 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         'temp_output_path'   => $plannedTempOutputPath,
         'final_target_path'  => $finalTargetPath,
     ]);
-
-    sv_update_job_status($pdo, $jobId, 'running');
 
     $backupPath        = null;
     $newFileInfo       = null;
@@ -6908,7 +7139,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
 function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callable $logger, ?int $mediaId = null): array
 {
-    sv_mark_stuck_jobs($pdo, SV_FORGE_JOB_TYPES, SV_JOB_STUCK_MINUTES, $logger);
+    sv_recover_stuck_jobs($pdo, SV_FORGE_JOB_TYPES, SV_JOB_STUCK_MINUTES, $logger);
 
     $effectiveLimit = $limit === null ? 1 : max(1, min(10, (int)$limit));
 
@@ -6998,6 +7229,20 @@ function sv_process_forge_job_batch(PDO $pdo, array $config, ?int $limit, callab
                 'error'  => 'media_id mismatch: ' . ($jobMediaId === null ? 'null' : (string)$jobMediaId),
             ];
             $logger('Überspringe Forge-Job #' . $jobId . ' wegen media_id mismatch: ' . ($jobMediaId ?? 'null'));
+            continue;
+        }
+        $claimReason = null;
+        if (!sv_claim_job_running($pdo, $jobId, SV_FORGE_JOB_STATUSES, [
+            'media_id' => $jobMediaId,
+            'regen_mode' => $regenMode,
+        ], $claimReason)) {
+            $summary['skipped']++;
+            $summary['results'][] = [
+                'job_id' => $jobId,
+                'status' => 'skipped',
+                'error'  => $claimReason ?? 'claim_failed_or_already_running',
+            ];
+            $logger('Überspringe Forge-Job #' . $jobId . ' (claim failed): ' . ($claimReason ?? 'claim_failed'));
             continue;
         }
         try {
