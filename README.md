@@ -121,8 +121,9 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 ### Runner/Tracing Hinweise
 - `WWW/ollama.php?action=run` startet jetzt den CLI-Worker und gibt sofort zurück (kein Web-Prozess-Blocking).
 - Der Start bestätigt nach Worker-Lock/Heartbeat, frischem Worker-Status **oder** geprüftem PID (verhindert false negatives bei langsamen Starts).
+- `max_seconds` steuert die Verifikations-Phase des Worker-Starts (längere Starts können im UI berücksichtigt werden).
 - Falls `proc_open` nicht verfügbar ist, fällt der Launcher auf `exec` zurück und liefert Diagnosefelder (`spawn_method`, `spawn_ok`, `spawn_status`).
-- Unter Windows wird der Worker über PowerShell im Hidden-Window gestartet, damit keine sichtbare Konsole geöffnet wird.
+- Unter Windows wird der Worker über PowerShell im Hidden-Window gestartet, damit keine sichtbare Konsole geöffnet wird, inkl. Spawn-Logs.
 - Die Windows-Start-Process-Argumente sind gequotet, damit Pfade mit Leerzeichen sauber verarbeitet werden.
 - Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
 - Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
@@ -136,7 +137,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **Ollama-Service:** `LOGS/ollama_service.jsonl`
 - **Ollama-Status:** `LOGS/ollama_status.json`
 - **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`
-- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`
+- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.*`
 - **System-Fehlerlog:** `LOGS/system_errors.jsonl` (kritische IO/Spawn-Fehler)
 
 ## Web UI Seiten
