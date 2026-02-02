@@ -155,6 +155,7 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
         'started_at' => date('c'),
         'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
         'owner' => $owner ?? PHP_SAPI,
+        'heartbeat_at' => date('c'),
     ];
     $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($encoded === false) {
@@ -178,6 +179,7 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
         'ok' => true,
         'handle' => $handle,
         'path' => $lockPath,
+        'payload' => $payload,
         'reason' => null,
     ];
 }

@@ -31,7 +31,10 @@ $writeErrLog = static function (string $message) use ($errLogPath): void {
         fwrite(STDERR, $line);
         return;
     }
-    file_put_contents($errLogPath, $line, FILE_APPEND);
+    $result = file_put_contents($errLogPath, $line, FILE_APPEND);
+    if ($result === false) {
+        error_log('[ollama_worker_cli] Failed to write error log: ' . $message);
+    }
 };
 
 $loop = false;
@@ -74,9 +77,52 @@ $updateWorkerStatus = static function (bool $active, string $message, array $det
 
 $lock = sv_ollama_acquire_runner_lock($config, 'cli:ollama_worker_cli.php');
 if (empty($lock['ok'])) {
-    $writeErrLog('Ollama-Worker bereits aktiv (Lock), neuer Start abgebrochen.');
-    exit(0);
+    $reason = $lock['reason'] ?? 'lock_failed';
+    if ($reason === 'locked') {
+        $writeErrLog('Ollama-Worker bereits aktiv (Lock), neuer Start abgebrochen.');
+        exit(0);
+    }
+    $writeErrLog('Ollama-Worker Lock fehlgeschlagen: ' . $reason);
+    sv_log_system_error($config, 'ollama_worker_lock_failed', ['reason' => $reason]);
+    exit(1);
 }
+
+$lockHandle = $lock['handle'] ?? null;
+$lockPayload = $lock['payload'] ?? [
+    'pid' => $workerPid,
+    'started_at' => date('c'),
+    'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
+    'owner' => 'cli:ollama_worker_cli.php',
+];
+$lastHeartbeat = 0;
+$updateLockHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockHandle, $config, $writeErrLog): void {
+    $now = time();
+    if (!$force && ($now - $lastHeartbeat) < 10) {
+        return;
+    }
+    $lastHeartbeat = $now;
+    $lockPayload['heartbeat_at'] = date('c', $now);
+    $encoded = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($encoded === false) {
+        $writeErrLog('Ollama-Worker Heartbeat konnte nicht codiert werden.');
+        sv_log_system_error($config, 'ollama_worker_heartbeat_encode_failed', []);
+        throw new RuntimeException('ollama_worker_heartbeat_encode_failed');
+    }
+    if (!is_resource($lockHandle)) {
+        $writeErrLog('Ollama-Worker Lock-Handle ungültig.');
+        sv_log_system_error($config, 'ollama_worker_lock_handle_invalid', []);
+        throw new RuntimeException('ollama_worker_lock_handle_invalid');
+    }
+    ftruncate($lockHandle, 0);
+    rewind($lockHandle);
+    $written = fwrite($lockHandle, $encoded);
+    if ($written === false) {
+        $writeErrLog('Ollama-Worker Heartbeat konnte nicht geschrieben werden.');
+        sv_log_system_error($config, 'ollama_worker_heartbeat_write_failed', []);
+        throw new RuntimeException('ollama_worker_heartbeat_write_failed');
+    }
+    fflush($lockHandle);
+};
 
 $batchCount = 0;
 $aggregate = [
@@ -92,6 +138,7 @@ try {
         'loop' => $loop ? 1 : 0,
         'sleep_ms' => $sleepMs,
     ]);
+    $updateLockHeartbeat(true);
     sv_run_migrations_if_needed($pdo, $config, $logger);
 
     $batchSize = $batchSize ?? $limit;
@@ -121,6 +168,7 @@ try {
             $aggregate[$key] = $value + (int)($summary[$key] ?? 0);
         }
         $batchCount++;
+        $updateLockHeartbeat();
         $updateWorkerStatus(true, 'heartbeat', [
             'batch' => $batchCount,
             'processed' => (int)($summary['total'] ?? 0),
@@ -164,5 +212,10 @@ try {
         'batches' => $batchCount,
         'total' => (int)($aggregate['total'] ?? 0),
     ]);
+    try {
+        $updateLockHeartbeat(true);
+    } catch (Throwable $e) {
+        $writeErrLog('Ollama-Worker Heartbeat-Update fehlgeschlagen (finally): ' . $e->getMessage());
+    }
     sv_ollama_release_runner_lock($lock['handle'] ?? null);
 }

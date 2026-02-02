@@ -58,26 +58,41 @@ $writeErrLog = static function (string $message) use ($errLogPath): void {
     }
 };
 
+$lockQuarantine = static function (string $reason) use ($lockPath, $writeErrLog, $config): void {
+    $timestamp = date('Ymd_His');
+    $brokenPath = $lockPath . '.broken.' . $timestamp;
+    if (rename($lockPath, $brokenPath)) {
+        $writeErrLog($reason . ': ' . $lockPath . ' -> ' . $brokenPath);
+        sv_log_system_error($config, 'forge_worker_lock_quarantined', ['path' => $lockPath, 'reason' => $reason]);
+        return;
+    }
+    if (!unlink($lockPath)) {
+        $writeErrLog('Forge-Worker Lock konnte nicht entfernt werden (' . $reason . ').');
+        sv_log_system_error($config, 'forge_worker_lock_remove_failed', ['path' => $lockPath, 'reason' => $reason]);
+        exit(1);
+    }
+    $writeErrLog($reason . ': ' . $lockPath);
+    sv_log_system_error($config, 'forge_worker_lock_removed', ['path' => $lockPath, 'reason' => $reason]);
+};
+
 if (is_file($lockPath)) {
     $raw = file_get_contents($lockPath);
     if ($raw === false) {
         $writeErrLog('Forge-Worker Lock konnte nicht gelesen werden.');
         sv_log_system_error($config, 'forge_worker_lock_read_failed', ['path' => $lockPath]);
-        exit(1);
-    }
-    $data = json_decode($raw, true);
-    $existingPid = is_array($data) && isset($data['pid']) ? (int)$data['pid'] : 0;
-    if ($existingPid > 0) {
-        $pidInfo = sv_is_pid_running($existingPid);
-        if (!empty($pidInfo['running'])) {
-            $writeErrLog('Forge-Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
-            exit(0);
+        $lockQuarantine('broken_lock_quarantined');
+    } else {
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            $lockQuarantine('broken_lock_quarantined');
+        } else {
+            $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+            if ($heartbeat !== false && (time() - $heartbeat) <= 30) {
+                $writeErrLog('Forge-Worker bereits aktiv (Lock Heartbeat), neuer Start abgebrochen.');
+                exit(0);
+            }
+            $lockQuarantine('stale_lock_removed');
         }
-    }
-    if (!unlink($lockPath)) {
-        $writeErrLog('Forge-Worker Lock konnte nicht entfernt werden.');
-        sv_log_system_error($config, 'forge_worker_lock_remove_failed', ['path' => $lockPath]);
-        exit(1);
     }
 }
 
@@ -107,6 +122,7 @@ $updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$l
     if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
         $writeErrLog('Forge-Worker Heartbeat konnte nicht geschrieben werden.');
         sv_log_system_error($config, 'forge_worker_heartbeat_write_failed', ['path' => $lockPath]);
+        throw new RuntimeException('forge_worker_heartbeat_write_failed');
     }
 };
 
@@ -117,7 +133,7 @@ $logger = function (string $msg) use ($updateHeartbeat): void {
 
 try {
     $updateHeartbeat(true);
-    $stuck = sv_mark_stuck_jobs($pdo, SV_FORGE_JOB_TYPES, SV_JOB_STUCK_MINUTES, $logger);
+    $stuck = sv_recover_stuck_jobs($pdo, SV_FORGE_JOB_TYPES, SV_JOB_STUCK_MINUTES, $logger);
     if ($stuck > 0) {
         $logger('Stuck Forge-Jobs bereinigt: ' . $stuck);
     }

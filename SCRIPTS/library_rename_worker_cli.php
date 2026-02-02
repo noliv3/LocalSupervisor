@@ -41,26 +41,41 @@ $writeErrLog = static function (string $message) use ($errLogPath): void {
     }
 };
 
+$lockQuarantine = static function (string $reason) use ($lockPath, $writeErrLog, $config): void {
+    $timestamp = date('Ymd_His');
+    $brokenPath = $lockPath . '.broken.' . $timestamp;
+    if (rename($lockPath, $brokenPath)) {
+        $writeErrLog($reason . ': ' . $lockPath . ' -> ' . $brokenPath);
+        sv_log_system_error($config, 'library_rename_worker_lock_quarantined', ['path' => $lockPath, 'reason' => $reason]);
+        return;
+    }
+    if (!unlink($lockPath)) {
+        $writeErrLog('Library-Rename Worker Lock konnte nicht entfernt werden (' . $reason . ').');
+        sv_log_system_error($config, 'library_rename_worker_lock_remove_failed', ['path' => $lockPath, 'reason' => $reason]);
+        exit(1);
+    }
+    $writeErrLog($reason . ': ' . $lockPath);
+    sv_log_system_error($config, 'library_rename_worker_lock_removed', ['path' => $lockPath, 'reason' => $reason]);
+};
+
 if (is_file($lockPath)) {
     $raw = file_get_contents($lockPath);
     if ($raw === false) {
         $writeErrLog('Library-Rename Worker Lock konnte nicht gelesen werden.');
         sv_log_system_error($config, 'library_rename_worker_lock_read_failed', ['path' => $lockPath]);
-        exit(1);
-    }
-    $data = json_decode($raw, true);
-    $existingPid = is_array($data) && isset($data['pid']) ? (int)$data['pid'] : 0;
-    if ($existingPid > 0) {
-        $pidInfo = sv_is_pid_running($existingPid);
-        if (!empty($pidInfo['running'])) {
-            $writeErrLog('Library-Rename Worker bereits aktiv (PID ' . $existingPid . '), neuer Start abgebrochen.');
-            exit(0);
+        $lockQuarantine('broken_lock_quarantined');
+    } else {
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            $lockQuarantine('broken_lock_quarantined');
+        } else {
+            $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+            if ($heartbeat !== false && (time() - $heartbeat) <= 30) {
+                $writeErrLog('Library-Rename Worker bereits aktiv (Lock Heartbeat), neuer Start abgebrochen.');
+                exit(0);
+            }
+            $lockQuarantine('stale_lock_removed');
         }
-    }
-    if (!unlink($lockPath)) {
-        $writeErrLog('Library-Rename Worker Lock konnte nicht entfernt werden.');
-        sv_log_system_error($config, 'library_rename_worker_lock_remove_failed', ['path' => $lockPath]);
-        exit(1);
     }
 }
 
@@ -78,13 +93,32 @@ if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === 
     exit(1);
 }
 
-$logger = function (string $msg): void {
+$lastHeartbeat = 0;
+$updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockPath, $config, $writeErrLog): void {
+    $now = time();
+    if (!$force && ($now - $lastHeartbeat) < 10) {
+        return;
+    }
+    $lastHeartbeat = $now;
+    $lockPayload['heartbeat_at'] = date('c', $now);
+    $lockJson = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
+        $writeErrLog('Library-Rename Worker Heartbeat konnte nicht geschrieben werden.');
+        sv_log_system_error($config, 'library_rename_worker_heartbeat_write_failed', ['path' => $lockPath]);
+        throw new RuntimeException('library_rename_worker_heartbeat_write_failed');
+    }
+};
+
+$logger = function (string $msg) use ($updateHeartbeat): void {
+    $updateHeartbeat();
     fwrite(STDOUT, $msg . PHP_EOL);
 };
 
 try {
-    sv_mark_stuck_jobs($pdo, [SV_JOB_TYPE_LIBRARY_RENAME], SV_JOB_STUCK_MINUTES, $logger);
+    $updateHeartbeat(true);
+    sv_recover_stuck_jobs($pdo, [SV_JOB_TYPE_LIBRARY_RENAME], SV_JOB_STUCK_MINUTES, $logger);
     $summary = sv_process_library_rename_jobs($pdo, $config, $limit, $logger);
+    $updateHeartbeat(true);
     $line = sprintf(
         'Verarbeitet: %d | Erfolgreich: %d | Fehler: %d',
         (int)($summary['total'] ?? 0),
