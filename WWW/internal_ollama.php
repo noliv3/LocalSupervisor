@@ -228,7 +228,7 @@ if ($action === 'run_once') {
         $logs[] = $message;
     };
 
-    $lock = sv_ollama_acquire_runner_lock($config, 'web:internal_ollama.php');
+    $lock = sv_ollama_acquire_aux_lock($config, 'ollama_run_once.lock', 'web:internal_ollama.php', 'run_once_lock');
     if (empty($lock['ok'])) {
         $respond(200, [
             'ok' => false,
@@ -265,7 +265,7 @@ if ($action === 'run_once') {
             'logs' => $logs,
         ]);
     } finally {
-        sv_ollama_release_runner_lock($lock['handle']);
+        sv_ollama_release_aux_lock($lock['handle']);
     }
 }
 
