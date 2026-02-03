@@ -369,17 +369,14 @@ if ($action === 'run') {
 
     $lock = sv_ollama_acquire_launcher_lock($config, 'web:ollama.php');
     if (empty($lock['ok'])) {
-        if (($lock['reason'] ?? null) === 'log_root_unavailable') {
-            $respond(200, [
-                'ok' => false,
-                'status' => 'blocked',
-                'reason' => 'log_root_unavailable',
-            ]);
-        }
         $respond(200, [
             'ok' => false,
-            'status' => 'locked',
-            'reason' => 'launcher_locked',
+            'status' => $lock['status'] ?? 'locked',
+            'reason' => $lock['reason'] ?? 'launcher_locked',
+            'reason_code' => $lock['reason_code'] ?? ($lock['reason'] ?? 'launcher_locked'),
+            'locked' => (bool)($lock['locked'] ?? false),
+            'running' => false,
+            'path' => $lock['path'] ?? null,
         ]);
     }
 
@@ -390,8 +387,11 @@ if ($action === 'run') {
         if (empty($preflight['ok'])) {
             $respond(200, [
                 'ok' => false,
-                'status' => 'blocked',
+                'status' => 'config_failed',
                 'reason' => $preflight['reason'] ?? 'preflight_failed',
+                'reason_code' => $preflight['reason'] ?? 'preflight_failed',
+                'running' => false,
+                'locked' => false,
             ]);
         }
 
@@ -401,9 +401,13 @@ if ($action === 'run') {
             sv_log_system_error($config, 'ollama_run_log_root_unavailable', ['error' => $logsError]);
             $respond(200, [
                 'ok' => false,
-                'status' => 'blocked',
+                'status' => 'open_failed',
                 'reason' => 'log_root_unavailable',
+                'reason_code' => 'log_root_unavailable',
+                'running' => false,
+                'locked' => false,
                 'log_error' => $logsError,
+                'path' => sv_logs_root($config),
             ]);
         }
         $logsPath = $logsRoot;
@@ -415,6 +419,7 @@ if ($action === 'run') {
             $respond(200, [
                 'ok' => false,
                 'status' => 'busy',
+                'reason_code' => 'concurrency_limit',
                 'running' => $running,
                 'max_concurrency' => $maxConcurrency,
             ]);
@@ -463,7 +468,7 @@ if ($action === 'run') {
                 $spawnMethod = 'exec';
                 $output = [];
                 $statusCode = null;
-                @exec($cmd, $output, $statusCode);
+                exec($cmd, $output, $statusCode);
                 $spawnStatus = $statusCode;
                 $spawnOk = $statusCode === 0;
                 $spawned = $spawnOk;
@@ -494,7 +499,7 @@ if ($action === 'run') {
                 $spawnMethod = 'exec';
                 $output = [];
                 $statusCode = null;
-                @exec($cmd, $output, $statusCode);
+                exec($cmd, $output, $statusCode);
                 $spawnStatus = $statusCode;
                 if (is_array($output) && $output !== []) {
                     $pid = (int)trim((string)end($output));
@@ -535,8 +540,8 @@ if ($action === 'run') {
         }
 
         $errSnippet = null;
-        if (is_file($spawnErrLog)) {
-            $errContents = @file_get_contents($spawnErrLog);
+        if (is_file($spawnErrLog) && is_readable($spawnErrLog)) {
+            $errContents = file_get_contents($spawnErrLog);
             if (is_string($errContents) && $errContents !== '') {
                 $errSnippet = mb_substr($errContents, -800);
             }
@@ -547,6 +552,9 @@ if ($action === 'run') {
                 'ok' => false,
                 'status' => 'start_failed',
                 'reason' => 'start_failed',
+                'reason_code' => 'spawn_failed',
+                'running' => false,
+                'locked' => false,
                 'spawned' => $spawned,
                 'spawn_error' => $spawnError,
                 'err_snippet' => $errSnippet,
@@ -564,6 +572,7 @@ if ($action === 'run') {
         $pidAlive = null;
         $verifyWindow = max(1, $maxSeconds);
         $verifyAttempts = 0;
+        $lockProbeStatus = null;
         $deadline = microtime(true) + $verifyWindow;
         do {
             $verifyAttempts++;
@@ -573,11 +582,16 @@ if ($action === 'run') {
                 $runnerLocked = false;
             } elseif (($lockProbe['reason'] ?? '') === 'locked') {
                 $runnerLocked = true;
+            } else {
+                $lockProbeStatus = $lockProbe['status'] ?? null;
             }
 
             $workerRecent = sv_ollama_worker_recent($config, 8);
-            if ($pid !== null && function_exists('posix_kill')) {
-                $pidAlive = @posix_kill((int)$pid, 0);
+            if ($pid !== null) {
+                $pidInfo = sv_is_pid_running((int)$pid);
+                if (!($pidInfo['unknown'] ?? false)) {
+                    $pidAlive = (bool)($pidInfo['running'] ?? false);
+                }
             }
             if ($runnerLocked || $workerRecent || $pidAlive || sv_ollama_running_job_count($pdo) > 0) {
                 $verified = true;
@@ -586,10 +600,20 @@ if ($action === 'run') {
             usleep(250000);
         } while (microtime(true) < $deadline);
 
+        if (!$verified && $lockProbeStatus === 'open_failed') {
+            $spawnError = $spawnError ?? 'lock_open_failed';
+        }
+
+        $finalStatus = $verified ? 'running' : ($lockProbeStatus === 'open_failed' ? 'open_failed' : 'start_failed');
+        $finalReasonCode = $verified
+            ? 'start_verified'
+            : ($lockProbeStatus === 'open_failed' ? 'lock_open_failed' : 'spawn_unverified');
+
         $respond(200, [
             'ok' => $verified,
-            'status' => $verified ? 'started' : 'start_failed',
-            'reason' => $verified ? null : 'start_failed',
+            'status' => $finalStatus,
+            'reason' => $verified ? null : ($lockProbeStatus === 'open_failed' ? 'lock_open_failed' : 'start_failed'),
+            'reason_code' => $finalReasonCode,
             'pid' => $pid,
             'pid_alive' => $pidAlive,
             'spawn_method' => $spawnMethod,
@@ -606,6 +630,8 @@ if ($action === 'run') {
                 'err' => $spawnErrLog,
             ],
             'verify_attempts' => $verifyAttempts,
+            'running' => $verified,
+            'locked' => $runnerLocked,
         ]);
     } finally {
         sv_ollama_release_launcher_lock($lock['handle']);
