@@ -394,14 +394,14 @@ function sv_is_pid_running(int $pid): array
 
     if (function_exists('posix_kill')) {
         return [
-            'running' => @posix_kill($pid, 0),
+            'running' => posix_kill($pid, 0),
             'unknown' => false,
         ];
     }
 
     $osFamily = PHP_OS_FAMILY ?? PHP_OS;
     if (stripos((string)$osFamily, 'Windows') !== false) {
-        $output = @shell_exec('tasklist /FO CSV /NH /FI "PID eq ' . (int)$pid . '" 2> NUL');
+        $output = shell_exec('tasklist /FO CSV /NH /FI "PID eq ' . (int)$pid . '" 2> NUL');
         if ($output === null) {
             return ['running' => false, 'unknown' => true];
         }
@@ -435,7 +435,7 @@ function sv_is_pid_running(int $pid): array
         ];
     }
 
-    $output = @shell_exec('ps -p ' . (int)$pid . ' -o pid=');
+    $output = shell_exec('ps -p ' . (int)$pid . ' -o pid=');
     if ($output === null) {
         return ['running' => false, 'unknown' => true];
     }
@@ -2191,10 +2191,12 @@ function sv_spawn_forge_worker_for_media(
                 '_sv_worker_spawn_reason'     => 'log_dir_unwritable',
                 '_sv_worker_spawn_error'      => $logsError,
                 '_sv_worker_spawn_attempt'    => date('c'),
-                'worker_spawn'                => 'skipped',
+                'worker_spawn'                => 'error',
                 'worker_spawn_cmd'            => null,
                 'worker_spawn_err_snippet'    => null,
                 'worker_spawn_log_paths'      => [],
+                'worker_spawn_status'         => 'open_failed',
+                'worker_spawn_reason_code'    => 'log_root_unavailable',
             ]);
         }
         return [
@@ -2203,10 +2205,15 @@ function sv_spawn_forge_worker_for_media(
             'unknown'      => false,
             'skipped'      => true,
             'reason'       => 'log_dir_unwritable',
-            'state'        => 'skipped',
+            'state'        => 'error',
             'cmd'          => null,
             'err_snippet'  => $logsError,
             'log_paths'    => [],
+            'status'       => 'open_failed',
+            'reason_code'  => 'log_root_unavailable',
+            'locked'       => false,
+            'path'         => sv_logs_root($config),
+            'running'      => false,
         ];
     }
 
@@ -2214,6 +2221,7 @@ function sv_spawn_forge_worker_for_media(
     $spawnLastPath   = $logsRoot . '/forge_worker_spawn.last.json';
     $spawnOutLog     = $logsRoot . '/forge_worker_spawn.out.log';
     $spawnErrLog     = $logsRoot . '/forge_worker_spawn.err.log';
+    $workerLockPath  = $logsRoot . '/forge_worker.lock.json';
     $logPaths        = [
         'stdout' => $spawnOutLog,
         'stderr' => $spawnErrLog,
@@ -2259,6 +2267,8 @@ function sv_spawn_forge_worker_for_media(
                 'worker_spawn_cmd'            => null,
                 'worker_spawn_err_snippet'    => $snippet,
                 'worker_spawn_log_paths'      => $logPaths,
+                'worker_spawn_status'         => 'busy',
+                'worker_spawn_reason_code'    => 'spawn_cooldown',
             ]);
         }
 
@@ -2272,6 +2282,11 @@ function sv_spawn_forge_worker_for_media(
             'cmd'          => null,
             'err_snippet'  => $snippet,
             'log_paths'    => $logPaths,
+            'status'       => 'busy',
+            'reason_code'  => 'spawn_cooldown',
+            'locked'       => false,
+            'path'         => $lockPath,
+            'running'      => false,
         ];
     }
 
@@ -2284,10 +2299,15 @@ function sv_spawn_forge_worker_for_media(
             'unknown'      => false,
             'skipped'      => true,
             'reason'       => 'spawn_lock_open_failed',
-            'state'        => 'skipped',
+            'state'        => 'error',
             'cmd'          => null,
             'err_snippet'  => 'spawn_lock_open_failed',
             'log_paths'    => $logPaths,
+            'status'       => 'open_failed',
+            'reason_code'  => 'spawn_lock_open_failed',
+            'locked'       => false,
+            'path'         => $lockPath,
+            'running'      => false,
         ];
     }
 
@@ -2305,6 +2325,11 @@ function sv_spawn_forge_worker_for_media(
             'cmd'          => null,
             'err_snippet'  => 'spawn_lock_busy',
             'log_paths'    => $logPaths,
+            'status'       => 'locked',
+            'reason_code'  => 'spawn_lock_busy',
+            'locked'       => true,
+            'path'         => $lockPath,
+            'running'      => false,
         ];
     }
 
@@ -2322,7 +2347,7 @@ function sv_spawn_forge_worker_for_media(
 
     $phpCli = sv_get_php_cli($config);
     if ($phpCli === '') {
-        $spawnError = 'php cli not configured';
+        $spawnError = 'php_cli_missing';
         $recordSpawnLog('error', $spawnError);
         $errSnippet = substr($spawnError, 0, 200);
     } else {
@@ -2378,6 +2403,58 @@ function sv_spawn_forge_worker_for_media(
         }
     }
 
+    $verifyWindowSeconds = 10;
+    $lockVerified = false;
+    $pidVerified = false;
+    $lockReason = null;
+    $checkLock = static function () use ($workerLockPath, $verifyWindowSeconds): array {
+        if (!is_file($workerLockPath)) {
+            return ['ok' => false, 'reason' => 'lock_missing'];
+        }
+        $raw = file_get_contents($workerLockPath);
+        if ($raw === false) {
+            return ['ok' => false, 'reason' => 'lock_read_failed'];
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            return ['ok' => false, 'reason' => 'lock_json_invalid'];
+        }
+        $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+        if ($heartbeat === false) {
+            return ['ok' => false, 'reason' => 'lock_heartbeat_invalid'];
+        }
+        if ((time() - $heartbeat) > $verifyWindowSeconds) {
+            return ['ok' => false, 'reason' => 'lock_heartbeat_stale'];
+        }
+        return ['ok' => true, 'reason' => null];
+    };
+    if ($spawned) {
+        $deadline = time() + $verifyWindowSeconds;
+        while (time() <= $deadline) {
+            if ($pid !== null) {
+                $pidInfo = sv_is_pid_running($pid);
+                if (!($pidInfo['unknown'] ?? false) && ($pidInfo['running'] ?? false)) {
+                    $pidVerified = true;
+                    break;
+                }
+            }
+            $lockCheck = $checkLock();
+            $lockReason = $lockCheck['reason'] ?? null;
+            if (!empty($lockCheck['ok'])) {
+                $lockVerified = true;
+                break;
+            }
+            usleep(200000);
+        }
+    }
+
+    $verified = $spawned && ($pidVerified || $lockVerified);
+    if ($spawned && !$verified) {
+        $spawnError = 'spawn_unverified';
+        $spawnState = 'error';
+        $spawned = false;
+    }
+
     if ($spawned) {
         sv_record_forge_worker_meta($pdo, $mediaId, $pid, $startedAt);
     }
@@ -2398,19 +2475,30 @@ function sv_spawn_forge_worker_for_media(
     flock($lockHandle, LOCK_UN);
     fclose($lockHandle);
 
+    $status = $spawned ? 'running' : ($spawnError === 'php_cli_missing' ? 'config_failed' : 'start_failed');
+    if ($spawnError === 'spawn_lock_open_failed') {
+        $status = 'open_failed';
+    }
+    if ($spawnError === 'spawn_lock_busy') {
+        $status = 'locked';
+    }
+    $reasonCode = $spawned ? 'start_verified' : ($spawnError === 'spawn_unverified' ? 'spawn_unverified' : ($spawnError === 'php_cli_missing' ? 'php_cli_missing' : 'spawn_failed'));
+
     if ($jobId !== null) {
         sv_merge_job_response_metadata($pdo, $jobId, [
             '_sv_worker_pid'        => $pid,
             '_sv_worker_started_at' => $startedAt,
             '_sv_worker_spawned'    => $spawned,
             '_sv_worker_spawn_skipped' => false,
-            '_sv_worker_spawn_reason'  => $spawnError === null ? 'ok' : 'spawn_error',
+            '_sv_worker_spawn_reason'  => $reasonCode,
             '_sv_worker_spawn_error'   => $spawnError,
             '_sv_worker_spawn_attempt' => $startedAt,
             'worker_spawn'             => $spawnState,
             'worker_spawn_cmd'         => $spawnCmd,
             'worker_spawn_err_snippet' => $errSnippet,
             'worker_spawn_log_paths'   => $logPaths,
+            'worker_spawn_status'      => $status,
+            'worker_spawn_reason_code' => $reasonCode,
         ]);
     }
 
@@ -2424,6 +2512,11 @@ function sv_spawn_forge_worker_for_media(
         'cmd'      => $spawnCmd,
         'err_snippet' => $errSnippet,
         'log_paths'   => $logPaths,
+        'status'      => $status,
+        'reason_code' => $reasonCode,
+        'locked'      => false,
+        'path'        => $lockPath,
+        'running'     => $spawned,
     ];
 }
 
@@ -3321,12 +3414,15 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         return [
             'pid'     => null,
             'running' => false,
+            'reason'  => 'log_dir_unwritable',
+            'reason_code' => 'log_root_unavailable',
+            'message' => 'Log-Root nicht verfügbar.',
+            'status'  => 'open_failed',
+            'locked'  => false,
+            'path'    => sv_logs_root($config),
             'unknown' => false,
             'skipped' => true,
             'spawned' => false,
-            'reason'  => 'log_dir_unwritable',
-            'reason_code' => 'log_dir_unwritable',
-            'message' => 'Log-Root nicht verfügbar.',
         ];
     }
     $spawnLockPath   = $logsRoot . '/scan_worker_spawn.lock';
@@ -3346,12 +3442,15 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         return [
             'pid'     => null,
             'running' => false,
-            'unknown' => false,
-            'skipped' => true,
-            'spawned' => false,
             'reason'  => 'spawn_lock_open_failed',
             'reason_code' => 'spawn_lock_open_failed',
             'message' => 'Spawn-Lock konnte nicht geöffnet werden.',
+            'status'  => 'open_failed',
+            'locked'  => false,
+            'path'    => $spawnLockPath,
+            'unknown' => false,
+            'skipped' => true,
+            'spawned' => false,
         ];
     }
     $hasLock = flock($lockHandle, LOCK_EX | LOCK_NB);
@@ -3380,12 +3479,15 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         return [
             'pid'     => null,
             'running' => false,
-            'unknown' => false,
-            'skipped' => true,
-            'spawned' => false,
             'reason'  => $reason,
             'reason_code' => $reason,
             'message' => $reason === 'spawn_cooldown' ? 'Spawn im Cooldown.' : 'Spawn-Lock belegt.',
+            'status'  => $reason === 'spawn_cooldown' ? 'busy' : 'locked',
+            'locked'  => $reason !== 'spawn_cooldown',
+            'path'    => $spawnLockPath,
+            'unknown' => false,
+            'skipped' => true,
+            'spawned' => false,
         ];
     }
 
@@ -3541,6 +3643,9 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     flock($lockHandle, LOCK_UN);
     fclose($lockHandle);
 
+    $reasonCode = $verified ? 'start_verified' : ($spawnErr === 'start_not_verified' ? 'spawn_unverified' : 'spawn_failed');
+    $status = $verified ? 'running' : 'start_failed';
+
     return [
         'pid'     => $pid,
         'started' => $startedAt,
@@ -3549,11 +3654,13 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         'skipped' => !$verified,
         'spawned' => $verified,
         'reason'  => $spawnErr,
-        'reason_code' => $verified ? 'start_verified' : 'start_not_verified',
+        'reason_code' => $reasonCode,
         'message' => $verified
             ? 'Scan-Worker-Start verifiziert.'
             : 'Scan-Worker-Start nicht verifiziert' . ($lockReason !== null ? ' (' . $lockReason . ')' : '.'),
         'log_paths' => $logPaths,
+        'status' => $status,
+        'locked' => false,
     ];
 }
 
@@ -3573,6 +3680,10 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
             'error'       => 'Log-Root nicht verfügbar.',
             'reason_code' => 'log_root_unavailable',
             'message'     => 'Log-Root nicht verfügbar.',
+            'status'      => 'open_failed',
+            'path'        => sv_logs_root($config),
+            'running'     => false,
+            'locked'      => false,
         ];
     }
 
@@ -3584,6 +3695,10 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
             'error'       => 'start.ps1 fehlt.',
             'reason_code' => 'script_missing',
             'message'     => 'start.ps1 fehlt.',
+            'status'      => 'config_failed',
+            'path'        => $script,
+            'running'     => false,
+            'locked'      => false,
         ];
     }
 
@@ -3608,7 +3723,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
                 . ' -RedirectStandardOutput "' . str_replace('/', '\\', $outLog) . '" -RedirectStandardError "' . str_replace('/', '\\', $errLog) . '" -PassThru;'
                 . ' if ($p) { $p.Id }'
             );
-        $output = @shell_exec($psCommand);
+        $output = shell_exec($psCommand);
         if ($output !== null && trim($output) !== '') {
             $pid = (int)trim($output);
             if ($pid <= 0) {
@@ -3622,7 +3737,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
     } else {
         $cmd = 'nohup pwsh -NoProfile -File ' . escapeshellarg($script) . ' -Action ' . escapeshellarg($action)
             . ' >> ' . escapeshellarg($outLog) . ' 2>> ' . escapeshellarg($errLog) . ' & echo $!';
-        $output = @shell_exec($cmd);
+        $output = shell_exec($cmd);
         if ($output !== null && trim($output) !== '') {
             $pid = (int)trim($output);
             if ($pid <= 0) {
@@ -3652,8 +3767,11 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
         'pid'         => $pid,
         'unknown'     => $unknown,
         'error'       => $error,
-        'reason_code' => $spawned ? 'start_verified' : 'start_not_verified',
+        'reason_code' => $spawned ? 'start_verified' : 'spawn_unverified',
         'message'     => $spawned ? 'Update-Start verifiziert.' : 'Update-Start nicht verifiziert.',
+        'status'      => $spawned ? 'running' : 'start_failed',
+        'running'     => $spawned,
+        'locked'      => false,
         'log_paths'   => [
             'stdout' => $outLog,
             'stderr' => $errLog,
@@ -6431,29 +6549,50 @@ function sv_extract_job_response(?string $json): array
 
 function sv_extract_job_timestamps(array $row, array $response): array
 {
+    $heartbeatAt = $response['heartbeat_at']
+        ?? $response['_sv_worker_heartbeat_at']
+        ?? ($row['heartbeat_at'] ?? null)
+        ?? null;
     $startedAt = $response['started_at']
         ?? $response['_sv_worker_started_at']
+        ?? ($row['started_at'] ?? null)
+        ?? null;
+    $updatedAt = $response['updated_at']
+        ?? ($row['updated_at'] ?? null)
         ?? null;
     $finishedAt = $response['finished_at']
         ?? $response['completed_at']
         ?? null;
 
-    $fallback = $startedAt ?: ((string)($row['created_at'] ?? '') ?: (string)($row['updated_at'] ?? ''));
-    $startedAt = $startedAt ?: ($fallback !== '' ? $fallback : null);
+    $ageSource = null;
+    $ageBase = null;
+    if (is_string($heartbeatAt) && $heartbeatAt !== '') {
+        $ageBase = $heartbeatAt;
+        $ageSource = 'heartbeat_at';
+    } elseif (is_string($startedAt) && $startedAt !== '') {
+        $ageBase = $startedAt;
+        $ageSource = 'started_at';
+    } elseif (is_string($updatedAt) && $updatedAt !== '') {
+        $ageBase = $updatedAt;
+        $ageSource = 'updated_at';
+    }
 
     $ageSeconds = null;
-    if ($startedAt !== null && $startedAt !== '') {
-        $startTs = strtotime($startedAt);
-        if ($startTs !== false) {
-            $ageSeconds = time() - $startTs;
+    if ($ageBase !== null && $ageBase !== '') {
+        $baseTs = strtotime($ageBase);
+        if ($baseTs !== false) {
+            $ageSeconds = time() - $baseTs;
         }
     }
 
     return [
+        'heartbeat_at' => $heartbeatAt,
         'started_at'  => $startedAt,
+        'updated_at'  => $updatedAt,
         'finished_at' => $finishedAt,
         'age_seconds' => $ageSeconds,
         'age_label'   => sv_format_job_age($ageSeconds),
+        'age_source'  => $ageSource,
     ];
 }
 
@@ -6464,12 +6603,14 @@ function sv_job_stuck_info(array $row, array $response, int $timeoutMinutes): ar
         return [
             'stuck'  => false,
             'reason' => null,
+            'reason_code' => null,
         ];
     }
 
     $timing = sv_extract_job_timestamps($row, $response);
     $ageSeconds = $timing['age_seconds'];
     $ageMinutes = $ageSeconds !== null ? ($ageSeconds / 60) : null;
+    $ageSource  = $timing['age_source'] ?? null;
     $pid        = $response['_sv_worker_pid'] ?? null;
 
     $pidInfo = null;
@@ -6477,11 +6618,21 @@ function sv_job_stuck_info(array $row, array $response, int $timeoutMinutes): ar
         $pidInfo = sv_is_pid_running((int)$pid);
     }
 
+    if ($ageMinutes === null) {
+        return [
+            'stuck' => false,
+            'reason' => null,
+            'reason_code' => null,
+        ];
+    }
+
     $maxAge = max(1, $timeoutMinutes);
     if ($ageMinutes !== null && $ageMinutes >= $maxAge) {
+        $reasonCode = $ageSource === 'heartbeat_at' ? 'stuck_heartbeat_timeout' : 'stuck_no_activity';
         return [
             'stuck'  => true,
-            'reason' => 'timeout > ' . $maxAge . 'm',
+            'reason' => 'timeout > ' . $maxAge . 'm (' . ($ageSource ?? 'unknown') . ')',
+            'reason_code' => $reasonCode,
         ];
     }
 
@@ -6491,6 +6642,7 @@ function sv_job_stuck_info(array $row, array $response, int $timeoutMinutes): ar
             return [
                 'stuck'  => true,
                 'reason' => 'worker pid not running',
+                'reason_code' => 'stuck_no_activity',
             ];
         }
     }
@@ -6498,6 +6650,7 @@ function sv_job_stuck_info(array $row, array $response, int $timeoutMinutes): ar
     return [
         'stuck'  => false,
         'reason' => null,
+        'reason_code' => null,
     ];
 }
 
@@ -6528,8 +6681,10 @@ function sv_recover_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?call
         }
 
         $reason = $stuckInfo['reason'] ?? ('timeout > ' . $maxAgeMinutes . 'm');
+        $reasonCode = $stuckInfo['reason_code'] ?? 'stuck_no_activity';
         $response['_sv_stuck'] = true;
         $response['_sv_stuck_reason'] = $reason;
+        $response['_sv_stuck_reason_code'] = $reasonCode;
         $response['_sv_stuck_checked_at'] = $now;
 
         sv_update_job_status(
@@ -6537,12 +6692,12 @@ function sv_recover_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?call
             (int)$row['id'],
             'error',
             json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-            'stuck_timeout'
+            $reasonCode
         );
         $count++;
 
         sv_audit_log($pdo, 'job_stuck_timeout', 'jobs', (int)$row['id'], [
-            'error'        => 'stuck_timeout',
+            'error'        => $reasonCode,
             'detail'       => $reason,
             'marked_at'    => $now,
             'types_scoped' => $types,

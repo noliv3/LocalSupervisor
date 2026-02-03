@@ -120,6 +120,9 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
             'handle' => null,
             'path' => sv_ollama_runner_lock_path($config),
             'reason' => 'log_root_unavailable',
+            'status' => 'open_failed',
+            'reason_code' => 'log_root_unavailable',
+            'locked' => false,
         ];
     }
 
@@ -136,17 +139,23 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
             'handle' => null,
             'path' => $lockPath,
             'reason' => 'open_failed',
+            'status' => 'open_failed',
+            'reason_code' => 'open_failed',
+            'locked' => false,
         ];
     }
 
-    $locked = @flock($handle, LOCK_EX | LOCK_NB);
+    $locked = flock($handle, LOCK_EX | LOCK_NB);
     if (!$locked) {
-        @fclose($handle);
+        fclose($handle);
         return [
             'ok' => false,
             'handle' => null,
             'path' => $lockPath,
             'reason' => 'locked',
+            'status' => 'locked',
+            'reason_code' => 'lock_busy',
+            'locked' => true,
         ];
     }
 
@@ -181,6 +190,9 @@ function sv_ollama_acquire_runner_lock(array $config, ?string $owner = null): ar
         'path' => $lockPath,
         'payload' => $payload,
         'reason' => null,
+        'status' => 'started',
+        'reason_code' => 'lock_acquired',
+        'locked' => false,
     ];
 }
 
@@ -194,6 +206,9 @@ function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): 
             'handle' => null,
             'path' => sv_ollama_launcher_lock_path($config),
             'reason' => 'log_root_unavailable',
+            'status' => 'open_failed',
+            'reason_code' => 'log_root_unavailable',
+            'locked' => false,
         ];
     }
 
@@ -210,17 +225,23 @@ function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): 
             'handle' => null,
             'path' => $lockPath,
             'reason' => 'open_failed',
+            'status' => 'open_failed',
+            'reason_code' => 'open_failed',
+            'locked' => false,
         ];
     }
 
-    $locked = @flock($handle, LOCK_EX | LOCK_NB);
+    $locked = flock($handle, LOCK_EX | LOCK_NB);
     if (!$locked) {
-        @fclose($handle);
+        fclose($handle);
         return [
             'ok' => false,
             'handle' => null,
             'path' => $lockPath,
             'reason' => 'locked',
+            'status' => 'locked',
+            'reason_code' => 'lock_busy',
+            'locked' => true,
         ];
     }
 
@@ -253,6 +274,9 @@ function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): 
         'handle' => $handle,
         'path' => $lockPath,
         'reason' => null,
+        'status' => 'started',
+        'reason_code' => 'lock_acquired',
+        'locked' => false,
     ];
 }
 
@@ -262,8 +286,8 @@ function sv_ollama_release_runner_lock($handle): void
         return;
     }
 
-    @flock($handle, LOCK_UN);
-    @fclose($handle);
+    flock($handle, LOCK_UN);
+    fclose($handle);
 }
 
 function sv_ollama_release_launcher_lock($handle): void
@@ -272,8 +296,8 @@ function sv_ollama_release_launcher_lock($handle): void
         return;
     }
 
-    @flock($handle, LOCK_UN);
-    @fclose($handle);
+    flock($handle, LOCK_UN);
+    fclose($handle);
 }
 
 function sv_ollama_status_path(array $config): string
@@ -696,6 +720,9 @@ function sv_ollama_watchdog_stale_running(PDO $pdo, array $config, int $minutes 
     if (sv_jobs_supports_payload_json($pdo)) {
         $sql .= ', payload_json';
     }
+    if (sv_ollama_job_has_column($pdo, 'cancel_requested')) {
+        $sql .= ', cancel_requested';
+    }
     $sql .= ' FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')';
 
     $stmt = $pdo->prepare($sql);
@@ -760,17 +787,29 @@ function sv_ollama_watchdog_stale_running(PDO $pdo, array $config, int $minutes 
         $payload = sv_ollama_decode_job_payload($row);
         $attempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
         $shouldRetry = $attempts < $maxAttempts;
+        $cancelRequested = !empty($row['cancel_requested']);
+        $reasonCode = $isStale ? 'stuck_heartbeat_timeout' : 'stuck_no_activity';
 
-        if ($action === 'requeue' && $shouldRetry) {
+        if ($cancelRequested) {
+            sv_ollama_update_job_columns($pdo, $jobId, [
+                'status' => 'cancelled',
+                'cancel_requested' => 1,
+                'cancelled_at' => $nowIso,
+                'heartbeat_at' => $nowIso,
+                'last_error_code' => 'cancelled',
+                'error_message' => 'cancel_requested',
+            ], true);
+        } elseif ($action === 'requeue' && $shouldRetry) {
             sv_ollama_update_job_columns($pdo, $jobId, [
                 'status' => 'queued',
-                'cancel_requested' => 0,
                 'heartbeat_at' => $nowIso,
+                'last_error_code' => $reasonCode,
+                'error_message' => 'stale running watchdog',
             ], true);
         } else {
             sv_ollama_update_job_columns($pdo, $jobId, [
                 'status' => 'error',
-                'last_error_code' => 'stale_running',
+                'last_error_code' => $reasonCode,
                 'error_message' => 'stale running watchdog',
                 'heartbeat_at' => $nowIso,
             ], true);

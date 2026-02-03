@@ -232,8 +232,12 @@ if ($action === 'run_once') {
     if (empty($lock['ok'])) {
         $respond(200, [
             'ok' => false,
-            'status' => 'locked',
-            'reason' => 'runner_locked',
+            'status' => $lock['status'] ?? 'locked',
+            'reason' => $lock['reason'] ?? 'runner_locked',
+            'reason_code' => $lock['reason_code'] ?? ($lock['reason'] ?? 'runner_locked'),
+            'locked' => (bool)($lock['locked'] ?? false),
+            'running' => false,
+            'path' => $lock['path'] ?? null,
         ]);
     }
 
@@ -245,6 +249,7 @@ if ($action === 'run_once') {
             $respond(200, [
                 'ok' => false,
                 'status' => 'busy',
+                'reason_code' => 'concurrency_limit',
                 'running' => $running,
                 'max_concurrency' => $maxConcurrency,
             ]);
@@ -253,6 +258,9 @@ if ($action === 'run_once') {
         $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, null);
         $respond(200, [
             'ok' => true,
+            'status' => 'started',
+            'reason_code' => 'batch_complete',
+            'running' => false,
             'summary' => $summary,
             'logs' => $logs,
         ]);
