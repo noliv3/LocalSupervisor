@@ -2559,6 +2559,7 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
     $killed = false;
     $killedReason = null;
     $killFailed = false;
+    $terminationLog = [];
 
     while (true) {
         $status = proc_get_status($process);
@@ -2599,18 +2600,41 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
     }
 
     if ($killed) {
-        @proc_terminate($process);
+        $terminateOk = @proc_terminate($process);
+        $terminationLog[] = [
+            'method' => 'proc_terminate',
+            'ok' => $terminateOk,
+        ];
         usleep(200000);
         $status = proc_get_status($process);
         if (!empty($status['running'])) {
-            @proc_terminate($process);
+            $terminateOk = @proc_terminate($process);
+            $terminationLog[] = [
+                'method' => 'proc_terminate_retry',
+                'ok' => $terminateOk,
+            ];
             usleep(200000);
             $status = proc_get_status($process);
         }
         if (!empty($status['running']) && $pid !== null && stripos(PHP_OS, 'WIN') === 0) {
-            @exec('taskkill /F /PID ' . (int)$pid);
+            $taskOutput = [];
+            $taskCode = 0;
+            @exec('taskkill /F /PID ' . (int)$pid, $taskOutput, $taskCode);
+            $terminationLog[] = [
+                'method' => 'taskkill',
+                'exit_code' => $taskCode,
+                'output' => implode("\n", $taskOutput),
+            ];
+            usleep(200000);
+            $status = proc_get_status($process);
         }
-        $status = proc_get_status($process);
+
+        if (!empty($status['running']) && $pid !== null) {
+            $pidInfo = sv_is_pid_running($pid);
+            if (!($pidInfo['unknown'] ?? false) && empty($pidInfo['running'])) {
+                $status['running'] = false;
+            }
+        }
         if (!empty($status['running'])) {
             $killFailed = true;
             $killedReason = 'kill_failed';
@@ -2650,6 +2674,9 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
             ? 'kill_failed'
             : ($killedReason === 'timeout' ? 'killed_by_parent_timeout' : 'cancelled_by_parent');
         $statusLabel = $errorCode === 'cancelled' ? 'cancelled' : 'error';
+        $stageLabel = $killFailed
+            ? 'child_kill_failed'
+            : ($killedReason === 'timeout' ? 'child_timeout' : 'child_cancel');
 
         if ($errorCode !== 'cancelled') {
             sv_update_job_status($pdo, $jobId, 'error', null, $errorMessage);
@@ -2660,6 +2687,8 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
         sv_ollama_update_job_columns($pdo, $jobId, [
             'last_error_code' => $errorCode,
             'error_message' => $errorMessage,
+            'stage' => $stageLabel,
+            'stage_changed_at' => $now,
             'heartbeat_at' => $now,
         ], true);
         $progressTotal = sv_ollama_progress_bits_total($mode);
@@ -2668,15 +2697,17 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
         sv_ollama_trace_update($config, $traceFile, [
             'killed' => !$killFailed,
             'kill_failed' => $killFailed,
-            'stage_at_fail' => $killFailed
-                ? 'child_kill_failed'
-                : ($killedReason === 'timeout' ? 'child_timeout' : 'child_cancel'),
+            'stage_at_fail' => $stageLabel,
             'error_code' => $errorCode,
             'error_message' => $errorMessage,
             'transport' => null,
             'latency_ms' => null,
+            'termination' => $terminationLog,
         ]);
 
+        if ($killFailed) {
+            $logger('Ollama-Child kill failed (pid=' . ($pid ?? 'unknown') . ', reason=' . ($killedReason ?? 'unknown') . ').');
+        }
         sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
             'ts' => $now,
             'event' => 'killed',
@@ -2686,6 +2717,8 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
             'status' => $statusLabel,
             'error_code' => $errorCode,
             'error' => $errorMessage,
+            'pid' => $pid,
+            'termination' => $terminationLog,
             'trace_file' => $traceFile,
         ]);
         sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [

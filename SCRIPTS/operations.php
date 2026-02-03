@@ -2293,6 +2293,21 @@ function sv_spawn_forge_worker_for_media(
     $lockHandle = fopen($lockPath, 'c+');
     if ($lockHandle === false) {
         $recordSpawnLog('error', 'spawn_lock_open_failed');
+        if ($jobId !== null) {
+            sv_merge_job_response_metadata($pdo, $jobId, [
+                '_sv_worker_spawned'          => false,
+                '_sv_worker_spawn_skipped'    => true,
+                '_sv_worker_spawn_reason'     => 'spawn_lock_open_failed',
+                '_sv_worker_spawn_error'      => 'spawn_lock_open_failed',
+                '_sv_worker_spawn_attempt'    => date('c', $now),
+                'worker_spawn'                => 'error',
+                'worker_spawn_cmd'            => null,
+                'worker_spawn_err_snippet'    => 'spawn_lock_open_failed',
+                'worker_spawn_log_paths'      => $logPaths,
+                'worker_spawn_status'         => 'open_failed',
+                'worker_spawn_reason_code'    => 'spawn_lock_open_failed',
+            ]);
+        }
         return [
             'pid'          => null,
             'started'      => date('c', $now),
@@ -2315,6 +2330,21 @@ function sv_spawn_forge_worker_for_media(
     if (!$hasLock) {
         fclose($lockHandle);
         $recordSpawnLog('skipped', 'spawn_lock_busy');
+        if ($jobId !== null) {
+            sv_merge_job_response_metadata($pdo, $jobId, [
+                '_sv_worker_spawned'          => false,
+                '_sv_worker_spawn_skipped'    => true,
+                '_sv_worker_spawn_reason'     => 'spawn_lock_busy',
+                '_sv_worker_spawn_error'      => 'spawn_lock_busy',
+                '_sv_worker_spawn_attempt'    => date('c', $now),
+                'worker_spawn'                => 'skipped',
+                'worker_spawn_cmd'            => null,
+                'worker_spawn_err_snippet'    => 'spawn_lock_busy',
+                'worker_spawn_log_paths'      => $logPaths,
+                'worker_spawn_status'         => 'locked',
+                'worker_spawn_reason_code'    => 'spawn_lock_busy',
+            ]);
+        }
         return [
             'pid'          => null,
             'started'      => date('c', $now),
@@ -2355,23 +2385,39 @@ function sv_spawn_forge_worker_for_media(
 
         if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
             $toWindowsPath = static function (string $path): string {
-                return '"' . str_replace('/', '\\', $path) . '"';
+                return str_replace('/', '\\', $path);
             };
+            $psArg = static function (string $value): string {
+                return "'" . str_replace("'", "''", $value) . "'";
+            };
+            $psArgs = [
+                $psArg($toWindowsPath($script)),
+                $psArg('--limit=' . $effectiveLimit),
+                $psArg('--media-id=' . $mediaId),
+            ];
+            $psCommand = '$p = Start-Process -FilePath ' . $psArg($toWindowsPath($phpCli))
+                . ' -ArgumentList ' . implode(',', $psArgs)
+                . ' -RedirectStandardOutput ' . $psArg($toWindowsPath($spawnOutLog))
+                . ' -RedirectStandardError ' . $psArg($toWindowsPath($spawnErrLog))
+                . ' -PassThru; if ($p) { $p.Id }';
+            $spawnCmd = 'powershell -NoProfile -Command ' . escapeshellarg($psCommand);
 
-            $spawnCmd = 'cmd.exe /C start "" /B ' . $toWindowsPath($phpCli) . ' ' . $toWindowsPath($script)
-                . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
-                . ' >> ' . $toWindowsPath($spawnOutLog) . ' 2>> ' . $toWindowsPath($spawnErrLog);
-
-            $proc = popen($spawnCmd, 'r');
-            if ($proc !== false) {
-                pclose($proc);
+            $output = shell_exec($spawnCmd);
+            if ($output !== null && trim((string)$output) !== '') {
+                $pid = (int)trim((string)$output);
+                if ($pid <= 0) {
+                    $pid = null;
+                }
+            } else {
+                $unknown = true;
+                $spawnError = 'Kein PID aus PowerShell';
+            }
+            if ($pid !== null) {
                 $spawned    = true;
                 $spawnState = 'spawned';
             } else {
-                $spawnError = 'popen failed';
                 $spawnState = 'error';
             }
-            $unknown = true;
         } else {
             $spawnCmd = 'nohup ' . escapeshellarg($phpCli) . ' ' . escapeshellarg($script)
                 . ' --limit=' . $effectiveLimit . ' --media-id=' . $mediaId
@@ -3547,18 +3593,40 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
 
     if ($isWindows) {
         $toWindowsPath = static function (string $path): string {
-            return '"' . str_replace('/', '\\', $path) . '"';
+            return str_replace('/', '\\', $path);
         };
-        $spawnCmd = 'cmd.exe /C start "" /B ' . $cmd
-            . ' >> ' . $toWindowsPath($spawnOutLog) . ' 2>> ' . $toWindowsPath($spawnErrLog);
-        $proc = popen($spawnCmd, 'r');
-        if ($proc !== false) {
-            pclose($proc);
-            $spawned = true;
-        } else {
-            $spawnErr = 'popen failed';
+        $psArg = static function (string $value): string {
+            return "'" . str_replace("'", "''", $value) . "'";
+        };
+        $psArgs = [$psArg($toWindowsPath($script))];
+        if ($limit !== null && $limit > 0) {
+            $psArgs[] = $psArg('--limit=' . (int)$limit);
         }
-        $unknown = true;
+        if ($pathFilter !== null && trim($pathFilter) !== '') {
+            $psArgs[] = $psArg('--path=' . $pathFilter);
+        }
+        if ($mediaId !== null && $mediaId > 0) {
+            $psArgs[] = $psArg('--media-id=' . (int)$mediaId);
+        }
+        $psCommand = '$p = Start-Process -FilePath ' . $psArg($toWindowsPath($phpCli))
+            . ' -ArgumentList ' . implode(',', $psArgs)
+            . ' -RedirectStandardOutput ' . $psArg($toWindowsPath($spawnOutLog))
+            . ' -RedirectStandardError ' . $psArg($toWindowsPath($spawnErrLog))
+            . ' -PassThru; if ($p) { $p.Id }';
+        $spawnCmd = 'powershell -NoProfile -Command ' . escapeshellarg($psCommand);
+        $output = shell_exec($spawnCmd);
+        if ($output !== null && trim($output) !== '') {
+            $pid = (int)trim($output);
+            if ($pid <= 0) {
+                $pid = null;
+            }
+        } else {
+            $unknown = true;
+            $spawnErr = 'Kein PID aus PowerShell';
+        }
+        if ($pid !== null) {
+            $spawned = true;
+        }
     } else {
         $spawnCmd = 'nohup ' . $cmd
             . ' >> ' . escapeshellarg($spawnOutLog) . ' 2>> ' . escapeshellarg($spawnErrLog) . ' & echo $!';
@@ -3682,51 +3750,118 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
             'message'     => 'Log-Root nicht verfügbar.',
             'status'      => 'open_failed',
             'path'        => sv_logs_root($config),
+            'lock_path'   => null,
             'running'     => false,
             'locked'      => false,
+            'log_paths'   => [],
+        ];
+    }
+
+    $lockPath = $logsRoot . '/update_center.lock';
+    $outLog   = $logsRoot . '/update_center.out.log';
+    $errLog   = $logsRoot . '/update_center.err.log';
+    $logPaths = [
+        'stdout' => $outLog,
+        'stderr' => $errLog,
+    ];
+
+    $lockHandle = fopen($lockPath, 'c+');
+    if ($lockHandle === false) {
+        sv_log_system_error($config, 'update_center_lock_open_failed', ['path' => $lockPath]);
+        return [
+            'spawned'     => false,
+            'started'     => date('c'),
+            'error'       => 'Update-Lock konnte nicht geöffnet werden.',
+            'reason_code' => 'spawn_lock_open_failed',
+            'message'     => 'Update-Lock konnte nicht geöffnet werden.',
+            'status'      => 'open_failed',
+            'path'        => $lockPath,
+            'lock_path'   => $lockPath,
+            'running'     => false,
+            'locked'      => false,
+            'log_paths'   => $logPaths,
+        ];
+    }
+
+    $hasLock = flock($lockHandle, LOCK_EX | LOCK_NB);
+    if (!$hasLock) {
+        fclose($lockHandle);
+        return [
+            'spawned'     => false,
+            'started'     => date('c'),
+            'error'       => 'Update-Lock belegt.',
+            'reason_code' => 'spawn_lock_busy',
+            'message'     => 'Update-Lock belegt.',
+            'status'      => 'locked',
+            'path'        => $lockPath,
+            'lock_path'   => $lockPath,
+            'running'     => false,
+            'locked'      => true,
+            'log_paths'   => $logPaths,
         ];
     }
 
     $dbPathReason = null;
     $dbPath = sv_resolve_db_path($config, $dbPathReason);
     if ($dbPath === null) {
-        return [
-            'spawned'     => false,
-            'error'       => 'DB-Pfad fehlt.',
-            'reason_code' => $dbPathReason ?? 'db_path_missing',
-            'message'     => 'DB-Pfad fehlt.',
-            'status'      => 'config_failed',
-            'path'        => null,
-            'running'     => false,
-            'locked'      => false,
-        ];
+        try {
+            return [
+                'spawned'     => false,
+                'error'       => 'DB-Pfad fehlt.',
+                'reason_code' => $dbPathReason ?? 'db_path_missing',
+                'message'     => 'DB-Pfad fehlt.',
+                'status'      => 'config_failed',
+                'path'        => null,
+                'lock_path'   => $lockPath,
+                'running'     => false,
+                'locked'      => false,
+                'log_paths'   => $logPaths,
+            ];
+        } finally {
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
+        }
     }
     if (!is_file($dbPath)) {
-        return [
-            'spawned'     => false,
-            'error'       => 'DB-Datei fehlt.',
-            'reason_code' => 'db_path_missing',
-            'message'     => 'DB-Datei fehlt.',
-            'status'      => 'config_failed',
-            'path'        => $dbPath,
-            'running'     => false,
-            'locked'      => false,
-        ];
+        try {
+            return [
+                'spawned'     => false,
+                'error'       => 'DB-Datei fehlt.',
+                'reason_code' => 'db_path_missing',
+                'message'     => 'DB-Datei fehlt.',
+                'status'      => 'config_failed',
+                'path'        => $dbPath,
+                'lock_path'   => $lockPath,
+                'running'     => false,
+                'locked'      => false,
+                'log_paths'   => $logPaths,
+            ];
+        } finally {
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
+        }
     }
 
     $baseDir = sv_base_dir();
     $script  = $baseDir . '/start.ps1';
     if (!is_file($script)) {
-        return [
-            'spawned'     => false,
-            'error'       => 'start.ps1 fehlt.',
-            'reason_code' => 'script_missing',
-            'message'     => 'start.ps1 fehlt.',
-            'status'      => 'config_failed',
-            'path'        => $script,
-            'running'     => false,
-            'locked'      => false,
-        ];
+        try {
+            return [
+                'spawned'     => false,
+                'error'       => 'start.ps1 fehlt.',
+                'reason_code' => 'script_missing',
+                'message'     => 'start.ps1 fehlt.',
+                'status'      => 'config_failed',
+                'path'        => $script,
+                'lock_path'   => $lockPath,
+                'running'     => false,
+                'locked'      => false,
+                'log_paths'   => $logPaths,
+            ];
+        } finally {
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
+        }
     }
 
     $allowedActions = ['update_ff_restart', 'merge_restart'];
@@ -3739,71 +3874,73 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
     $error     = null;
     $pid       = null;
     $unknown   = false;
-    $outLog    = $logsRoot . '/update_center.out.log';
-    $errLog    = $logsRoot . '/update_center.err.log';
 
-    if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
-        $psCommand = 'powershell -NoProfile -Command '
-            . escapeshellarg(
-                '$p = Start-Process -FilePath powershell -ArgumentList '
-                . "'-NoProfile','-ExecutionPolicy','Bypass','-File','" . str_replace("'", "''", $script) . "','-Action','" . str_replace("'", "''", $action) . "'"
-                . ' -RedirectStandardOutput "' . str_replace('/', '\\', $outLog) . '" -RedirectStandardError "' . str_replace('/', '\\', $errLog) . '" -PassThru;'
-                . ' if ($p) { $p.Id }'
-            );
-        $output = shell_exec($psCommand);
-        if ($output !== null && trim($output) !== '') {
-            $pid = (int)trim($output);
-            if ($pid <= 0) {
-                $pid = null;
-            }
-        } else {
-            $unknown = true;
-            $error = 'Update-Start fehlgeschlagen.';
-        }
-        $spawned = $pid !== null;
-    } else {
-        $cmd = 'nohup pwsh -NoProfile -File ' . escapeshellarg($script) . ' -Action ' . escapeshellarg($action)
-            . ' >> ' . escapeshellarg($outLog) . ' 2>> ' . escapeshellarg($errLog) . ' & echo $!';
-        $output = shell_exec($cmd);
-        if ($output !== null && trim($output) !== '') {
-            $pid = (int)trim($output);
-            if ($pid <= 0) {
-                $pid = null;
+    try {
+        if (stripos(PHP_OS_FAMILY ?? PHP_OS, 'Windows') !== false) {
+            $psCommand = 'powershell -NoProfile -Command '
+                . escapeshellarg(
+                    '$p = Start-Process -FilePath powershell -ArgumentList '
+                    . "'-NoProfile','-ExecutionPolicy','Bypass','-File','" . str_replace("'", "''", $script) . "','-Action','" . str_replace("'", "''", $action) . "'"
+                    . ' -RedirectStandardOutput "' . str_replace('/', '\\', $outLog) . '" -RedirectStandardError "' . str_replace('/', '\\', $errLog) . '" -PassThru;'
+                    . ' if ($p) { $p.Id }'
+                );
+            $output = shell_exec($psCommand);
+            if ($output !== null && trim($output) !== '') {
+                $pid = (int)trim($output);
+                if ($pid <= 0) {
+                    $pid = null;
+                }
+            } else {
+                $unknown = true;
+                $error = 'Update-Start fehlgeschlagen.';
             }
             $spawned = $pid !== null;
         } else {
-            $error = 'Update-Start fehlgeschlagen.';
+            $cmd = 'nohup pwsh -NoProfile -File ' . escapeshellarg($script) . ' -Action ' . escapeshellarg($action)
+                . ' >> ' . escapeshellarg($outLog) . ' 2>> ' . escapeshellarg($errLog) . ' & echo $!';
+            $output = shell_exec($cmd);
+            if ($output !== null && trim($output) !== '') {
+                $pid = (int)trim($output);
+                if ($pid <= 0) {
+                    $pid = null;
+                }
+                $spawned = $pid !== null;
+            } else {
+                $error = 'Update-Start fehlgeschlagen.';
+            }
         }
-    }
 
-    $verified = false;
-    if ($pid !== null) {
-        $pidInfo = sv_is_pid_running($pid);
-        if (!($pidInfo['unknown'] ?? false) && ($pidInfo['running'] ?? false)) {
-            $verified = true;
+        $verified = false;
+        if ($pid !== null) {
+            $pidInfo = sv_is_pid_running($pid);
+            if (!($pidInfo['unknown'] ?? false) && ($pidInfo['running'] ?? false)) {
+                $verified = true;
+            }
         }
-    }
-    if (!$verified) {
-        $spawned = false;
-        $error = $error ?? 'Start nicht verifiziert.';
-    }
+        if (!$verified) {
+            $spawned = false;
+            $error = $error ?? 'Start nicht verifiziert.';
+        }
 
-    return [
-        'spawned'     => $spawned,
-        'started'     => $startedAt,
-        'pid'         => $pid,
-        'unknown'     => $unknown,
-        'error'       => $error,
-        'reason_code' => $spawned ? 'start_verified' : 'spawn_unverified',
-        'message'     => $spawned ? 'Update-Start verifiziert.' : 'Update-Start nicht verifiziert.',
-        'status'      => $spawned ? 'running' : 'start_failed',
-        'running'     => $spawned,
-        'locked'      => false,
-        'log_paths'   => [
-            'stdout' => $outLog,
-            'stderr' => $errLog,
-        ],
-    ];
+        return [
+            'spawned'     => $spawned,
+            'started'     => $startedAt,
+            'pid'         => $pid,
+            'unknown'     => $unknown,
+            'error'       => $error,
+            'reason_code' => $spawned ? 'start_verified' : 'spawn_unverified',
+            'message'     => $spawned ? 'Update-Start verifiziert.' : 'Update-Start nicht verifiziert.',
+            'status'      => $spawned ? 'running' : 'start_failed',
+            'path'        => $script,
+            'lock_path'   => $lockPath,
+            'running'     => $spawned,
+            'locked'      => false,
+            'log_paths'   => $logPaths,
+        ];
+    } finally {
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
+    }
 }
 
 function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
