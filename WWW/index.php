@@ -213,6 +213,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 try {
                     $worker  = sv_spawn_scan_worker($config, null, null, $logger, null);
+                    $workerOk = !empty($worker['running']);
 
                     foreach ($createdJobs as $jobId) {
                         sv_merge_job_response_metadata($pdo, $jobId, [
@@ -221,14 +222,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ]);
                     }
 
-                    $actionMessage = sprintf(
-                        'Scan-Jobs erstellt: created %d, skipped_dup %d, skipped_invalid %d.',
-                        $createdCount,
-                        $skippedDup,
-                        $skippedInvalid
-                    );
-                    if (!empty($createdJobs)) {
-                        $actionMessage .= ' IDs: #' . implode(', #', $createdJobs) . '.';
+                    if (!$workerOk) {
+                        $actionError = 'Scan-Worker-Start fehlgeschlagen: ' . ($worker['message'] ?? 'unbekannt');
+                    } else {
+                        $actionMessage = sprintf(
+                            'Scan-Jobs erstellt: created %d, skipped_dup %d, skipped_invalid %d.',
+                            $createdCount,
+                            $skippedDup,
+                            $skippedInvalid
+                        );
+                        if (!empty($createdJobs)) {
+                            $actionMessage .= ' IDs: #' . implode(', #', $createdJobs) . '.';
+                        }
                     }
 
                     sv_audit_log($pdo, 'scan_start', 'fs', null, [
@@ -239,6 +244,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'skipped_invalid'=> $skippedInvalid,
                         'worker_pid'     => $worker['pid'] ?? null,
                         'worker_note'    => $worker['unknown'] ? 'pid_unknown' : 'pid_recorded',
+                        'worker_status'  => $worker['status'] ?? null,
+                        'worker_reason_code' => $worker['reason_code'] ?? null,
                         'user_agent'     => $_SERVER['HTTP_USER_AGENT'] ?? null,
                     ]);
                 } catch (Throwable $e) {
@@ -267,14 +274,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (($result['total'] ?? 0) > 0) {
                     $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
                 }
-                $actionMessage = sprintf(
-                    'Rescan-Jobs eingereiht: total %d, created %d, deduped %d, errors %d. Limit angewandt: %d.',
-                    (int)($result['total'] ?? 0),
-                    (int)($result['created'] ?? 0),
-                    (int)($result['deduped'] ?? 0),
-                    (int)($result['errors'] ?? 0),
-                    $limit
-                );
+                $workerOk = $worker === null || !empty($worker['running']);
+                if (!$workerOk) {
+                    $actionError = 'Rescan-Worker-Start fehlgeschlagen: ' . ($worker['message'] ?? 'unbekannt');
+                } else {
+                    $actionMessage = sprintf(
+                        'Rescan-Jobs eingereiht: total %d, created %d, deduped %d, errors %d. Limit angewandt: %d.',
+                        (int)($result['total'] ?? 0),
+                        (int)($result['created'] ?? 0),
+                        (int)($result['deduped'] ?? 0),
+                        (int)($result['errors'] ?? 0),
+                        $limit
+                    );
+                }
                 sv_audit_log($pdo, 'rescan_start', 'fs', null, [
                     'limit'      => $limit,
                     'offset'     => $offset,
@@ -282,6 +294,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'queued'     => $result,
                     'worker_pid' => $worker['pid'] ?? null,
                     'worker_note'=> $worker && !empty($worker['unknown']) ? 'pid_unknown' : 'pid_recorded',
+                    'worker_status' => $worker['status'] ?? null,
+                    'worker_reason_code' => $worker['reason_code'] ?? null,
                     'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
                 ]);
             } catch (Throwable $e) {
@@ -309,6 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'max'   => $max,
                 ], $logger);
                 $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
+                $workerOk = !empty($worker['running']);
                 $jobId = (int)($result['job_id'] ?? 0);
                 if ($jobId > 0) {
                     sv_merge_job_response_metadata($pdo, $jobId, [
@@ -316,9 +331,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         '_sv_worker_started_at' => $worker['started'],
                     ]);
                 }
-                $actionMessage = 'Backfill-Job eingereiht: #' . (int)($result['job_id'] ?? 0) . '. Limit angewandt: ' . $chunk . '.';
-                if (!empty($result['deduped'])) {
-                    $actionMessage .= ' (bereits vorhanden)';
+                sv_audit_log($pdo, 'backfill_start', 'jobs', $jobId > 0 ? $jobId : null, [
+                    'chunk' => $chunk,
+                    'max' => $max,
+                    'job_id' => $jobId,
+                    'worker_pid' => $worker['pid'] ?? null,
+                    'worker_note' => !empty($worker['unknown']) ? 'pid_unknown' : 'pid_recorded',
+                    'worker_status' => $worker['status'] ?? null,
+                    'worker_reason_code' => $worker['reason_code'] ?? null,
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+                ]);
+                if (!$workerOk) {
+                    $actionError = 'Backfill-Worker-Start fehlgeschlagen: ' . ($worker['message'] ?? 'unbekannt');
+                } else {
+                    $actionMessage = 'Backfill-Job eingereiht: #' . (int)($result['job_id'] ?? 0) . '. Limit angewandt: ' . $chunk . '.';
+                    if (!empty($result['deduped'])) {
+                        $actionMessage .= ' (bereits vorhanden)';
+                    }
                 }
             } catch (Throwable $e) {
                 $actionError = 'Backfill-Fehler: ' . $e->getMessage();
@@ -363,7 +392,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!empty($spawn['spawned'])) {
                     $actionMessage = 'Update gestartet.';
                 } else {
-                    $actionError = 'Update-Start fehlgeschlagen.';
+                    $actionError = 'Update-Start fehlgeschlagen: ' . ($spawn['message'] ?? $spawn['error'] ?? 'unbekannt');
                 }
             } catch (Throwable $e) {
                 $actionError = 'Update-Start fehlgeschlagen: ' . $e->getMessage();
