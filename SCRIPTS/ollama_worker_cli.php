@@ -70,12 +70,12 @@ $workerPid = function_exists('getmypid') ? (int)getmypid() : null;
 $updateWorkerStatus = static function (bool $active, string $message, array $details = []) use ($config, $workerPid): void {
     $baseDetails = [
         'pid' => $workerPid,
-        'owner' => 'cli:ollama_worker_cli.php',
+        'owner' => sv_ollama_worker_owner(),
     ];
     sv_ollama_update_global_status($config, 'worker_active', $active, $message, array_merge($baseDetails, $details));
 };
 
-$lock = sv_ollama_acquire_runner_lock($config, 'cli:ollama_worker_cli.php');
+$lock = sv_ollama_acquire_runner_lock($config, sv_ollama_worker_owner());
 if (empty($lock['ok'])) {
     $reason = $lock['reason'] ?? 'lock_failed';
     if ($reason === 'locked') {
@@ -92,7 +92,7 @@ $lockPayload = $lock['payload'] ?? [
     'pid' => $workerPid,
     'started_at' => date('c'),
     'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
-    'owner' => 'cli:ollama_worker_cli.php',
+    'owner' => sv_ollama_worker_owner(),
 ];
 $lastHeartbeat = 0;
 $updateLockHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockHandle, $config, $writeErrLog): void {
