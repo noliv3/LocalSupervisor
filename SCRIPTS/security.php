@@ -170,11 +170,12 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
         $security = $config['security'] ?? [];
         $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
         $allowInsecure = !empty($security['allow_insecure_internal_cookie']);
-        $allowPersist = $secureCookie || $allowInsecure;
+        $allowCookiePersist = $secureCookie || $allowInsecure;
+        $allowSessionPersist = $allowCookiePersist || sv_is_loopback_remote_addr();
 
-        if ($allowPersist) {
+        if ($allowSessionPersist) {
             $_SESSION['sv_internal_key'] = $expectedKey;
-            if (!headers_sent()) {
+            if ($allowCookiePersist && !headers_sent()) {
                 setcookie('internal_key', $expectedKey, [
                     'expires'  => time() + 7 * 24 * 60 * 60,
                     'path'     => '/',
@@ -188,6 +189,7 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
                 'ip'     => $clientIp,
                 'source' => $providedSource,
                 'secure' => $secureCookie,
+                'cookie' => $allowCookiePersist,
             ]);
         } else {
             sv_security_log($config, 'Internal key not persisted (insecure transport)', [

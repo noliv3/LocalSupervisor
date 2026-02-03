@@ -2031,7 +2031,7 @@ function sv_run_forge_repair_job(PDO $pdo, array $config, int $mediaId, array $o
         $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
         $stmt    = $pdo->prepare(
             'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
-            . ' ELSE CONCAT(error_message, "; ", :msg) END WHERE id = :id'
+            . ' ELSE error_message || "; " || :msg END WHERE id = :id'
         );
         $stmt->execute([
             ':msg' => $message,
@@ -3682,6 +3682,33 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
             'message'     => 'Log-Root nicht verfügbar.',
             'status'      => 'open_failed',
             'path'        => sv_logs_root($config),
+            'running'     => false,
+            'locked'      => false,
+        ];
+    }
+
+    $dbPathReason = null;
+    $dbPath = sv_resolve_db_path($config, $dbPathReason);
+    if ($dbPath === null) {
+        return [
+            'spawned'     => false,
+            'error'       => 'DB-Pfad fehlt.',
+            'reason_code' => $dbPathReason ?? 'db_path_missing',
+            'message'     => 'DB-Pfad fehlt.',
+            'status'      => 'config_failed',
+            'path'        => null,
+            'running'     => false,
+            'locked'      => false,
+        ];
+    }
+    if (!is_file($dbPath)) {
+        return [
+            'spawned'     => false,
+            'error'       => 'DB-Datei fehlt.',
+            'reason_code' => 'db_path_missing',
+            'message'     => 'DB-Datei fehlt.',
+            'status'      => 'config_failed',
+            'path'        => $dbPath,
             'running'     => false,
             'locked'      => false,
         ];
@@ -6665,7 +6692,8 @@ function sv_recover_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?call
     $placeholders  = implode(',', array_fill(0, count($types), '?'));
 
     $stmt = $pdo->prepare(
-        'SELECT id, type, status, created_at, updated_at, forge_response_json, error_message FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')'
+        'SELECT id, type, status, created_at, updated_at, heartbeat_at, started_at, forge_response_json, error_message '
+        . 'FROM jobs WHERE status = "running" AND type IN (' . $placeholders . ')'
     );
     $stmt->execute($types);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -6815,7 +6843,7 @@ function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, calla
         $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
         $stmt    = $pdo->prepare(
             'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
-            . ' ELSE CONCAT(error_message, "; ", :msg) END WHERE id = :id'
+            . ' ELSE error_message || "; " || :msg END WHERE id = :id'
         );
         $stmt->execute([
             ':msg' => $message,

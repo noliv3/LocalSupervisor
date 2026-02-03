@@ -58,6 +58,35 @@ function sv_db_connect(array $config): array
     ];
 }
 
+function sv_resolve_db_path(array $config, ?string &$reason = null): ?string
+{
+    $reason = null;
+    $dsn = trim((string)($config['db']['dsn'] ?? ''));
+    if ($dsn === '') {
+        $reason = 'db_dsn_missing';
+        return null;
+    }
+    if (!str_starts_with($dsn, 'sqlite:')) {
+        $reason = 'db_dsn_not_sqlite';
+        return null;
+    }
+    $path = substr($dsn, 7);
+    if (str_starts_with($path, 'file:')) {
+        $path = substr($path, 5);
+    }
+    $path = trim($path);
+    if ($path === '' || $path === ':memory:') {
+        $reason = 'db_path_missing';
+        return null;
+    }
+    $isAbsolute = preg_match('~^(?:[A-Za-z]:\\\\|\\\\\\\\|/)~', $path) === 1;
+    if (!$isAbsolute) {
+        $path = sv_base_dir() . DIRECTORY_SEPARATOR . $path;
+    }
+
+    return $path;
+}
+
 function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
 {
     try {

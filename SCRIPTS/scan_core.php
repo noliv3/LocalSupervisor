@@ -884,6 +884,56 @@ function sv_scan_with_local_scanner(
         ];
     }
 
+    $missingAuth = [];
+    if ($token === '') {
+        if ($apiKey === '') {
+            $missingAuth[] = 'scanner.token|scanner.api_key';
+        }
+        if ($apiKey !== '' && $apiHdr === '') {
+            $missingAuth[] = 'scanner.api_key_header';
+        }
+        if ($apiKey === '' && $apiHdr !== '') {
+            $missingAuth[] = 'scanner.api_key';
+        }
+    }
+    if ($missingAuth !== []) {
+        if ($logger) {
+            $logger('Scanner nicht konfiguriert (Auth fehlt).');
+        }
+        $errorMeta = [
+            'http_status' => null,
+            'endpoint'    => null,
+            'error'       => 'scanner_auth_missing',
+            'error_code'  => 'scanner_auth_missing',
+            'reason_code' => 'scanner_auth_missing',
+            'missing_keys'=> $missingAuth,
+            'body_snippet'=> null,
+            'response_type_detected' => 'none',
+        ];
+        sv_scanner_log_event($pathsCfg, 'scanner_ingest', [
+            'media_id'    => $logContext['media_id'] ?? null,
+            'operation'   => $logContext['operation'] ?? null,
+            'file_basename' => $logContext['file_basename'] ?? basename($file),
+            'endpoint'    => null,
+            'field_name'  => null,
+            'media_type'  => null,
+            'file_size'   => @filesize($file),
+            'http_status' => null,
+            'response_type_detected' => 'config_error',
+            'response_snippet_sanitized' => null,
+        ]);
+        return [
+            'ok'         => false,
+            'error'      => 'Scanner Auth fehlt',
+            'error_meta' => $errorMeta,
+            'debug'      => [
+                'response_shape'     => 'none',
+                'merged_parts_count' => 0,
+                'fallback_used'      => false,
+            ],
+        ];
+    }
+
     $authMode = 'none';
     if ($token !== '') {
         $authMode = 'token';
