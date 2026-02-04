@@ -126,8 +126,9 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Falls `proc_open` nicht verfügbar ist, fällt der Launcher auf `exec` zurück und liefert Diagnosefelder (`spawn_method`, `spawn_ok`, `spawn_status`).
 - Unter Windows wird der Worker über PowerShell im Hidden-Window gestartet, damit keine sichtbare Konsole geöffnet wird, inkl. Spawn-Logs und verifizierter PID-Ausgabe.
 - Die Windows-Start-Process-Argumente werden als Array übergeben, damit Pfade mit Leerzeichen sauber verarbeitet werden.
-- Enqueue/Status versuchen einen Autostart, wenn Jobs pending sind und kein Worker läuft; der Launcher-Lock enthält `last_spawn_at` (Cooldown via `ollama.spawn_cooldown`).
-- Der Web-Start setzt `--max-batches` dynamisch anhand `pending_count` und `batch`, damit ein Lauf die Queue leerräumen kann.
+- Enqueue (CLI/Web/Internal) stößt einen Autostart an, wenn Jobs pending sind und kein verifizierter Worker läuft; der Launcher-Lock enthält `last_spawn_at` (Cooldown via `ollama.spawn_cooldown`).
+- Autostart setzt keine Batch-Abbrüche; der Worker läuft, bis die Queue stabil leer ist (auch wenn zwischenzeitlich neue Jobs reinkommen).
+- Spawn-Status wird in `ollama_worker_spawn.last.json` protokolliert und kann im Status-Endpoint eingesehen werden.
 - Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
 - Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
 - Der Worker schreibt `worker_active` in `LOGS/ollama_status.json` (Heartbeat), damit Start/Status verlässlich geprüft werden kann.
