@@ -118,6 +118,13 @@ function sv_ollama_launcher_lock_path(array $config): string
     return sv_log_path($config, 'ollama_launcher.lock');
 }
 
+function sv_ollama_launcher_cooldown_seconds(array $config): int
+{
+    $cooldown = $config['ollama']['spawn_cooldown'] ?? 10;
+
+    return max(1, (int)$cooldown);
+}
+
 function sv_ollama_prepare_logs_root(array $config, string $context, ?string &$error = null): ?string
 {
     $logsRoot = sv_ensure_logs_root($config, $error);
@@ -313,6 +320,133 @@ function sv_ollama_acquire_launcher_lock(array $config, ?string $owner = null): 
         'status' => 'started',
         'reason_code' => 'lock_acquired',
         'locked' => false,
+    ];
+}
+
+function sv_ollama_acquire_launcher_lock_for_spawn(array $config, ?string $owner = null, ?int $cooldownSeconds = null): array
+{
+    $logsError = null;
+    $logsRoot = sv_ollama_prepare_logs_root($config, 'launcher_lock', $logsError);
+    if ($logsRoot === null) {
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => sv_ollama_launcher_lock_path($config),
+            'reason' => 'log_root_unavailable',
+            'status' => 'open_failed',
+            'reason_code' => 'log_root_unavailable',
+            'locked' => false,
+        ];
+    }
+
+    $lockPath = $logsRoot . DIRECTORY_SEPARATOR . 'ollama_launcher.lock';
+    $handle = fopen($lockPath, 'c+');
+    if ($handle === false) {
+        $error = error_get_last();
+        sv_log_system_error($config, 'ollama_launcher_lock_open_failed', [
+            'path' => $lockPath,
+            'error' => $error['message'] ?? null,
+        ]);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'open_failed',
+            'status' => 'open_failed',
+            'reason_code' => 'open_failed',
+            'locked' => false,
+        ];
+    }
+
+    $locked = flock($handle, LOCK_EX | LOCK_NB);
+    if (!$locked) {
+        fclose($handle);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'locked',
+            'status' => 'locked',
+            'reason_code' => 'lock_busy',
+            'locked' => true,
+        ];
+    }
+
+    $cooldownSeconds = $cooldownSeconds ?? sv_ollama_launcher_cooldown_seconds($config);
+    $now = time();
+    $lastSpawnAt = null;
+    $existingPayload = null;
+    rewind($handle);
+    $raw = stream_get_contents($handle);
+    if (is_string($raw) && trim($raw) !== '') {
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            $existingPayload = $decoded;
+            if (isset($decoded['last_spawn_at'])) {
+                $lastSpawnAt = (int)$decoded['last_spawn_at'];
+            }
+        }
+    }
+
+    if ($lastSpawnAt !== null && ($now - $lastSpawnAt) < $cooldownSeconds) {
+        $remaining = max(0, $cooldownSeconds - ($now - $lastSpawnAt));
+        flock($handle, LOCK_UN);
+        fclose($handle);
+        return [
+            'ok' => false,
+            'handle' => null,
+            'path' => $lockPath,
+            'reason' => 'spawn_cooldown',
+            'status' => 'busy',
+            'reason_code' => 'spawn_cooldown',
+            'locked' => false,
+            'cooldown_remaining' => $remaining,
+            'last_spawn_at' => $lastSpawnAt,
+        ];
+    }
+
+    $payload = [
+        'pid' => null,
+        'launcher_pid' => function_exists('getmypid') ? (int)getmypid() : null,
+        'started_at' => date('c'),
+        'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
+        'owner' => $owner ?? PHP_SAPI,
+        'type' => 'launcher',
+        'last_spawn_at' => $now,
+    ];
+    if (is_array($existingPayload) && isset($existingPayload['last_spawn_at'])) {
+        $payload['last_spawn_at'] = (int)$existingPayload['last_spawn_at'];
+    }
+    $payload['last_spawn_at'] = $now;
+
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($encoded === false) {
+        sv_log_system_error($config, 'ollama_launcher_lock_encode_failed', [
+            'path' => $lockPath,
+        ]);
+    } else {
+        ftruncate($handle, 0);
+        $written = fwrite($handle, $encoded);
+        if ($written === false) {
+            $error = error_get_last();
+            sv_log_system_error($config, 'ollama_launcher_lock_write_failed', [
+                'path' => $lockPath,
+                'error' => $error['message'] ?? null,
+            ]);
+        }
+        fflush($handle);
+    }
+
+    return [
+        'ok' => true,
+        'handle' => $handle,
+        'path' => $lockPath,
+        'reason' => null,
+        'status' => 'started',
+        'reason_code' => 'lock_acquired',
+        'locked' => false,
+        'last_spawn_at' => $payload['last_spawn_at'],
+        'cooldown_seconds' => $cooldownSeconds,
     ];
 }
 
