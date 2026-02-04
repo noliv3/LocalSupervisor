@@ -82,13 +82,19 @@ function sv_is_client_local(array $config): bool
     return in_array($clientIp, $whitelist, true);
 }
 
-function sv_validate_internal_access(array $config, string $action, bool $hardFail = true): bool
+function sv_internal_access_result(array $config, string $action, array $options = []): array
 {
     $GLOBALS['sv_last_internal_key_valid'] = false;
+    $allowLoopbackBypass = !empty($options['allow_loopback_bypass']);
 
     if (sv_is_cli()) {
         $GLOBALS['sv_last_internal_key_valid'] = true;
-        return true;
+        return [
+            'ok' => true,
+            'status' => 'ok',
+            'reason_code' => 'cli',
+            'bypass' => false,
+        ];
     }
 
     $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
@@ -97,10 +103,11 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
             'action' => $action,
             'ip'     => $remoteAddr,
         ]);
-        if ($hardFail) {
-            sv_security_error(403, 'Forbidden: local internal access only.');
-        }
-        return false;
+        return [
+            'ok' => false,
+            'status' => 'forbidden',
+            'reason_code' => 'non_loopback',
+        ];
     }
 
     $security    = $config['security'] ?? [];
@@ -109,20 +116,36 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
     $whitelist   = $security['ip_whitelist'] ?? [];
 
     if ($expectedKey === '') {
-        sv_security_log($config, 'Security misconfigured: internal key missing', ['action' => $action, 'ip' => $clientIp]);
-        if ($hardFail) {
-            sv_security_error(500, 'Security misconfigured: internal_api_key missing.');
+        if ($allowLoopbackBypass) {
+            sv_security_log($config, 'Internal access allowed: localhost bypass (missing key)', [
+                'action' => $action,
+                'ip' => $clientIp,
+            ]);
+            $GLOBALS['sv_last_internal_key_valid'] = true;
+            return [
+                'ok' => true,
+                'status' => 'ok',
+                'reason_code' => 'localhost_bypass_missing_key',
+                'bypass' => true,
+            ];
         }
-        return false;
+
+        sv_security_log($config, 'Security misconfigured: internal key missing', ['action' => $action, 'ip' => $clientIp]);
+        return [
+            'ok' => false,
+            'status' => 'config_failed',
+            'reason_code' => 'internal_key_missing',
+        ];
     }
 
     if (is_array($whitelist) && $whitelist !== []) {
         if (!in_array($clientIp, $whitelist, true)) {
             sv_security_log($config, 'IP not whitelisted', ['action' => $action, 'ip' => $clientIp]);
-            if ($hardFail) {
-                sv_security_error(403, 'Forbidden: IP not whitelisted.');
-            }
-            return false;
+            return [
+                'ok' => false,
+                'status' => 'forbidden',
+                'reason_code' => 'ip_not_whitelisted',
+            ];
         }
     }
 
@@ -151,19 +174,35 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
     }
 
     if ($providedKey === '') {
-        if ($hardFail) {
-            sv_security_log($config, 'Missing internal key', ['action' => $action, 'ip' => $clientIp]);
-            sv_security_error(403, 'Forbidden: internal key required.');
+        if ($allowLoopbackBypass) {
+            sv_security_log($config, 'Internal access allowed: localhost bypass (no key)', [
+                'action' => $action,
+                'ip' => $clientIp,
+            ]);
+            $GLOBALS['sv_last_internal_key_valid'] = true;
+            return [
+                'ok' => true,
+                'status' => 'ok',
+                'reason_code' => 'localhost_bypass_no_key',
+                'bypass' => true,
+            ];
         }
-        return false;
+
+        sv_security_log($config, 'Missing internal key', ['action' => $action, 'ip' => $clientIp]);
+        return [
+            'ok' => false,
+            'status' => 'forbidden',
+            'reason_code' => 'internal_key_required',
+        ];
     }
 
     if (!hash_equals($expectedKey, $providedKey)) {
-        if ($hardFail) {
-            sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp, 'source' => $providedSource]);
-            sv_security_error(403, 'Forbidden: invalid internal key.');
-        }
-        return false;
+        sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp, 'source' => $providedSource]);
+        return [
+            'ok' => false,
+            'status' => 'forbidden',
+            'reason_code' => 'internal_key_invalid',
+        ];
     }
 
     if (in_array($providedSource, ['header', 'get', 'post'], true) && sv_is_loopback_remote_addr()) {
@@ -201,7 +240,42 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
     }
 
     $GLOBALS['sv_last_internal_key_valid'] = true;
-    return true;
+    return [
+        'ok' => true,
+        'status' => 'ok',
+        'reason_code' => 'internal_key_valid',
+        'bypass' => false,
+        'source' => $providedSource,
+    ];
+}
+
+function sv_validate_internal_access(array $config, string $action, bool $hardFail = true): bool
+{
+    $result = sv_internal_access_result($config, $action, ['allow_loopback_bypass' => false]);
+    if (!empty($result['ok'])) {
+        return true;
+    }
+
+    if ($hardFail) {
+        $status = $result['status'] ?? 'forbidden';
+        $reason = $result['reason_code'] ?? 'forbidden';
+        $httpCode = $status === 'config_failed' ? 500 : 403;
+        $message = 'Forbidden.';
+        if ($reason === 'non_loopback') {
+            $message = 'Forbidden: local internal access only.';
+        } elseif ($reason === 'internal_key_missing') {
+            $message = 'Security misconfigured: internal_api_key missing.';
+        } elseif ($reason === 'ip_not_whitelisted') {
+            $message = 'Forbidden: IP not whitelisted.';
+        } elseif ($reason === 'internal_key_required') {
+            $message = 'Forbidden: internal key required.';
+        } elseif ($reason === 'internal_key_invalid') {
+            $message = 'Forbidden: invalid internal key.';
+        }
+        sv_security_error($httpCode, $message);
+    }
+
+    return false;
 }
 
 function sv_require_internal_access(array $config, string $action): void

@@ -16,7 +16,16 @@ $respond = static function (int $code, array $payload): void {
 
 try {
     $config = sv_load_config();
-    sv_require_internal_access($config, 'ollama_internal');
+    $access = sv_internal_access_result($config, 'ollama_internal', ['allow_loopback_bypass' => true]);
+    if (empty($access['ok'])) {
+        $status = $access['status'] ?? 'forbidden';
+        $httpCode = $status === 'config_failed' ? 500 : 403;
+        $respond($httpCode, [
+            'ok' => false,
+            'status' => $status,
+            'reason_code' => $access['reason_code'] ?? 'forbidden',
+        ]);
+    }
     $pdo = sv_open_pdo($config);
 } catch (Throwable $e) {
     $respond(500, ['ok' => false, 'error' => $e->getMessage()]);
@@ -107,11 +116,18 @@ if ($action === 'status') {
         }
     }
 
+    $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+
     $respond(200, [
         'ok' => true,
         'counts' => $counts,
         'mode_counts' => $modeCounts,
         'last_errors' => $errors,
+        'worker_running' => !empty($workerState['running']),
+        'worker_reason_code' => $workerState['reason_code'] ?? null,
+        'worker_source' => $workerState['source'] ?? null,
+        'worker_pid' => $workerState['pid'] ?? null,
         'logs_path' => $logsPath,
     ]);
 }
@@ -120,11 +136,19 @@ if ($action === 'cancel') {
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId > 0 ? $jobId : null, [
+            'reason_code' => 'invalid_job_id',
+            'action' => $action,
+        ]);
         $respond(400, ['ok' => false, 'error' => 'Invalid job_id.']);
     }
 
     $job = sv_ollama_fetch_job_control($pdo, $jobId);
     if ($job === []) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId, [
+            'reason_code' => 'job_not_found',
+            'action' => $action,
+        ]);
         $respond(404, ['ok' => false, 'error' => 'Job not found.']);
     }
 
@@ -198,11 +222,19 @@ if ($action === 'job_status') {
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId > 0 ? $jobId : null, [
+            'reason_code' => 'invalid_job_id',
+            'action' => $action,
+        ]);
         $respond(400, ['ok' => false, 'error' => 'Invalid job_id.']);
     }
 
     $job = sv_ollama_fetch_job_control($pdo, $jobId);
     if ($job === []) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId, [
+            'reason_code' => 'job_not_found',
+            'action' => $action,
+        ]);
         $respond(404, ['ok' => false, 'error' => 'Job not found.']);
     }
 

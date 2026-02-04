@@ -514,6 +514,26 @@ function sv_ollama_read_worker_lock_payload(array $config): ?array
     return is_array($decoded) ? $decoded : null;
 }
 
+function sv_ollama_php_server_pid(array $config): ?int
+{
+    $path = sv_log_path($config, 'php_server.pid');
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+
+    $raw = file_get_contents($path);
+    if (!is_string($raw)) {
+        return null;
+    }
+    $raw = trim($raw);
+    if ($raw === '' || !preg_match('/^\d+$/', $raw)) {
+        return null;
+    }
+
+    $pid = (int)$raw;
+    return $pid > 0 ? $pid : null;
+}
+
 function sv_ollama_validate_worker_lock_payload(?array $payload, ?int $currentPid = null): array
 {
     if (!is_array($payload)) {
@@ -550,6 +570,97 @@ function sv_ollama_validate_worker_lock_payload(?array $payload, ?int $currentPi
         'valid' => true,
         'pid' => $pid,
         'owner' => $owner,
+    ];
+}
+
+function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, int $maxAgeSeconds = 30): array
+{
+    $currentPid = $currentPid ?? (function_exists('getmypid') ? (int)getmypid() : null);
+    $phpServerPid = sv_ollama_php_server_pid($config);
+    $lockSnapshot = sv_ollama_worker_lock_snapshot($config, $currentPid);
+
+    $lockPid = $lockSnapshot['pid'] ?? null;
+    if ($lockPid !== null && $phpServerPid !== null && (int)$lockPid === (int)$phpServerPid) {
+        return [
+            'running' => false,
+            'reason_code' => 'server_pid',
+            'source' => 'lock',
+            'lock' => $lockSnapshot,
+            'heartbeat' => null,
+            'pid' => $lockPid,
+            'php_server_pid' => $phpServerPid,
+        ];
+    }
+
+    if (!empty($lockSnapshot['valid']) && !empty($lockSnapshot['active'])) {
+        return [
+            'running' => true,
+            'reason_code' => 'lock_active',
+            'source' => 'lock',
+            'lock' => $lockSnapshot,
+            'heartbeat' => null,
+            'pid' => $lockPid,
+            'php_server_pid' => $phpServerPid,
+        ];
+    }
+
+    $status = sv_ollama_read_global_status($config);
+    $worker = is_array($status['worker_active'] ?? null) ? $status['worker_active'] : [];
+    $updatedAt = is_string($worker['updated_at'] ?? null) ? $worker['updated_at'] : '';
+    $updatedTs = $updatedAt !== '' ? strtotime($updatedAt) : false;
+    $active = !empty($worker['active']);
+    $details = is_array($worker['details'] ?? null) ? $worker['details'] : [];
+    $workerPid = isset($details['pid']) ? (int)$details['pid'] : null;
+    $workerOwner = is_string($details['owner'] ?? null) ? trim((string)$details['owner']) : '';
+
+    if ($workerPid !== null && $phpServerPid !== null && $workerPid === $phpServerPid) {
+        return [
+            'running' => false,
+            'reason_code' => 'server_pid',
+            'source' => 'heartbeat',
+            'lock' => $lockSnapshot,
+            'heartbeat' => $worker,
+            'pid' => $workerPid,
+            'php_server_pid' => $phpServerPid,
+        ];
+    }
+
+    $heartbeatAgeOk = $updatedTs !== false && (time() - (int)$updatedTs) <= $maxAgeSeconds;
+    if ($active && $heartbeatAgeOk && sv_ollama_is_valid_worker_owner($workerOwner)) {
+        return [
+            'running' => true,
+            'reason_code' => 'heartbeat_active',
+            'source' => 'heartbeat',
+            'lock' => $lockSnapshot,
+            'heartbeat' => $worker,
+            'pid' => $workerPid,
+            'php_server_pid' => $phpServerPid,
+        ];
+    }
+
+    $reason = 'no_heartbeat';
+    if ($active && !$heartbeatAgeOk) {
+        $reason = 'heartbeat_stale';
+    } elseif ($active && !sv_ollama_is_valid_worker_owner($workerOwner)) {
+        $reason = 'invalid_owner';
+    } elseif (!empty($lockSnapshot['valid'])) {
+        if (!empty($lockSnapshot['pid_alive'])) {
+            $reason = 'lock_inactive';
+        } else {
+            $reason = $lockSnapshot['reason'] ?? 'lock_invalid';
+        }
+    } elseif (!empty($lockSnapshot['reason'])) {
+        $reason = (string)$lockSnapshot['reason'];
+    }
+
+    return [
+        'running' => false,
+        'reason_code' => $reason,
+        'source' => 'none',
+        'lock' => $lockSnapshot,
+        'heartbeat' => $worker,
+        'pid' => $workerPid ?? $lockPid,
+        'php_server_pid' => $phpServerPid,
     ];
 }
 
@@ -650,16 +761,8 @@ function sv_ollama_worker_status_snapshot(array $config): array
 
 function sv_ollama_worker_recent(array $config, int $maxAgeSeconds): bool
 {
-    $snapshot = sv_ollama_worker_status_snapshot($config);
-    if (!empty($snapshot['active'])) {
-        return true;
-    }
-    $updatedTs = $snapshot['updated_ts'] ?? null;
-    if ($updatedTs === null) {
-        return false;
-    }
-
-    return (time() - $updatedTs) <= $maxAgeSeconds;
+    $state = sv_ollama_worker_running_state($config, null, $maxAgeSeconds);
+    return !empty($state['running']);
 }
 
 function sv_ollama_mode_requires_image(string $mode): bool
