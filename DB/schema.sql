@@ -185,9 +185,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_error_code     TEXT,
     created_at          TEXT NOT NULL,
     updated_at          TEXT,
+    started_at          TEXT,
     forge_request_json  TEXT,
     forge_response_json TEXT,
+    payload_json        TEXT,
     error_message       TEXT,
+    worker_pid          INTEGER,
+    worker_owner        TEXT,
+    stage               TEXT,
+    stage_changed_at    TEXT,
 
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (prompt_id) REFERENCES prompts(id) ON DELETE SET NULL
