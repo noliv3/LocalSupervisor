@@ -406,28 +406,31 @@ function sv_ollama_spawn_worker(
     $verifyAttempts = 0;
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
     $phpServerPid = sv_ollama_php_server_pid($config);
-    $deadline = microtime(true) + max(1, $verifyWindowSeconds);
-    do {
-        $verifyAttempts++;
-        $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
-        $lockSnapshot = $workerState['lock'] ?? null;
-        $runnerLocked = !empty($lockSnapshot['active']);
-        if ($pid !== null) {
-            $pidInfo = sv_is_pid_running((int)$pid);
-            if (!($pidInfo['unknown'] ?? false)) {
-                $pidAlive = (bool)($pidInfo['running'] ?? false);
-            }
-        }
-        $pidMatchesServer = $pid !== null && ($pid === $currentPid || ($phpServerPid !== null && $pid === $phpServerPid));
-        $pidVerified = $pidAlive && !$pidMatchesServer;
-        if (!empty($workerState['running']) || $pidVerified) {
-            $verified = true;
-            break;
-        }
-        usleep(250000);
-    } while (microtime(true) < $deadline);
 
-    $finalStatus = $verified ? 'running' : 'start_failed';
+    if ($verifyWindowSeconds > 0) {
+        $deadline = microtime(true) + $verifyWindowSeconds;
+        do {
+            $verifyAttempts++;
+            $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+            $lockSnapshot = $workerState['lock'] ?? null;
+            $runnerLocked = !empty($lockSnapshot['active']);
+            if ($pid !== null) {
+                $pidInfo = sv_is_pid_running((int)$pid);
+                if (!($pidInfo['unknown'] ?? false)) {
+                    $pidAlive = (bool)($pidInfo['running'] ?? false);
+                }
+            }
+            $pidMatchesServer = $pid !== null && ($pid === $currentPid || ($phpServerPid !== null && $pid === $phpServerPid));
+            $pidVerified = $pidAlive && !$pidMatchesServer;
+            if (!empty($workerState['running']) || $pidVerified) {
+                $verified = true;
+                break;
+            }
+            usleep(250000);
+        } while (microtime(true) < $deadline);
+    }
+
+    $finalStatus = $verified ? 'running' : 'started';
     $finalReasonCode = $verified ? 'start_verified' : 'spawn_unverified';
     $spawnLastPayload['status'] = $finalStatus;
     $spawnLastPayload['reason_code'] = $finalReasonCode;
@@ -2216,7 +2219,7 @@ function sv_ollama_enqueue_jobs_with_autostart(
     string $source,
     callable $enqueueWork,
     int $batch = 5,
-    int $verifySeconds = 5
+    int $verifySeconds = 0
 ): array {
     $enqueueResult = $enqueueWork();
     $pendingJobs = sv_ollama_pending_job_count($pdo);

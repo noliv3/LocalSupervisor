@@ -121,8 +121,8 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ### Runner/Tracing Hinweise
 - `WWW/ollama.php?action=run` startet jetzt den CLI-Worker und gibt sofort zurück (kein Web-Prozess-Blocking).
-- Der Start bestätigt nach Worker-Lock/Heartbeat, frischem Worker-Status **oder** geprüftem PID (verhindert false negatives bei langsamen Starts).
-- `max_seconds` steuert die Verifikations-Phase des Worker-Starts (längere Starts können im UI berücksichtigt werden).
+- Der Start wird im Web-Request nicht mehr verifiziert; Status-Polling bestätigt später Worker-Lock/Heartbeat, frischen Worker-Status **oder** geprüften PID (verhindert false negatives bei langsamen Starts).
+- `spawn_unverified` kennzeichnet einen ausgelösten Start ohne Verifikation im Request (kein Fehlerstatus).
 - Falls `proc_open` nicht verfügbar ist, fällt der Launcher auf `exec` zurück und liefert Diagnosefelder (`spawn_method`, `spawn_ok`, `spawn_status`).
 - Unter Windows wird der Worker über PowerShell im Hidden-Window gestartet, damit keine sichtbare Konsole geöffnet wird, inkl. Spawn-Logs und verifizierter PID-Ausgabe.
 - Die Windows-Start-Process-Argumente werden als Array übergeben, damit Pfade mit Leerzeichen sauber verarbeitet werden.

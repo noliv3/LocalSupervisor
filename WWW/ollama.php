@@ -464,15 +464,18 @@ if ($action === 'run') {
         $maxBatchesArg = '--max-batches=' . $maxBatches;
         $args = [$maxBatchesArg, $batchArg];
         $logPaths = sv_ollama_worker_log_paths($config);
-        $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, max(1, $maxSeconds), $logPaths);
+        $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, 0, $logPaths);
         $verified = (bool)($spawn['verified'] ?? false);
-        $note = !$verified && $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
+        $spawnStatus = $spawn['status'] ?? 'start_failed';
+        $spawnReasonCode = $spawn['reason_code'] ?? 'start_failed';
+        $startTriggered = $spawnStatus === 'started' && $spawnReasonCode === 'spawn_unverified';
+        $note = !$verified && !$startTriggered && $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
 
         $respond(200, [
-            'ok' => $verified,
-            'status' => $spawn['status'] ?? 'start_failed',
-            'reason' => $verified ? null : 'start_failed',
-            'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+            'ok' => $verified || $startTriggered,
+            'status' => $spawnStatus,
+            'reason' => ($verified || $startTriggered) ? null : 'start_failed',
+            'reason_code' => $spawnReasonCode,
             'pid' => $spawn['pid'] ?? null,
             'pid_alive' => $spawn['pid_alive'] ?? null,
             'spawn_method' => $spawn['spawn_method'] ?? null,
@@ -491,13 +494,13 @@ if ($action === 'run') {
             'worker_reason_code' => $spawn['worker_reason_code'] ?? null,
             'worker_source' => $spawn['worker_source'] ?? null,
             'diagnostics' => [
-                'status' => $spawn['status'] ?? 'start_failed',
-                'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+                'status' => $spawnStatus,
+                'reason_code' => $spawnReasonCode,
                 'pid' => $spawn['pid'] ?? null,
                 'lock_path' => sv_ollama_runner_lock_path($config),
                 'spawn' => [
-                    'status' => $spawn['status'] ?? 'start_failed',
-                    'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+                    'status' => $spawnStatus,
+                    'reason_code' => $spawnReasonCode,
                     'pid' => $spawn['pid'] ?? null,
                     'log_paths' => $spawn['spawn_logs'] ?? null,
                 ],

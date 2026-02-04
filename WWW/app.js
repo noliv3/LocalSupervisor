@@ -1456,6 +1456,12 @@
             showMessage('success', 'Batch', `Batch läuft (${config.batch}, ${config.maxSeconds}s).`);
             return postAction({ action: 'run', batch: config.batch, max_seconds: config.maxSeconds })
                 .then((data) => {
+                    if (data && data.status === 'started' && data.reason_code === 'spawn_unverified') {
+                        showMessage('success', 'Status', 'Start ausgelöst. Verifikation erfolgt über Status-Polling.');
+                        pollStatus();
+                        pollJobs();
+                        return { status: 'started' };
+                    }
                     if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy' || data.status === 'blocked' || data.status === 'start_failed')) {
                         let text = '';
                         let type = 'success';
