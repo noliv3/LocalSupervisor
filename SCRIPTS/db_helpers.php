@@ -218,7 +218,7 @@ function sv_db_expected_schema(): array
             'controlnet', 'source_metadata', 'raw_text',
         ],
         'jobs' => [
-            'id', 'media_id', 'prompt_id', 'type', 'status', 'created_at', 'updated_at',
+            'id', 'media_id', 'prompt_id', 'type', 'status', 'created_at', 'updated_at', 'started_at',
             'forge_request_json', 'forge_response_json', 'payload_json', 'error_message',
             'last_error_code', 'heartbeat_at', 'not_before', 'progress_bits', 'progress_bits_total',
             'cancel_requested', 'cancelled_at',
