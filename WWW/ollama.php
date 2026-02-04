@@ -55,6 +55,429 @@ try {
 
 $logsPath = sv_logs_root($config);
 
+$pendingJobsCount = static function () use ($pdo): int {
+    $jobTypes = sv_ollama_job_types();
+    if ($jobTypes === []) {
+        return 0;
+    }
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $stmt = $pdo->prepare(
+        'SELECT COUNT(*) AS cnt FROM jobs WHERE status IN ("queued", "pending") AND type IN (' . $placeholders . ')'
+    );
+    $stmt->execute($jobTypes);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return (int)($row['cnt'] ?? 0);
+};
+
+$computeMaxBatches = static function (int $pendingJobs, int $batchSize): int {
+    $batchSize = max(1, $batchSize);
+    if ($pendingJobs <= 0) {
+        return 1;
+    }
+
+    return max(1, (int)ceil($pendingJobs / $batchSize));
+};
+
+$spawnOllamaWorker = static function (
+    array $config,
+    string $phpCli,
+    string $workerScript,
+    array $args,
+    string $logsPath,
+    int $verifyWindowSeconds
+): array {
+    $pid = null;
+    $spawned = false;
+    $spawnError = null;
+    $spawnOutLog = $logsPath . '/ollama_worker_spawn.out.log';
+    $spawnErrLog = $logsPath . '/ollama_worker_spawn.err.log';
+    $spawnLast = $logsPath . '/ollama_worker_spawn.last.json';
+    $cmd = '';
+    $spawnMethod = 'proc_open';
+    $spawnOk = false;
+    $spawnStatus = null;
+
+    if (stripos(PHP_OS, 'WIN') === 0) {
+        $phpBinary = $phpCli !== '' ? $phpCli : PHP_BINARY;
+        $toWindowsPath = static function (string $path): string {
+            return str_replace('/', '\\', $path);
+        };
+        $psArg = static function (string $value): string {
+            return "'" . str_replace("'", "''", $value) . "'";
+        };
+        $psArgs = [$psArg($toWindowsPath($workerScript))];
+        foreach ($args as $arg) {
+            $psArgs[] = $psArg($arg);
+        }
+        $psCommand = '$p = Start-Process -WindowStyle Hidden -FilePath ' . $psArg($toWindowsPath($phpBinary))
+            . ' -ArgumentList ' . implode(',', $psArgs)
+            . ' -RedirectStandardOutput ' . $psArg($toWindowsPath($spawnOutLog))
+            . ' -RedirectStandardError ' . $psArg($toWindowsPath($spawnErrLog))
+            . ' -PassThru; if ($p) { $p.Id }';
+        $cmd = 'powershell -NoProfile -WindowStyle Hidden -Command ' . escapeshellarg($psCommand);
+
+        $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
+        if (is_resource($process)) {
+            $pidOutput = null;
+            $stderrOutput = null;
+            if (isset($pipes[1]) && is_resource($pipes[1])) {
+                $pidOutput = stream_get_contents($pipes[1]);
+                fclose($pipes[1]);
+            }
+            if (isset($pipes[2]) && is_resource($pipes[2])) {
+                $stderrOutput = stream_get_contents($pipes[2]);
+                fclose($pipes[2]);
+            }
+            $spawnStatus = proc_close($process);
+            if (is_string($pidOutput) && trim($pidOutput) !== '') {
+                $pidCandidate = (int)trim($pidOutput);
+                if ($pidCandidate > 0) {
+                    $pid = $pidCandidate;
+                }
+            }
+            $spawned = $spawnStatus === 0;
+            $spawnOk = $spawned && $pid !== null;
+            if ($spawned && $pid === null) {
+                $spawnError = 'Kein PID aus PowerShell';
+            } elseif (!$spawned && is_string($stderrOutput) && trim($stderrOutput) !== '') {
+                $spawnError = trim($stderrOutput);
+            }
+        } else {
+            $spawnMethod = 'exec';
+            $output = [];
+            $statusCode = null;
+            exec($cmd, $output, $statusCode);
+            $spawnStatus = $statusCode;
+            if (is_array($output) && $output !== []) {
+                $pidCandidate = (int)trim((string)end($output));
+                if ($pidCandidate > 0) {
+                    $pid = $pidCandidate;
+                }
+            }
+            $spawned = $statusCode === 0;
+            $spawnOk = $spawned && $pid !== null;
+            if ($spawned && $pid === null) {
+                $spawnError = 'Kein PID aus PowerShell';
+            }
+        }
+    } else {
+        $command = escapeshellarg($phpCli) . ' ' . escapeshellarg($workerScript) . ' ' . implode(' ', array_map('escapeshellarg', $args));
+        $shellCommand = 'nohup ' . $command
+            . ' >> ' . escapeshellarg($spawnOutLog)
+            . ' 2>> ' . escapeshellarg($spawnErrLog)
+            . ' & echo $!';
+        $cmd = 'sh -c ' . escapeshellarg($shellCommand);
+        $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
+        if (is_resource($process)) {
+            if (isset($pipes[1]) && is_resource($pipes[1])) {
+                $pidOutput = stream_get_contents($pipes[1]);
+                $pid = is_string($pidOutput) ? (int)trim($pidOutput) : null;
+                fclose($pipes[1]);
+            }
+            if (isset($pipes[2]) && is_resource($pipes[2])) {
+                fclose($pipes[2]);
+            }
+            $spawnStatus = proc_close($process);
+            $spawned = $spawnStatus === 0;
+            $spawnOk = $spawned && $pid !== null;
+            if ($spawned && $pid === null) {
+                $spawnError = 'Kein PID aus shell';
+            }
+        } else {
+            $error = error_get_last();
+            $spawnError = $error['message'] ?? 'proc_open_failed';
+            $spawnMethod = 'exec';
+            $output = [];
+            $statusCode = null;
+            exec($cmd, $output, $statusCode);
+            $spawnStatus = $statusCode;
+            if (is_array($output) && $output !== []) {
+                $pid = (int)trim((string)end($output));
+            }
+            $spawned = $statusCode === 0;
+            $spawnOk = $spawned && $pid !== null;
+            if ($spawned && $pid === null) {
+                $spawnError = 'Kein PID aus shell_exec';
+            }
+        }
+    }
+
+    $spawnLastPayload = [
+        'ts' => date('c'),
+        'php' => $phpCli,
+        'script' => $workerScript,
+        'args' => $args,
+        'cmd' => $cmd,
+        'status' => null,
+        'reason_code' => null,
+        'spawned' => $spawned,
+        'error' => $spawnError,
+        'pid' => $pid,
+        'log_paths' => [
+            'out' => $spawnOutLog,
+            'err' => $spawnErrLog,
+        ],
+    ];
+    $writeSpawnLast = static function (array $payload) use ($spawnLast, $config): void {
+        $spawnLastJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($spawnLastJson !== false) {
+            $written = file_put_contents($spawnLast, $spawnLastJson);
+            if ($written === false) {
+                $error = error_get_last();
+                sv_log_system_error($config, 'ollama_spawn_last_write_failed', [
+                    'path' => $spawnLast,
+                    'error' => $error['message'] ?? null,
+                ]);
+            }
+        } else {
+            sv_log_system_error($config, 'ollama_spawn_last_encode_failed', [
+                'path' => $spawnLast,
+            ]);
+        }
+    };
+
+    $errSnippet = null;
+    if (is_file($spawnErrLog) && is_readable($spawnErrLog)) {
+        $errContents = file_get_contents($spawnErrLog);
+        if (is_string($errContents) && $errContents !== '') {
+            $errSnippet = mb_substr($errContents, -800);
+        }
+    }
+
+    if (!$spawned) {
+        $spawnLastPayload['status'] = 'start_failed';
+        $spawnLastPayload['reason_code'] = 'start_failed';
+        $writeSpawnLast($spawnLastPayload);
+        return [
+            'ok' => false,
+            'status' => 'start_failed',
+            'reason_code' => 'start_failed',
+            'pid' => $pid,
+            'spawn_method' => $spawnMethod,
+            'spawn_ok' => $spawnOk,
+            'spawn_status' => $spawnStatus,
+            'spawned' => $spawned,
+            'spawn_error' => $spawnError,
+            'err_snippet' => $errSnippet,
+            'spawn_last' => $spawnLast,
+            'spawn_logs' => [
+                'out' => $spawnOutLog,
+                'err' => $spawnErrLog,
+            ],
+            'verified' => false,
+            'runner_locked' => false,
+            'verify_attempts' => 0,
+            'pid_alive' => null,
+            'worker_reason_code' => null,
+            'worker_source' => null,
+        ];
+    }
+
+    $verified = false;
+    $runnerLocked = false;
+    $workerState = null;
+    $pidAlive = null;
+    $verifyAttempts = 0;
+    $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
+    $phpServerPid = sv_ollama_php_server_pid($config);
+    $deadline = microtime(true) + max(1, $verifyWindowSeconds);
+    do {
+        $verifyAttempts++;
+        $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+        $lockSnapshot = $workerState['lock'] ?? null;
+        $runnerLocked = !empty($lockSnapshot['active']);
+        if ($pid !== null) {
+            $pidInfo = sv_is_pid_running((int)$pid);
+            if (!($pidInfo['unknown'] ?? false)) {
+                $pidAlive = (bool)($pidInfo['running'] ?? false);
+            }
+        }
+        $pidMatchesServer = $pid !== null && ($pid === $currentPid || ($phpServerPid !== null && $pid === $phpServerPid));
+        $pidVerified = $pidAlive && !$pidMatchesServer;
+        if (!empty($workerState['running']) || $pidVerified) {
+            $verified = true;
+            break;
+        }
+        usleep(250000);
+    } while (microtime(true) < $deadline);
+
+    $finalStatus = $verified ? 'running' : 'start_failed';
+    $finalReasonCode = $verified ? 'start_verified' : 'spawn_unverified';
+    $spawnLastPayload['status'] = $finalStatus;
+    $spawnLastPayload['reason_code'] = $finalReasonCode;
+    $writeSpawnLast($spawnLastPayload);
+
+    return [
+        'ok' => $verified,
+        'status' => $finalStatus,
+        'reason_code' => $finalReasonCode,
+        'pid' => $pid,
+        'pid_alive' => $pidAlive,
+        'spawn_method' => $spawnMethod,
+        'spawn_ok' => $spawnOk,
+        'spawn_status' => $spawnStatus,
+        'runner_locked' => $runnerLocked,
+        'verified' => $verified,
+        'spawned' => $spawned,
+        'spawn_error' => $spawnError,
+        'err_snippet' => $errSnippet,
+        'spawn_last' => $spawnLast,
+        'spawn_logs' => [
+            'out' => $spawnOutLog,
+            'err' => $spawnErrLog,
+        ],
+        'verify_attempts' => $verifyAttempts,
+        'worker_reason_code' => $workerState['reason_code'] ?? null,
+        'worker_source' => $workerState['source'] ?? null,
+    ];
+};
+
+$attemptAutoStart = static function (
+    string $source,
+    int $pendingJobs,
+    int $batch,
+    int $verifySeconds
+) use (
+    $config,
+    $pdo,
+    $logsPath,
+    $pendingJobsCount,
+    $computeMaxBatches,
+    $spawnOllamaWorker
+): array {
+    $logPaths = [
+        'out' => $logsPath . '/ollama_worker_spawn.out.log',
+        'err' => $logsPath . '/ollama_worker_spawn.err.log',
+    ];
+
+    if ($pendingJobs <= 0) {
+        return [
+            'ok' => false,
+            'status' => 'skipped',
+            'reason_code' => 'no_pending',
+            'spawned' => false,
+            'skipped' => true,
+            'pid' => null,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    if (!empty($workerState['running'])) {
+        return [
+            'ok' => false,
+            'status' => 'skipped',
+            'reason_code' => 'worker_running',
+            'spawned' => false,
+            'skipped' => true,
+            'pid' => $workerState['pid'] ?? null,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    $maxConcurrency = sv_ollama_max_concurrency($config);
+    $running = sv_ollama_running_job_count($pdo);
+    if ($running >= $maxConcurrency) {
+        return [
+            'ok' => false,
+            'status' => 'busy',
+            'reason_code' => 'concurrency_limit',
+            'spawned' => false,
+            'skipped' => true,
+            'running' => $running,
+            'max_concurrency' => $maxConcurrency,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    $logger = static function (string $message): void {
+    };
+    $preflight = sv_ollama_preflight($pdo, $config, $logger);
+    if (empty($preflight['ok'])) {
+        return [
+            'ok' => false,
+            'status' => 'config_failed',
+            'reason_code' => $preflight['reason'] ?? 'preflight_failed',
+            'spawned' => false,
+            'skipped' => true,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    $spawnLock = sv_ollama_acquire_launcher_lock_for_spawn(
+        $config,
+        'web:ollama.php:' . $source,
+        sv_ollama_launcher_cooldown_seconds($config)
+    );
+    if (empty($spawnLock['ok'])) {
+        return [
+            'ok' => false,
+            'status' => $spawnLock['status'] ?? 'locked',
+            'reason_code' => $spawnLock['reason_code'] ?? ($spawnLock['reason'] ?? 'launcher_locked'),
+            'spawned' => false,
+            'skipped' => true,
+            'pid' => null,
+            'lock_path' => $spawnLock['path'] ?? null,
+            'cooldown_remaining' => $spawnLock['cooldown_remaining'] ?? null,
+            'last_spawn_at' => $spawnLock['last_spawn_at'] ?? null,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    try {
+        $phpCli = sv_get_php_cli($config);
+        if ($phpCli === '') {
+            $respond(200, [
+                'ok' => false,
+                'status' => 'config_failed',
+                'reason' => 'php_cli_missing',
+                'reason_code' => 'php_cli_missing',
+                'running' => false,
+                'locked' => false,
+            ]);
+        }
+        $workerScript = realpath(__DIR__ . '/../SCRIPTS/ollama_worker_cli.php');
+        if ($workerScript === false || $phpCli === '') {
+            return [
+                'ok' => false,
+                'status' => 'config_failed',
+                'reason_code' => $workerScript === false ? 'worker_script_missing' : 'php_cli_missing',
+                'spawned' => false,
+                'skipped' => false,
+                'pid' => null,
+                'source' => $source,
+                'log_paths' => $logPaths,
+            ];
+        }
+
+        $pending = $pendingJobsCount();
+        $maxBatches = $computeMaxBatches($pending, $batch);
+        $args = [
+            '--max-batches=' . $maxBatches,
+            '--batch=' . $batch,
+        ];
+        $spawn = $spawnOllamaWorker($config, $phpCli, $workerScript, $args, $logsPath, $verifySeconds);
+        $spawn['source'] = $source;
+        $spawn['pending_jobs'] = $pending;
+        $spawn['max_batches'] = $maxBatches;
+        $spawn['batch'] = $batch;
+        $spawn['spawned'] = (bool)($spawn['spawned'] ?? false);
+        $spawn['skipped'] = false;
+        $spawn['log_paths'] = $spawn['spawn_logs'] ?? $logPaths;
+
+        return $spawn;
+    } finally {
+        sv_ollama_release_launcher_lock($spawnLock['handle']);
+    }
+};
+
 if ($action === 'status') {
     $jobTypes = sv_ollama_job_types();
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
@@ -129,6 +552,8 @@ if ($action === 'status') {
 
     $globalStatus = sv_ollama_read_global_status($config);
     $ollamaDownActive = !empty($globalStatus['ollama_down']['active']);
+    $pendingAuto = $counts['queued'] + $counts['pending'];
+    $autoStart = $attemptAutoStart('status', $pendingAuto, 5, 5);
 
     $respond(200, [
         'ok' => true,
@@ -145,6 +570,7 @@ if ($action === 'status') {
         'worker_pid' => $workerState['pid'] ?? null,
         'global_status' => $globalStatus,
         'blocked_by_ollama' => $ollamaDownActive,
+        'autostart' => $autoStart,
     ]);
 }
 
@@ -360,10 +786,14 @@ if ($action === 'enqueue') {
         }
     }
 
+    $pendingAuto = $pendingJobsCount();
+    $autoStart = $attemptAutoStart('enqueue', $pendingAuto, 5, 5);
+
     $respond(200, [
         'ok' => true,
         'summary' => $summary,
         'logs' => $logs,
+        'autostart' => $autoStart,
     ]);
 }
 
@@ -372,21 +802,6 @@ if ($action === 'run') {
     $maxSeconds = $_POST['max_seconds'] ?? ($jsonBody['max_seconds'] ?? null);
     $batch = $batch !== null ? (int)$batch : 5;
     $maxSeconds = $maxSeconds !== null ? (int)$maxSeconds : 20;
-    $pendingJobsCount = static function () use ($pdo): int {
-        $jobTypes = sv_ollama_job_types();
-        if ($jobTypes === []) {
-            return 0;
-        }
-        $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
-        $stmt = $pdo->prepare(
-            'SELECT COUNT(*) AS cnt FROM jobs WHERE status IN ("queued", "pending") AND type IN (' . $placeholders . ')'
-        );
-        $stmt->execute($jobTypes);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        return (int)($row['cnt'] ?? 0);
-    };
-
     $lock = sv_ollama_acquire_launcher_lock($config, 'web:ollama.php');
     if (empty($lock['ok'])) {
         $respond(200, [
@@ -451,275 +866,51 @@ if ($action === 'run') {
             $respond(500, ['ok' => false, 'error' => 'Worker script missing.']);
         }
         $batchArg = '--batch=' . $batch;
-        $maxBatchesArg = '--max-batches=1';
-        $pid = null;
-        $spawned = false;
-        $spawnError = null;
-        $spawnOutLog = $logsPath . '/ollama_worker_spawn.out.log';
-        $spawnErrLog = $logsPath . '/ollama_worker_spawn.err.log';
-        $spawnLast = $logsPath . '/ollama_worker_spawn.last.json';
-        $cmd = '';
-        $args = [$maxBatchesArg, $batchArg];
-
-        $spawnMethod = 'proc_open';
-        $spawnOk = false;
-        $spawnStatus = null;
-        if (stripos(PHP_OS, 'WIN') === 0) {
-            $phpBinary = $phpCli !== '' ? $phpCli : PHP_BINARY;
-            $psPhpBinary = str_replace('"', '`"', $phpBinary);
-            $workerArg = '"' . str_replace('"', '`"', $workerScript) . '" ' . $maxBatchesArg . ' ' . $batchArg;
-            $psOutLog = str_replace('"', '`"', $spawnOutLog);
-            $psErrLog = str_replace('"', '`"', $spawnErrLog);
-            $psCommand = '$proc = Start-Process -WindowStyle Hidden -FilePath "' . $psPhpBinary . '" -ArgumentList "' . $workerArg . '"'
-                . ' -RedirectStandardOutput "' . $psOutLog . '" -RedirectStandardError "' . $psErrLog . '" -PassThru; $proc.Id';
-            $cmd = 'powershell -NoProfile -WindowStyle Hidden -Command ' . escapeshellarg($psCommand);
-            $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
-            if (is_resource($process)) {
-                $pidOutput = null;
-                if (isset($pipes[1]) && is_resource($pipes[1])) {
-                    $pidOutput = stream_get_contents($pipes[1]);
-                    fclose($pipes[1]);
-                }
-                if (isset($pipes[2]) && is_resource($pipes[2])) {
-                    fclose($pipes[2]);
-                }
-                $spawnStatus = proc_close($process);
-                if (is_string($pidOutput) && trim($pidOutput) !== '') {
-                    $pidCandidate = (int)trim($pidOutput);
-                    if ($pidCandidate > 0) {
-                        $pid = $pidCandidate;
-                    }
-                }
-                $spawned = $spawnStatus === 0;
-                $spawnOk = $spawned && $pid !== null;
-                if ($spawned && $pid === null) {
-                    $spawnError = 'Kein PID aus PowerShell';
-                }
-            } else {
-                $spawnMethod = 'exec';
-                $output = [];
-                $statusCode = null;
-                exec($cmd, $output, $statusCode);
-                $spawnStatus = $statusCode;
-                if (is_array($output) && $output !== []) {
-                    $pidCandidate = (int)trim((string)end($output));
-                    if ($pidCandidate > 0) {
-                        $pid = $pidCandidate;
-                    }
-                }
-                $spawned = $statusCode === 0;
-                $spawnOk = $spawned && $pid !== null;
-                if ($spawned && $pid === null) {
-                    $spawnError = 'Kein PID aus PowerShell';
-                }
-            }
-        } else {
-            $command = escapeshellarg($phpCli) . ' ' . escapeshellarg($workerScript) . ' ' . $maxBatchesArg . ' ' . $batchArg;
-            $shellCommand = 'nohup ' . $command
-                . ' >> ' . escapeshellarg($spawnOutLog)
-                . ' 2>> ' . escapeshellarg($spawnErrLog)
-                . ' & echo $!';
-            $cmd = 'sh -c ' . escapeshellarg($shellCommand);
-            $process = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, __DIR__);
-            if (is_resource($process)) {
-                if (isset($pipes[1]) && is_resource($pipes[1])) {
-                    $pidOutput = stream_get_contents($pipes[1]);
-                    $pid = is_string($pidOutput) ? (int)trim($pidOutput) : null;
-                    fclose($pipes[1]);
-                }
-                if (isset($pipes[2]) && is_resource($pipes[2])) {
-                    fclose($pipes[2]);
-                }
-                $spawnStatus = proc_close($process);
-                $spawned = $spawnStatus === 0;
-                $spawnOk = $spawned && $pid !== null;
-                if ($spawned && $pid === null) {
-                    $spawnError = 'Kein PID aus shell';
-                }
-            } else {
-                $error = error_get_last();
-                $spawnError = $error['message'] ?? 'proc_open_failed';
-                $spawnMethod = 'exec';
-                $output = [];
-                $statusCode = null;
-                exec($cmd, $output, $statusCode);
-                $spawnStatus = $statusCode;
-                if (is_array($output) && $output !== []) {
-                    $pid = (int)trim((string)end($output));
-                }
-                $spawned = $statusCode === 0;
-                $spawnOk = $spawned && $pid !== null;
-                if ($spawned && $pid === null) {
-                    $spawnError = 'Kein PID aus shell_exec';
-                }
-            }
-        }
-
-        $spawnLastPayload = [
-            'ts' => date('c'),
-            'php' => $phpCli,
-            'script' => $workerScript,
-            'args' => $args,
-            'cmd' => $cmd,
-            'status' => null,
-            'reason_code' => null,
-            'spawned' => $spawned,
-            'error' => $spawnError,
-            'pid' => $pid,
-            'log_paths' => [
-                'out' => $spawnOutLog,
-                'err' => $spawnErrLog,
-            ],
-        ];
-        $writeSpawnLast = static function (array $payload) use ($spawnLast, $config): void {
-            $spawnLastJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            if ($spawnLastJson !== false) {
-                $written = file_put_contents($spawnLast, $spawnLastJson);
-                if ($written === false) {
-                    $error = error_get_last();
-                    sv_log_system_error($config, 'ollama_spawn_last_write_failed', [
-                        'path' => $spawnLast,
-                        'error' => $error['message'] ?? null,
-                    ]);
-                }
-            } else {
-                sv_log_system_error($config, 'ollama_spawn_last_encode_failed', [
-                    'path' => $spawnLast,
-                ]);
-            }
-        };
-
-        $errSnippet = null;
-        if (is_file($spawnErrLog) && is_readable($spawnErrLog)) {
-            $errContents = file_get_contents($spawnErrLog);
-            if (is_string($errContents) && $errContents !== '') {
-                $errSnippet = mb_substr($errContents, -800);
-            }
-        }
-
-        if (!$spawned) {
-            $spawnLastPayload['status'] = 'start_failed';
-            $spawnLastPayload['reason_code'] = 'spawn_failed';
-            $writeSpawnLast($spawnLastPayload);
-            $pendingJobs = $pendingJobsCount();
-            $note = $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
-            $respond(200, [
-                'ok' => false,
-                'status' => 'start_failed',
-                'reason' => 'start_failed',
-                'reason_code' => 'spawn_failed',
-                'running' => false,
-                'locked' => false,
-                'pid' => $pid,
-                'spawn_method' => $spawnMethod,
-                'spawn_ok' => $spawnOk,
-                'spawn_status' => $spawnStatus,
-                'spawned' => $spawned,
-                'spawn_error' => $spawnError,
-                'err_snippet' => $errSnippet,
-                'spawn_last' => $spawnLast,
-                'spawn_logs' => [
-                    'out' => $spawnOutLog,
-                    'err' => $spawnErrLog,
-                ],
-                'diagnostics' => [
-                    'status' => 'start_failed',
-                    'reason_code' => 'spawn_failed',
-                    'pid' => $pid,
-                    'lock_path' => sv_ollama_runner_lock_path($config),
-                    'spawn' => [
-                        'status' => 'start_failed',
-                        'reason_code' => 'spawn_failed',
-                        'pid' => $pid,
-                        'log_paths' => [
-                            'out' => $spawnOutLog,
-                            'err' => $spawnErrLog,
-                        ],
-                    ],
-                    'jobs_pending' => $pendingJobs,
-                    'note' => $note,
-                ],
-            ]);
-        }
-
-        $verified = false;
-        $runnerLocked = false;
-        $workerState = null;
-        $pidAlive = null;
-        $verifyWindow = max(1, $maxSeconds);
-        $verifyAttempts = 0;
-        $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
-        $phpServerPid = sv_ollama_php_server_pid($config);
-        $deadline = microtime(true) + $verifyWindow;
-        do {
-            $verifyAttempts++;
-            $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
-            $lockSnapshot = $workerState['lock'] ?? null;
-            $runnerLocked = !empty($lockSnapshot['active']);
-            if ($pid !== null) {
-                $pidInfo = sv_is_pid_running((int)$pid);
-                if (!($pidInfo['unknown'] ?? false)) {
-                    $pidAlive = (bool)($pidInfo['running'] ?? false);
-                }
-            }
-            $pidMatchesServer = $pid !== null && ($pid === $currentPid || ($phpServerPid !== null && $pid === $phpServerPid));
-            $pidVerified = $pidAlive && !$pidMatchesServer;
-            if (!empty($workerState['running']) || $pidVerified) {
-                $verified = true;
-                break;
-            }
-            usleep(250000);
-        } while (microtime(true) < $deadline);
-
-        $finalStatus = $verified ? 'running' : 'start_failed';
-        $finalReasonCode = $verified ? 'start_verified' : 'spawn_unverified';
-        $spawnLastPayload['status'] = $finalStatus;
-        $spawnLastPayload['reason_code'] = $finalReasonCode;
-        $writeSpawnLast($spawnLastPayload);
         $pendingJobs = $pendingJobsCount();
+        $maxBatches = $computeMaxBatches($pendingJobs, $batch);
+        $maxBatchesArg = '--max-batches=' . $maxBatches;
+        $args = [$maxBatchesArg, $batchArg];
+        $spawn = $spawnOllamaWorker($config, $phpCli, $workerScript, $args, $logsPath, max(1, $maxSeconds));
+        $verified = (bool)($spawn['verified'] ?? false);
         $note = !$verified && $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
 
         $respond(200, [
             'ok' => $verified,
-            'status' => $finalStatus,
+            'status' => $spawn['status'] ?? 'start_failed',
             'reason' => $verified ? null : 'start_failed',
-            'reason_code' => $finalReasonCode,
-            'pid' => $pid,
-            'pid_alive' => $pidAlive,
-            'spawn_method' => $spawnMethod,
-            'spawn_ok' => $spawnOk,
-            'spawn_status' => $spawnStatus,
-            'runner_locked' => $runnerLocked,
+            'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+            'pid' => $spawn['pid'] ?? null,
+            'pid_alive' => $spawn['pid_alive'] ?? null,
+            'spawn_method' => $spawn['spawn_method'] ?? null,
+            'spawn_ok' => $spawn['spawn_ok'] ?? null,
+            'spawn_status' => $spawn['spawn_status'] ?? null,
+            'runner_locked' => $spawn['runner_locked'] ?? false,
             'verified' => $verified,
-            'spawned' => $spawned,
-            'spawn_error' => $spawnError,
-            'err_snippet' => $errSnippet,
-            'spawn_last' => $spawnLast,
-            'spawn_logs' => [
-                'out' => $spawnOutLog,
-                'err' => $spawnErrLog,
-            ],
-            'verify_attempts' => $verifyAttempts,
+            'spawned' => $spawn['spawned'] ?? false,
+            'spawn_error' => $spawn['spawn_error'] ?? null,
+            'err_snippet' => $spawn['err_snippet'] ?? null,
+            'spawn_last' => $spawn['spawn_last'] ?? null,
+            'spawn_logs' => $spawn['spawn_logs'] ?? null,
+            'verify_attempts' => $spawn['verify_attempts'] ?? 0,
             'running' => $verified,
-            'locked' => $runnerLocked,
-            'worker_reason_code' => $workerState['reason_code'] ?? null,
-            'worker_source' => $workerState['source'] ?? null,
+            'locked' => $spawn['runner_locked'] ?? false,
+            'worker_reason_code' => $spawn['worker_reason_code'] ?? null,
+            'worker_source' => $spawn['worker_source'] ?? null,
             'diagnostics' => [
-                'status' => $finalStatus,
-                'reason_code' => $finalReasonCode,
-                'pid' => $pid,
+                'status' => $spawn['status'] ?? 'start_failed',
+                'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+                'pid' => $spawn['pid'] ?? null,
                 'lock_path' => sv_ollama_runner_lock_path($config),
                 'spawn' => [
-                    'status' => $finalStatus,
-                    'reason_code' => $finalReasonCode,
-                    'pid' => $pid,
-                    'log_paths' => [
-                        'out' => $spawnOutLog,
-                        'err' => $spawnErrLog,
-                    ],
+                    'status' => $spawn['status'] ?? 'start_failed',
+                    'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+                    'pid' => $spawn['pid'] ?? null,
+                    'log_paths' => $spawn['spawn_logs'] ?? null,
                 ],
                 'jobs_pending' => $pendingJobs,
                 'note' => $note,
+                'max_batches' => $maxBatches,
+                'batch' => $batch,
             ],
         ]);
     } finally {
