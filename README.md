@@ -79,6 +79,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 ### Ollama Enqueue + Service Loop
 - Prompt-Templates kommen aus `PROMPTS/ollama/*.txt`.
 - Beim Start prüft der Worker die Prompt-Dateien und die Modellverfügbarkeit; fehlende Assets blockieren den Ollama-Worker (globaler Status).
+- Web/Internal-Enqueue startet den Ollama-Worker serverseitig automatisch, sofern Jobs anstehen und kein Worker läuft (Launcher-Lock verhindert Doppelstarts).
 - Jobs anlegen:
   ```bash
   php SCRIPTS/ollama_enqueue_cli.php --mode=caption|title|prompt_eval|tags_normalize|quality|nsfw_classify|prompt_recon|embed|all --limit=N --since=YYYY-MM-DD --all --missing-title --missing-caption
@@ -135,13 +136,13 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ### Logpfade
 - **Log-Root:** `paths.logs` aus der Config, sonst `LOGS/`
-- **Ollama-Worker:** `LOGS/ollama_worker.lock`, `LOGS/ollama_worker.err.log`
+- **Ollama-Worker:** `LOGS/ollama_worker.lock`, `LOGS/ollama_worker.out.log`, `LOGS/ollama_worker.err.log`
 - **Ollama-Launcher:** `LOGS/ollama_launcher.lock`
 - **Ollama-Jobs:** `LOGS/ollama_jobs.jsonl`, `LOGS/ollama_errors.jsonl`
 - **Ollama-Service:** `LOGS/ollama_service.jsonl`
 - **Ollama-Status:** `LOGS/ollama_status.json`
 - **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`
-- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.*`
+- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.last.json`
 - **System-Fehlerlog:** `LOGS/system_errors.jsonl` (kritische IO/Spawn-Fehler)
 
 ## Web UI Seiten

@@ -497,10 +497,14 @@ if ($action === 'enqueue') {
         }
     }
 
+    $pendingAuto = sv_ollama_pending_job_count($pdo);
+    $autoStart = sv_ollama_attempt_autostart($config, $pdo, 'internal_enqueue', $pendingAuto, 5, 5);
+
     $respond(200, [
         'ok' => true,
         'summary' => $summary,
         'logs' => $logs,
+        'autostart' => $autoStart,
     ]);
 }
 
