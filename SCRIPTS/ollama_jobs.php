@@ -168,6 +168,23 @@ function sv_ollama_worker_log_paths(array $config): array
     ];
 }
 
+function sv_ollama_read_spawn_last(array $config): ?array
+{
+    $paths = sv_ollama_worker_log_paths($config);
+    $path = $paths['spawn_last'] ?? null;
+    if (!is_string($path) || $path === '' || !is_file($path) || !is_readable($path)) {
+        return null;
+    }
+
+    $raw = file_get_contents($path);
+    if (!is_string($raw) || trim($raw) === '') {
+        return null;
+    }
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : null;
+}
+
 function sv_ollama_spawn_worker(
     array $config,
     string $phpCli,
@@ -497,7 +514,7 @@ function sv_ollama_attempt_autostart(
 
     $logger = static function (string $message): void {
     };
-    $preflight = sv_ollama_preflight($pdo, $config, $logger);
+    $preflight = sv_ollama_preflight($pdo, $config, $logger, false);
     if (empty($preflight['ok'])) {
         return [
             'ok' => false,
@@ -559,16 +576,12 @@ function sv_ollama_attempt_autostart(
             ];
         }
 
-        $pending = sv_ollama_pending_job_count($pdo);
-        $maxBatches = sv_ollama_compute_max_batches($pending, $batch);
         $args = [
-            '--max-batches=' . $maxBatches,
             '--batch=' . $batch,
         ];
         $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, $verifySeconds, $logPaths);
         $spawn['source'] = $source;
-        $spawn['pending_jobs'] = $pending;
-        $spawn['max_batches'] = $maxBatches;
+        $spawn['pending_jobs'] = sv_ollama_pending_job_count($pdo);
         $spawn['batch'] = $batch;
         $spawn['spawned'] = (bool)($spawn['spawned'] ?? false);
         $spawn['skipped'] = false;
@@ -1445,20 +1458,22 @@ function sv_ollama_check_model_availability(array $config): array
     ];
 }
 
-function sv_ollama_preflight(PDO $pdo, array $config, callable $logger): array
+function sv_ollama_preflight(PDO $pdo, array $config, callable $logger, bool $writeStatus = true): array
 {
     $promptCheck = sv_ollama_check_prompt_templates($config);
     if (empty($promptCheck['ok'])) {
-        sv_ollama_update_global_status(
-            $config,
-            'missing_prompts',
-            true,
-            'Prompt-Templates fehlen oder sind leer.',
-            [
-                'prompt_dir' => $promptCheck['prompt_dir'] ?? null,
-                'missing' => $promptCheck['missing'] ?? [],
-            ]
-        );
+        if ($writeStatus) {
+            sv_ollama_update_global_status(
+                $config,
+                'missing_prompts',
+                true,
+                'Prompt-Templates fehlen oder sind leer.',
+                [
+                    'prompt_dir' => $promptCheck['prompt_dir'] ?? null,
+                    'missing' => $promptCheck['missing'] ?? [],
+                ]
+            );
+        }
         $logger('Ollama-Preflight: Prompt-Templates fehlen/leer.');
         return [
             'ok' => false,
@@ -1466,20 +1481,24 @@ function sv_ollama_preflight(PDO $pdo, array $config, callable $logger): array
         ];
     }
 
-    sv_ollama_update_global_status($config, 'missing_prompts', false);
+    if ($writeStatus) {
+        sv_ollama_update_global_status($config, 'missing_prompts', false);
+    }
 
     $modelCheck = sv_ollama_check_model_availability($config);
     if (empty($modelCheck['ok'])) {
-        sv_ollama_update_global_status(
-            $config,
-            'missing_models',
-            true,
-            'Ollama-Modelle fehlen.',
-            [
-                'missing' => $modelCheck['missing'] ?? [],
-                'error' => $modelCheck['error'] ?? null,
-            ]
-        );
+        if ($writeStatus) {
+            sv_ollama_update_global_status(
+                $config,
+                'missing_models',
+                true,
+                'Ollama-Modelle fehlen.',
+                [
+                    'missing' => $modelCheck['missing'] ?? [],
+                    'error' => $modelCheck['error'] ?? null,
+                ]
+            );
+        }
         $logger('Ollama-Preflight: Modelle fehlen.');
         return [
             'ok' => false,
@@ -1487,7 +1506,9 @@ function sv_ollama_preflight(PDO $pdo, array $config, callable $logger): array
         ];
     }
 
-    sv_ollama_update_global_status($config, 'missing_models', false);
+    if ($writeStatus) {
+        sv_ollama_update_global_status($config, 'missing_models', false);
+    }
 
     return [
         'ok' => true,
@@ -2187,6 +2208,25 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, boo
 function sv_ollama_log_jsonl(array $config, string $filename, array $payload): void
 {
     sv_write_jsonl_log($config, $filename, $payload);
+}
+
+function sv_ollama_enqueue_jobs_with_autostart(
+    PDO $pdo,
+    array $config,
+    string $source,
+    callable $enqueueWork,
+    int $batch = 5,
+    int $verifySeconds = 5
+): array {
+    $enqueueResult = $enqueueWork();
+    $pendingJobs = sv_ollama_pending_job_count($pdo);
+    $autostart = sv_ollama_attempt_autostart($config, $pdo, $source, $pendingJobs, $batch, $verifySeconds);
+
+    return [
+        'enqueue' => $enqueueResult,
+        'pending_jobs' => $pendingJobs,
+        'autostart' => $autostart,
+    ];
 }
 
 function sv_enqueue_ollama_job(PDO $pdo, array $config, int $mediaId, string $mode, array $payload, callable $logger): array

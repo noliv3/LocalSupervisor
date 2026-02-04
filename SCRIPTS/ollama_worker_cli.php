@@ -125,6 +125,8 @@ $updateLockHeartbeat = static function (bool $force = false) use (&$lockPayload,
 };
 
 $batchCount = 0;
+$emptyStreak = 0;
+$minEmptyChecks = 2;
 $aggregate = [
     'total' => 0,
     'done' => 0,
@@ -175,21 +177,43 @@ try {
         ]);
 
         $total = (int)($summary['total'] ?? 0);
-        if ($maxBatches !== null && $batchCount >= $maxBatches) {
-            break;
+        $pending = null;
+        $runningJobs = null;
+        if ($total === 0 || ($maxBatches !== null && $batchCount >= $maxBatches)) {
+            $pending = sv_ollama_pending_job_count($pdo);
+            $runningJobs = sv_ollama_running_job_count($pdo);
         }
-        if ($loop) {
-            if ($maxMinutes !== null && (time() - $startedAt) >= ($maxMinutes * 60)) {
+
+        if ($total === 0 && ($pending ?? 0) === 0 && ($runningJobs ?? 0) === 0) {
+            $emptyStreak++;
+        } elseif ($total === 0) {
+            $emptyStreak = 0;
+        } else {
+            $emptyStreak = 0;
+        }
+
+        if ($maxBatches !== null && $batchCount >= $maxBatches) {
+            if (($pending ?? 0) === 0 && ($runningJobs ?? 0) === 0 && $emptyStreak >= $minEmptyChecks) {
                 break;
             }
-            if ($total === 0 && $sleepMs > 0) {
+        }
+
+        if ($maxMinutes !== null && (time() - $startedAt) >= ($maxMinutes * 60)) {
+            break;
+        }
+
+        if ($total === 0) {
+            if ($sleepMs > 0) {
                 usleep($sleepMs * 1000);
+            }
+            if ($emptyStreak >= $minEmptyChecks) {
+                break;
             }
             continue;
         }
 
-        if ($total === 0) {
-            break;
+        if ($loop) {
+            continue;
         }
     }
 
