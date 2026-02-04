@@ -129,6 +129,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
 - Der Worker schreibt `worker_active` in `LOGS/ollama_status.json` (Heartbeat), damit Start/Status verlässlich geprüft werden kann.
 - Runner/Spawn-Antworten liefern ein einheitliches Statusschema mit `status` (started|running|locked|busy|start_failed|open_failed|config_failed) und `reason_code` (z. B. `spawn_unverified`, `lock_busy`, `log_root_unavailable`), damit UI/CLI zwischen Lock, IO/Path und Spawn-Fehlern eindeutig unterscheiden.
+- Worker-„running“ wird zentral über Lock/Heartbeat geprüft (`is_ollama_worker_running`): Launcher-Locks oder `web:*`-Owner zählen nicht, und Locks mit `php_server.pid` gelten als ungültig.
 
 ### Logpfade
 - **Log-Root:** `paths.logs` aus der Config, sonst `LOGS/`
@@ -155,6 +156,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Whitelist-Validierung über `ip_whitelist`.
 - Session/Cookie-Handling hängt von `allow_insecure_internal_cookie` ab.
 - Default ist lokal/loopback-orientiert.
+- Lokale Loopback-Aufrufe interner Aktionen liefern konsistente `status`/`reason_code` und können bei fehlendem Key per Localhost-Bypass freigeschaltet werden (nur Loopback).
 
 ## Minimal Tests (manuell, nicht automatisch)
 1. **Ollama down:** Runner starten → keine Jobs werden `running`, Log enthält `ollama_down`.

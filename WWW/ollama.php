@@ -16,10 +16,15 @@ $respond = static function (int $code, array $payload): void {
 
 try {
     $config = sv_load_config();
-    $isLoopback = sv_is_loopback_remote_addr();
-    $hasInternal = $isLoopback ? true : sv_validate_internal_access($config, 'ollama_actions', false);
-    if (!$isLoopback && !$hasInternal) {
-        sv_security_error(403, 'Forbidden.');
+    $access = sv_internal_access_result($config, 'ollama_actions', ['allow_loopback_bypass' => true]);
+    if (empty($access['ok'])) {
+        $status = $access['status'] ?? 'forbidden';
+        $httpCode = $status === 'config_failed' ? 500 : 403;
+        $respond($httpCode, [
+            'ok' => false,
+            'status' => $status,
+            'reason_code' => $access['reason_code'] ?? 'forbidden',
+        ]);
     }
     $pdo = sv_open_pdo($config);
 } catch (Throwable $e) {
@@ -118,7 +123,8 @@ if ($action === 'status') {
     $maxConcurrency = sv_ollama_max_concurrency($config);
     $running = sv_ollama_running_job_count($pdo);
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
-    $lockSnapshot = sv_ollama_worker_lock_snapshot($config, $currentPid);
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    $lockSnapshot = $workerState['lock'] ?? null;
     $runnerLocked = !empty($lockSnapshot['active']);
 
     $globalStatus = sv_ollama_read_global_status($config);
@@ -133,6 +139,10 @@ if ($action === 'status') {
         'running' => $running,
         'max_concurrency' => $maxConcurrency,
         'runner_locked' => $runnerLocked,
+        'worker_running' => !empty($workerState['running']),
+        'worker_reason_code' => $workerState['reason_code'] ?? null,
+        'worker_source' => $workerState['source'] ?? null,
+        'worker_pid' => $workerState['pid'] ?? null,
         'global_status' => $globalStatus,
         'blocked_by_ollama' => $ollamaDownActive,
     ]);
@@ -551,29 +561,33 @@ if ($action === 'run') {
             'script' => $workerScript,
             'args' => $args,
             'cmd' => $cmd,
+            'status' => null,
+            'reason_code' => null,
             'spawned' => $spawned,
             'error' => $spawnError,
             'pid' => $pid,
-            'logs' => [
+            'log_paths' => [
                 'out' => $spawnOutLog,
                 'err' => $spawnErrLog,
             ],
         ];
-        $spawnLastJson = json_encode($spawnLastPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        if ($spawnLastJson !== false) {
-            $written = file_put_contents($spawnLast, $spawnLastJson);
-            if ($written === false) {
-                $error = error_get_last();
-                sv_log_system_error($config, 'ollama_spawn_last_write_failed', [
+        $writeSpawnLast = static function (array $payload) use ($spawnLast, $config): void {
+            $spawnLastJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if ($spawnLastJson !== false) {
+                $written = file_put_contents($spawnLast, $spawnLastJson);
+                if ($written === false) {
+                    $error = error_get_last();
+                    sv_log_system_error($config, 'ollama_spawn_last_write_failed', [
+                        'path' => $spawnLast,
+                        'error' => $error['message'] ?? null,
+                    ]);
+                }
+            } else {
+                sv_log_system_error($config, 'ollama_spawn_last_encode_failed', [
                     'path' => $spawnLast,
-                    'error' => $error['message'] ?? null,
                 ]);
             }
-        } else {
-            sv_log_system_error($config, 'ollama_spawn_last_encode_failed', [
-                'path' => $spawnLast,
-            ]);
-        }
+        };
 
         $errSnippet = null;
         if (is_file($spawnErrLog) && is_readable($spawnErrLog)) {
@@ -584,6 +598,9 @@ if ($action === 'run') {
         }
 
         if (!$spawned) {
+            $spawnLastPayload['status'] = 'start_failed';
+            $spawnLastPayload['reason_code'] = 'spawn_failed';
+            $writeSpawnLast($spawnLastPayload);
             $pendingJobs = $pendingJobsCount();
             $note = $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
             $respond(200, [
@@ -627,25 +644,27 @@ if ($action === 'run') {
 
         $verified = false;
         $runnerLocked = false;
-        $workerRecent = false;
+        $workerState = null;
         $pidAlive = null;
         $verifyWindow = max(1, $maxSeconds);
         $verifyAttempts = 0;
         $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
+        $phpServerPid = sv_ollama_php_server_pid($config);
         $deadline = microtime(true) + $verifyWindow;
         do {
             $verifyAttempts++;
-            $lockSnapshot = sv_ollama_worker_lock_snapshot($config, $currentPid);
+            $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+            $lockSnapshot = $workerState['lock'] ?? null;
             $runnerLocked = !empty($lockSnapshot['active']);
-
-            $workerRecent = sv_ollama_worker_recent($config, 8);
             if ($pid !== null) {
                 $pidInfo = sv_is_pid_running((int)$pid);
                 if (!($pidInfo['unknown'] ?? false)) {
                     $pidAlive = (bool)($pidInfo['running'] ?? false);
                 }
             }
-            if ($runnerLocked || $workerRecent || $pidAlive || sv_ollama_running_job_count($pdo) > 0) {
+            $pidMatchesServer = $pid !== null && ($pid === $currentPid || ($phpServerPid !== null && $pid === $phpServerPid));
+            $pidVerified = $pidAlive && !$pidMatchesServer;
+            if (!empty($workerState['running']) || $pidVerified) {
                 $verified = true;
                 break;
             }
@@ -654,6 +673,9 @@ if ($action === 'run') {
 
         $finalStatus = $verified ? 'running' : 'start_failed';
         $finalReasonCode = $verified ? 'start_verified' : 'spawn_unverified';
+        $spawnLastPayload['status'] = $finalStatus;
+        $spawnLastPayload['reason_code'] = $finalReasonCode;
+        $writeSpawnLast($spawnLastPayload);
         $pendingJobs = $pendingJobsCount();
         $note = !$verified && $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
 
@@ -680,6 +702,8 @@ if ($action === 'run') {
             'verify_attempts' => $verifyAttempts,
             'running' => $verified,
             'locked' => $runnerLocked,
+            'worker_reason_code' => $workerState['reason_code'] ?? null,
+            'worker_source' => $workerState['source'] ?? null,
             'diagnostics' => [
                 'status' => $finalStatus,
                 'reason_code' => $finalReasonCode,
@@ -707,11 +731,19 @@ if ($action === 'cancel') {
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId > 0 ? $jobId : null, [
+            'reason_code' => 'invalid_job_id',
+            'action' => $action,
+        ]);
         $respond(400, ['ok' => false, 'error' => 'Invalid job_id.']);
     }
 
     $job = sv_ollama_fetch_job_control($pdo, $jobId);
     if ($job === []) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId, [
+            'reason_code' => 'job_not_found',
+            'action' => $action,
+        ]);
         $respond(404, ['ok' => false, 'error' => 'Job not found.']);
     }
 
@@ -787,6 +819,10 @@ if ($action === 'job_status') {
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId > 0 ? $jobId : null, [
+            'reason_code' => 'invalid_job_id',
+            'action' => $action,
+        ]);
         $respond(200, [
             'ok' => true,
             'job' => null,
@@ -808,6 +844,10 @@ if ($action === 'job_status') {
     $stmt->execute([':id' => $jobId]);
     $job = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!is_array($job)) {
+        sv_audit_log($pdo, 'ollama_job_error', 'jobs', $jobId, [
+            'reason_code' => 'job_not_found',
+            'action' => $action,
+        ]);
         $respond(404, ['ok' => false, 'error' => 'Job not found.']);
     }
 

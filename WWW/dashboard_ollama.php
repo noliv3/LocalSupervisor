@@ -24,11 +24,7 @@ if (!$isLoopback) {
     sv_security_error(403, 'Forbidden.');
 }
 
-if (!$isLoopback) {
-    sv_require_internal_access($config, 'dashboard_ollama');
-} else {
-    sv_validate_internal_access($config, 'dashboard_ollama', false);
-}
+$internalAccess = sv_internal_access_result($config, 'dashboard_ollama', ['allow_loopback_bypass' => true]);
 
 try {
     $pdo = sv_open_pdo($config);
@@ -319,7 +315,20 @@ sv_ui_header('Ollama-Dashboard', 'ollama');
             <span class="pill">läuft <span data-ollama-running><?= (int)($statusCounts['running'] ?? 0) ?></span></span>
             <span class="pill">max <span data-ollama-max-concurrency><?= (int)sv_ollama_max_concurrency($config) ?></span></span>
             <span class="pill">gesperrt <span data-ollama-runner-locked>–</span></span>
+            <span class="pill">Worker aktiv <span data-ollama-worker-running>–</span></span>
+            <span class="pill">Grund <span data-ollama-worker-reason>–</span></span>
         </div>
+        <?php if (empty($internalAccess['ok'])): ?>
+            <div class="action-note error">
+                Interner Zugriff blockiert (<?= htmlspecialchars((string)($internalAccess['status'] ?? 'blocked'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>/
+                <?= htmlspecialchars((string)($internalAccess['reason_code'] ?? 'unknown'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>).
+            </div>
+        <?php elseif (!empty($internalAccess['bypass'])): ?>
+            <div class="hint small">
+                Interner Zugriff: Localhost-Bypass aktiv (<?= htmlspecialchars((string)($internalAccess['reason_code'] ?? 'localhost_bypass'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>).
+            </div>
+        <?php endif; ?>
+        <div class="action-note error is-hidden" data-ollama-worker-warning></div>
         <div class="table-wrap">
             <table class="table">
                 <thead>

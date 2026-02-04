@@ -1083,6 +1083,9 @@
         const autoRunBtn = root.querySelector('[data-ollama-auto-run]');
         const runBatchInput = root.querySelector('[data-ollama-run-batch]');
         const runSecondsInput = root.querySelector('[data-ollama-run-seconds]');
+        const workerRunningEl = root.querySelector('[data-ollama-worker-running]');
+        const workerReasonEl = root.querySelector('[data-ollama-worker-reason]');
+        const workerWarningEl = root.querySelector('[data-ollama-worker-warning]');
         let autoRunEnabled = false;
         let autoRunBusy = false;
         let autoRunNextAllowedAt = 0;
@@ -1157,6 +1160,24 @@
                 const lockedEl = root.querySelector('[data-ollama-runner-locked]');
                 if (lockedEl) {
                     lockedEl.textContent = data.runner_locked ? 'ja' : 'nein';
+                }
+            }
+            if ('worker_running' in data) {
+                if (workerRunningEl) {
+                    workerRunningEl.textContent = data.worker_running ? 'ja' : 'nein';
+                }
+                if (workerReasonEl) {
+                    workerReasonEl.textContent = data.worker_reason_code || '–';
+                }
+                if (workerWarningEl) {
+                    const hasQueued = lastCounts.queued > 0 || lastCounts.pending > 0;
+                    if (!data.worker_running && hasQueued) {
+                        workerWarningEl.textContent = 'Jobs anstehend, aber kein Worker aktiv (worker_not_running).';
+                        workerWarningEl.classList.remove('is-hidden');
+                    } else {
+                        workerWarningEl.textContent = '';
+                        workerWarningEl.classList.add('is-hidden');
+                    }
                 }
             }
         }
@@ -1437,6 +1458,7 @@
                 .then((data) => {
                     if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy' || data.status === 'blocked' || data.status === 'start_failed')) {
                         let text = '';
+                        let type = 'success';
                         if (data.status === 'locked') {
                             text = 'Launcher gesperrt (ein anderer Start läuft).';
                         } else if (data.status === 'busy') {
@@ -1445,8 +1467,9 @@
                             text = `Start blockiert (${data.reason || 'preflight'}).`;
                         } else if (data.status === 'start_failed') {
                             text = 'Worker-Start nicht verifiziert (kein Lock/Heartbeat).';
+                            type = 'error';
                         }
-                        showMessage('success', 'Status', text);
+                        showMessage(type, 'Status', text);
                         return { status: data.status };
                     }
                     if (!data || !data.ok) {
