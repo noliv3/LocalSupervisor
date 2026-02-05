@@ -5810,7 +5810,11 @@ function sv_set_media_meta_value(PDO $pdo, int $mediaId, string $key, $value, st
     $valueStr = trim($valueStr);
     $now      = date('c');
 
-    $pdo->beginTransaction();
+    $startedTransaction = false;
+    if (!$pdo->inTransaction()) {
+        $pdo->beginTransaction();
+        $startedTransaction = true;
+    }
     try {
         $stmt = $pdo->prepare(
             'SELECT meta_value FROM media_meta WHERE media_id = :media_id AND meta_key = :meta_key ORDER BY id DESC LIMIT 1'
@@ -5821,7 +5825,9 @@ function sv_set_media_meta_value(PDO $pdo, int $mediaId, string $key, $value, st
         ]);
         $current = $stmt->fetchColumn();
         if ($current !== false && $current !== null && (string)$current === $valueStr) {
-            $pdo->commit();
+            if ($startedTransaction && $pdo->inTransaction()) {
+                $pdo->commit();
+            }
             return false;
         }
 
@@ -5835,10 +5841,12 @@ function sv_set_media_meta_value(PDO $pdo, int $mediaId, string $key, $value, st
             $valueStr,
             $now,
         ]);
-        $pdo->commit();
+        if ($startedTransaction && $pdo->inTransaction()) {
+            $pdo->commit();
+        }
         return true;
     } catch (Throwable $e) {
-        if ($pdo->inTransaction()) {
+        if ($startedTransaction && $pdo->inTransaction()) {
             $pdo->rollBack();
         }
         throw $e;

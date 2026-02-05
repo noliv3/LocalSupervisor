@@ -11,6 +11,10 @@ require_once __DIR__ . '/ollama_jobs.php';
 try {
     $config = sv_load_config();
     $pdo    = sv_open_pdo($config);
+    try {
+        $pdo->exec('PRAGMA busy_timeout = 3500');
+    } catch (Throwable $e) {
+    }
 } catch (Throwable $e) {
     fwrite(STDERR, "Init-Fehler: " . $e->getMessage() . "\n");
     exit(1);
@@ -67,12 +71,54 @@ $logger = function (string $msg): void {
 };
 
 $workerPid = function_exists('getmypid') ? (int)getmypid() : null;
+$heartbeatIntervalSeconds = 2;
+$globalStatusIntervalSeconds = 4;
 $updateWorkerStatus = static function (bool $active, string $message, array $details = []) use ($config, $workerPid): void {
     $baseDetails = [
         'pid' => $workerPid,
         'owner' => sv_ollama_worker_owner(),
     ];
     sv_ollama_update_global_status($config, 'worker_active', $active, $message, array_merge($baseDetails, $details));
+};
+
+$writeWorkerHeartbeat = static function (string $state, ?int $currentJobId = null, ?string $lastBatchTs = null) use ($config, $workerPid): void {
+    sv_ollama_write_worker_heartbeat($config, [
+        'ts_utc' => gmdate('c'),
+        'pid' => $workerPid,
+        'owner' => sv_ollama_worker_owner(),
+        'state' => $state,
+        'current_job_id' => $currentJobId,
+        'last_batch_ts' => $lastBatchTs,
+    ]);
+};
+
+$lastGlobalStatusWrite = 0;
+$writeGlobalStatus = static function (bool $force = false, ?string $lastBatchTs = null) use ($pdo, $config, $workerPid, &$lastGlobalStatusWrite, $globalStatusIntervalSeconds): void {
+    $now = time();
+    if (!$force && ($now - $lastGlobalStatusWrite) < $globalStatusIntervalSeconds) {
+        return;
+    }
+    $lastGlobalStatusWrite = $now;
+
+    $counts = sv_ollama_collect_queue_counts($pdo);
+    $legacyStatus = sv_ollama_read_global_status($config);
+    $lastError = null;
+    if (!empty($legacyStatus['ollama_down']['active'])) {
+        $lastError = is_string($legacyStatus['ollama_down']['message'] ?? null)
+            ? $legacyStatus['ollama_down']['message']
+            : 'ollama_down';
+    }
+
+    sv_ollama_write_runtime_global_status($config, [
+        'ts_utc' => gmdate('c'),
+        'queue_pending' => (int)($counts['queued'] ?? 0) + (int)($counts['pending'] ?? 0),
+        'queue_queued' => (int)($counts['queued'] ?? 0),
+        'queue_running' => (int)($counts['running'] ?? 0),
+        'last_error' => $lastError,
+        'worker_pid' => $workerPid,
+        'worker_running' => true,
+        'last_batch_ts' => $lastBatchTs,
+    ]);
 };
 
 $lock = sv_ollama_acquire_runner_lock($config, sv_ollama_worker_owner());
@@ -141,6 +187,8 @@ try {
         'sleep_ms' => $sleepMs,
     ]);
     $updateLockHeartbeat(true);
+    $writeWorkerHeartbeat('idle');
+    $writeGlobalStatus(true);
     sv_run_migrations_if_needed($pdo, $config, $logger);
 
     $batchSize = $batchSize ?? $limit;
@@ -165,12 +213,16 @@ try {
 
     $startedAt = time();
     while (true) {
+        $writeWorkerHeartbeat('running');
         $summary = sv_process_ollama_job_batch($pdo, $config, $batchSize, $logger, $mediaId);
+        $lastBatchTs = gmdate('c');
         foreach ($aggregate as $key => $value) {
             $aggregate[$key] = $value + (int)($summary[$key] ?? 0);
         }
         $batchCount++;
         $updateLockHeartbeat();
+        $writeWorkerHeartbeat(((int)($summary['total'] ?? 0) > 0) ? 'running' : 'idle', null, $lastBatchTs);
+        $writeGlobalStatus(false, $lastBatchTs);
         $updateWorkerStatus(true, 'heartbeat', [
             'batch' => $batchCount,
             'processed' => (int)($summary['total'] ?? 0),
@@ -206,6 +258,8 @@ try {
             if ($sleepMs > 0) {
                 usleep($sleepMs * 1000);
             }
+            $writeWorkerHeartbeat('idle', null, $lastBatchTs ?? null);
+            $writeGlobalStatus(false, $lastBatchTs ?? null);
             if ($emptyStreak >= $minEmptyChecks) {
                 break;
             }
@@ -232,6 +286,20 @@ try {
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 } finally {
+    sv_ollama_write_worker_heartbeat($config, [
+        'ts_utc' => gmdate('c'),
+        'pid' => $workerPid,
+        'owner' => sv_ollama_worker_owner(),
+        'state' => 'idle',
+    ]);
+    sv_ollama_write_runtime_global_status($config, [
+        'ts_utc' => gmdate('c'),
+        'queue_pending' => 0,
+        'queue_queued' => 0,
+        'queue_running' => 0,
+        'worker_pid' => $workerPid,
+        'worker_running' => false,
+    ]);
     $updateWorkerStatus(false, 'stopped', [
         'batches' => $batchCount,
         'total' => (int)($aggregate['total'] ?? 0),

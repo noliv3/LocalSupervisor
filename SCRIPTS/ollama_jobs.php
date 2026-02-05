@@ -1046,6 +1046,102 @@ function sv_ollama_status_path(array $config): string
     return sv_log_path($config, 'ollama_status.json');
 }
 
+function sv_ollama_runtime_dir(array $config): string
+{
+    $logsError = null;
+    $logsRoot = sv_ollama_prepare_logs_root($config, 'runtime_dir', $logsError);
+    if ($logsRoot === null) {
+        $logsRoot = sv_logs_root($config);
+    }
+
+    $runtimeDir = $logsRoot . DIRECTORY_SEPARATOR . 'runtime';
+    if (!is_dir($runtimeDir)) {
+        @mkdir($runtimeDir, 0777, true);
+    }
+
+    return $runtimeDir;
+}
+
+function sv_ollama_worker_heartbeat_path(array $config): string
+{
+    return sv_ollama_runtime_dir($config) . DIRECTORY_SEPARATOR . 'ollama_worker_heartbeat.json';
+}
+
+function sv_ollama_global_runtime_status_path(array $config): string
+{
+    return sv_ollama_runtime_dir($config) . DIRECTORY_SEPARATOR . 'ollama_global_status.json';
+}
+
+function sv_ollama_read_json_file(string $path): array
+{
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    $raw = file_get_contents($path);
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function sv_ollama_write_json_file(string $path, array $payload): bool
+{
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($encoded)) {
+        return false;
+    }
+
+    $result = @file_put_contents($path, $encoded, LOCK_EX);
+    return $result !== false;
+}
+
+function sv_ollama_read_worker_heartbeat(array $config): array
+{
+    return sv_ollama_read_json_file(sv_ollama_worker_heartbeat_path($config));
+}
+
+function sv_ollama_write_worker_heartbeat(array $config, array $heartbeat): bool
+{
+    return sv_ollama_write_json_file(sv_ollama_worker_heartbeat_path($config), $heartbeat);
+}
+
+function sv_ollama_read_runtime_global_status(array $config): array
+{
+    return sv_ollama_read_json_file(sv_ollama_global_runtime_status_path($config));
+}
+
+function sv_ollama_write_runtime_global_status(array $config, array $status): bool
+{
+    return sv_ollama_write_json_file(sv_ollama_global_runtime_status_path($config), $status);
+}
+
+function sv_ollama_collect_queue_counts(PDO $pdo): array
+{
+    $jobTypes = sv_ollama_job_types();
+    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+    $stmt = $pdo->prepare(
+        'SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("queued","pending","running") GROUP BY status'
+    );
+    $stmt->execute($jobTypes);
+
+    $counts = [
+        'queued' => 0,
+        'pending' => 0,
+        'running' => 0,
+    ];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $status = (string)($row['status'] ?? '');
+        if (isset($counts[$status])) {
+            $counts[$status] = (int)($row['cnt'] ?? 0);
+        }
+    }
+
+    return $counts;
+}
+
 function sv_ollama_read_global_status(array $config): array
 {
     $logsError = null;
@@ -1193,6 +1289,38 @@ function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, 
 {
     $currentPid = $currentPid ?? (function_exists('getmypid') ? (int)getmypid() : null);
     $phpServerPid = sv_ollama_php_server_pid($config);
+
+    $heartbeat = sv_ollama_read_worker_heartbeat($config);
+    $heartbeatTs = is_string($heartbeat['ts_utc'] ?? null) ? strtotime((string)$heartbeat['ts_utc']) : false;
+    $heartbeatPid = isset($heartbeat['pid']) ? (int)$heartbeat['pid'] : null;
+    $heartbeatOwner = is_string($heartbeat['owner'] ?? null) ? trim((string)$heartbeat['owner']) : sv_ollama_worker_owner();
+    $heartbeatState = is_string($heartbeat['state'] ?? null) ? trim((string)$heartbeat['state']) : '';
+    $heartbeatFresh = $heartbeatTs !== false && (time() - (int)$heartbeatTs) <= max(1, $maxAgeSeconds);
+
+    if ($heartbeatPid !== null && $phpServerPid !== null && $heartbeatPid === $phpServerPid) {
+        return [
+            'running' => false,
+            'reason_code' => 'server_pid',
+            'source' => 'heartbeat_file',
+            'lock' => null,
+            'heartbeat' => $heartbeat,
+            'pid' => $heartbeatPid,
+            'php_server_pid' => $phpServerPid,
+        ];
+    }
+
+    if ($heartbeatFresh && in_array($heartbeatState, ['idle', 'running'], true) && sv_ollama_is_valid_worker_owner($heartbeatOwner)) {
+        return [
+            'running' => true,
+            'reason_code' => 'heartbeat_file_active',
+            'source' => 'heartbeat_file',
+            'lock' => null,
+            'heartbeat' => $heartbeat,
+            'pid' => $heartbeatPid,
+            'php_server_pid' => $phpServerPid,
+        ];
+    }
+
     $lockSnapshot = sv_ollama_worker_lock_snapshot($config, $currentPid);
 
     $lockPid = $lockSnapshot['pid'] ?? null;
@@ -1202,7 +1330,7 @@ function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, 
             'reason_code' => 'server_pid',
             'source' => 'lock',
             'lock' => $lockSnapshot,
-            'heartbeat' => null,
+            'heartbeat' => $heartbeat,
             'pid' => $lockPid,
             'php_server_pid' => $phpServerPid,
         ];
@@ -1214,7 +1342,7 @@ function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, 
             'reason_code' => 'lock_active',
             'source' => 'lock',
             'lock' => $lockSnapshot,
-            'heartbeat' => null,
+            'heartbeat' => $heartbeat,
             'pid' => $lockPid,
             'php_server_pid' => $phpServerPid,
         ];
@@ -1269,13 +1397,19 @@ function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, 
         $reason = (string)$lockSnapshot['reason'];
     }
 
+    if ($heartbeat !== [] && !$heartbeatFresh) {
+        $reason = 'heartbeat_file_stale';
+    } elseif ($heartbeat !== [] && !sv_ollama_is_valid_worker_owner($heartbeatOwner)) {
+        $reason = 'heartbeat_file_invalid_owner';
+    }
+
     return [
         'running' => false,
         'reason_code' => $reason,
         'source' => 'none',
         'lock' => $lockSnapshot,
-        'heartbeat' => $worker,
-        'pid' => $workerPid ?? $lockPid,
+        'heartbeat' => $heartbeat !== [] ? $heartbeat : $worker,
+        'pid' => $heartbeatPid ?? $workerPid ?? $lockPid,
         'php_server_pid' => $phpServerPid,
     ];
 }
@@ -3012,12 +3146,20 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
     $lastRunAt = $values['last_run_at'] ?? date('c');
     $setCommonMeta = !array_key_exists('set_common_meta', $options) || (bool)$options['set_common_meta'] === true;
 
-    if ($mode === 'caption' && isset($values['caption']) && $values['caption'] !== null) {
-        sv_set_media_meta_value($pdo, $mediaId, 'ollama.caption', $values['caption'], $source);
+    $startedTransaction = false;
+    if (!$pdo->inTransaction()) {
+        $pdo->beginTransaction();
+        $startedTransaction = true;
     }
-    if ($mode === 'title' && isset($values['title']) && $values['title'] !== null) {
-        sv_set_media_meta_value($pdo, $mediaId, 'ollama.title', $values['title'], $source);
-    }
+
+    try {
+
+        if ($mode === 'caption' && isset($values['caption']) && $values['caption'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.caption', $values['caption'], $source);
+        }
+        if ($mode === 'title' && isset($values['title']) && $values['title'] !== null) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.title', $values['title'], $source);
+        }
     if ($mode === 'prompt_eval' && isset($values['score']) && $values['score'] !== null) {
         sv_set_media_meta_value($pdo, $mediaId, 'ollama.prompt_eval.score', $values['score'], $source);
     }
@@ -3092,14 +3234,24 @@ function sv_ollama_persist_media_meta(PDO $pdo, int $mediaId, string $mode, arra
         }
     }
 
-    if ($setCommonMeta) {
-        sv_set_media_meta_value($pdo, $mediaId, 'ollama.last_run_at', $lastRunAt, $source);
-        sv_set_media_meta_value($pdo, $mediaId, 'ollama.stage_version', SV_OLLAMA_STAGE_VERSION, $source);
-    }
+        if ($setCommonMeta) {
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.last_run_at', $lastRunAt, $source);
+            sv_set_media_meta_value($pdo, $mediaId, 'ollama.stage_version', SV_OLLAMA_STAGE_VERSION, $source);
+        }
 
-    if (isset($values['meta']) && is_string($values['meta']) && trim($values['meta']) !== '') {
-        $metaKey = $mode === 'nsfw_classify' ? 'ollama.nsfw.meta' : ('ollama.' . $mode . '.meta');
-        sv_set_media_meta_value($pdo, $mediaId, $metaKey, $values['meta'], $source);
+        if (isset($values['meta']) && is_string($values['meta']) && trim($values['meta']) !== '') {
+            $metaKey = $mode === 'nsfw_classify' ? 'ollama.nsfw.meta' : ('ollama.' . $mode . '.meta');
+            sv_set_media_meta_value($pdo, $mediaId, $metaKey, $values['meta'], $source);
+        }
+
+        if ($startedTransaction && $pdo->inTransaction()) {
+            $pdo->commit();
+        }
+    } catch (Throwable $e) {
+        if ($startedTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
     }
 }
 

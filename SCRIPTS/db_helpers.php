@@ -103,7 +103,7 @@ function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
 
         $journalMode = isset($sqliteCfg['journal_mode']) && is_string($sqliteCfg['journal_mode'])
             ? strtoupper(trim($sqliteCfg['journal_mode']))
-            : '';
+            : 'WAL';
         if ($journalMode !== '') {
             $pdo->exec('PRAGMA journal_mode = ' . $journalMode);
         }
@@ -121,7 +121,11 @@ function sv_db_ensure_runtime_indexes(PDO $pdo): void
         }
 
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_jobs_status_type_updated_at ON jobs(status, type, updated_at)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_jobs_type_status_created_at ON jobs(type, status, created_at)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_media_tags_media_locked ON media_tags(media_id, locked)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_media_meta_media_key ON media_meta(media_id, meta_key)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_media_meta_key_value ON media_meta(meta_key, meta_value)');
     } catch (Throwable $e) {
         // Index-Setup ist optional; Fehler sollen Runtime-Zugriff nicht blockieren.
     }
