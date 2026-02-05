@@ -202,11 +202,13 @@ if ($action === 'enqueue') {
             $params[':caption_key'] = 'ollama.caption';
             $params[':tags_key'] = 'ollama.tags_normalized';
         } elseif (!$allFlag || $mode === 'nsfw_classify') {
-            if ($mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
+            if ($mode === 'caption' || $mode === 'title' || $mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
                 $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
                 $params[':meta_key'] = $mode === 'quality'
                     ? 'ollama.quality.score'
-                    : ($mode === 'nsfw_classify' ? 'ollama.nsfw.score' : 'ollama.tags_normalized');
+                    : ($mode === 'nsfw_classify'
+                        ? 'ollama.nsfw.score'
+                        : ($mode === 'caption' ? 'ollama.caption' : ($mode === 'title' ? 'ollama.title' : 'ollama.tags_normalized')));
             } elseif ($mode !== 'embed') {
                 $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
                 $params[':mode'] = $mode;
@@ -222,8 +224,8 @@ if ($action === 'enqueue') {
             $conditions[] = 'mm_prompt.id IS NULL';
             $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
         } elseif (!$allFlag || $mode === 'nsfw_classify') {
-            if ($mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
-                $conditions[] = 'mm.id IS NULL';
+            if ($mode === 'caption' || $mode === 'title' || $mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
+                $conditions[] = '(mm.id IS NULL OR TRIM(COALESCE(mm.meta_value, "")) = "")';
             } elseif ($mode !== 'embed') {
                 $conditions[] = 'o.id IS NULL';
             }
@@ -392,127 +394,26 @@ if ($action === 'enqueue') {
 
 if ($action === 'run') {
     $batch = $_POST['batch'] ?? ($jsonBody['batch'] ?? null);
-    $maxSeconds = $_POST['max_seconds'] ?? ($jsonBody['max_seconds'] ?? null);
     $batch = $batch !== null ? (int)$batch : 5;
-    $maxSeconds = $maxSeconds !== null ? (int)$maxSeconds : 20;
-    $lock = sv_ollama_acquire_launcher_lock($config, 'web:ollama.php');
-    if (empty($lock['ok'])) {
-        $respond(200, [
-            'ok' => false,
-            'status' => $lock['status'] ?? 'locked',
-            'reason' => $lock['reason'] ?? 'launcher_locked',
-            'reason_code' => $lock['reason_code'] ?? ($lock['reason'] ?? 'launcher_locked'),
-            'locked' => (bool)($lock['locked'] ?? false),
-            'running' => false,
-            'path' => $lock['path'] ?? null,
-        ]);
+    if ($batch <= 0) {
+        $batch = 5;
     }
 
-    try {
-        $logger = static function (string $message): void {
-        };
-        $preflight = sv_ollama_preflight($pdo, $config, $logger, false);
-        if (empty($preflight['ok'])) {
-            $respond(200, [
-                'ok' => false,
-                'status' => 'config_failed',
-                'reason' => $preflight['reason'] ?? 'preflight_failed',
-                'reason_code' => $preflight['reason'] ?? 'preflight_failed',
-                'running' => false,
-                'locked' => false,
-            ]);
-        }
+    $pendingJobs = sv_ollama_pending_job_count($pdo);
+    $spawn = sv_ollama_spawn_background_worker($config, $pdo, 'web_run', $pendingJobs, $batch, 0);
 
-        $logsError = null;
-        $logsRoot = sv_ensure_logs_root($config, $logsError);
-        if ($logsRoot === null) {
-            sv_log_system_error($config, 'ollama_run_log_root_unavailable', ['error' => $logsError]);
-            $respond(200, [
-                'ok' => false,
-                'status' => 'open_failed',
-                'reason' => 'log_root_unavailable',
-                'reason_code' => 'log_root_unavailable',
-                'running' => false,
-                'locked' => false,
-                'log_error' => $logsError,
-                'path' => sv_logs_root($config),
-            ]);
-        }
-        $logsPath = $logsRoot;
-
-        sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
-        $maxConcurrency = sv_ollama_max_concurrency($config);
-        $running = sv_ollama_running_job_count($pdo);
-        if ($running >= $maxConcurrency) {
-            $respond(200, [
-                'ok' => false,
-                'status' => 'busy',
-                'reason_code' => 'concurrency_limit',
-                'running' => $running,
-                'max_concurrency' => $maxConcurrency,
-            ]);
-        }
-
-        $phpCli = sv_get_php_cli($config);
-        $workerScript = realpath(__DIR__ . '/../SCRIPTS/ollama_worker_cli.php');
-        if ($workerScript === false) {
-            $respond(500, ['ok' => false, 'error' => 'Worker script missing.']);
-        }
-        $batchArg = '--batch=' . $batch;
-        $pendingJobs = sv_ollama_pending_job_count($pdo);
-        $maxBatches = sv_ollama_compute_max_batches($pendingJobs, $batch);
-        $maxBatchesArg = '--max-batches=' . $maxBatches;
-        $args = [$maxBatchesArg, $batchArg];
-        $logPaths = sv_ollama_worker_log_paths($config);
-        $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, 0, $logPaths);
-        $verified = (bool)($spawn['verified'] ?? false);
-        $spawnStatus = $spawn['status'] ?? 'start_failed';
-        $spawnReasonCode = $spawn['reason_code'] ?? 'start_failed';
-        $startTriggered = $spawnStatus === 'started' && $spawnReasonCode === 'spawn_unverified';
-        $note = !$verified && !$startTriggered && $pendingJobs > 0 ? 'jobs_pending but worker_not_running' : null;
-
-        $respond(200, [
-            'ok' => $verified || $startTriggered,
-            'status' => $spawnStatus,
-            'reason' => ($verified || $startTriggered) ? null : 'start_failed',
-            'reason_code' => $spawnReasonCode,
-            'pid' => $spawn['pid'] ?? null,
-            'pid_alive' => $spawn['pid_alive'] ?? null,
-            'spawn_method' => $spawn['spawn_method'] ?? null,
-            'spawn_ok' => $spawn['spawn_ok'] ?? null,
-            'spawn_status' => $spawn['spawn_status'] ?? null,
-            'runner_locked' => $spawn['runner_locked'] ?? false,
-            'verified' => $verified,
-            'spawned' => $spawn['spawned'] ?? false,
-            'spawn_error' => $spawn['spawn_error'] ?? null,
-            'err_snippet' => $spawn['err_snippet'] ?? null,
-            'spawn_last' => $spawn['spawn_last'] ?? null,
-            'spawn_logs' => $spawn['spawn_logs'] ?? null,
-            'verify_attempts' => $spawn['verify_attempts'] ?? 0,
-            'running' => $verified,
-            'locked' => $spawn['runner_locked'] ?? false,
-            'worker_reason_code' => $spawn['worker_reason_code'] ?? null,
-            'worker_source' => $spawn['worker_source'] ?? null,
-            'diagnostics' => [
-                'status' => $spawnStatus,
-                'reason_code' => $spawnReasonCode,
-                'pid' => $spawn['pid'] ?? null,
-                'lock_path' => sv_ollama_runner_lock_path($config),
-                'spawn' => [
-                    'status' => $spawnStatus,
-                    'reason_code' => $spawnReasonCode,
-                    'pid' => $spawn['pid'] ?? null,
-                    'log_paths' => $spawn['spawn_logs'] ?? null,
-                ],
-                'jobs_pending' => $pendingJobs,
-                'note' => $note,
-                'max_batches' => $maxBatches,
-                'batch' => $batch,
-            ],
-        ]);
-    } finally {
-        sv_ollama_release_launcher_lock($lock['handle']);
-    }
+    $respond(200, [
+        'ok' => !empty($spawn['spawned']),
+        'status' => $spawn['status'] ?? 'start_failed',
+        'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+        'pid' => $spawn['pid'] ?? null,
+        'running' => false,
+        'locked' => $spawn['runner_locked'] ?? false,
+        'spawned' => $spawn['spawned'] ?? false,
+        'spawn_error' => $spawn['spawn_error'] ?? null,
+        'spawn_logs' => $spawn['spawn_logs'] ?? null,
+        'source' => $spawn['source'] ?? 'web_run',
+    ]);
 }
 
 if ($action === 'cancel') {
