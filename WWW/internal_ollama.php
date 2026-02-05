@@ -346,11 +346,13 @@ if ($action === 'enqueue') {
             $params[':caption_key'] = 'ollama.caption';
             $params[':tags_key'] = 'ollama.tags_normalized';
         } elseif (!$allFlag || $mode === 'nsfw_classify') {
-            if ($mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
+            if ($mode === 'caption' || $mode === 'title' || $mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
                 $sql .= ' LEFT JOIN media_meta mm ON mm.media_id = m.id AND mm.meta_key = :meta_key';
                 $params[':meta_key'] = $mode === 'quality'
                     ? 'ollama.quality.score'
-                    : ($mode === 'nsfw_classify' ? 'ollama.nsfw.score' : 'ollama.tags_normalized');
+                    : ($mode === 'nsfw_classify'
+                        ? 'ollama.nsfw.score'
+                        : ($mode === 'caption' ? 'ollama.caption' : ($mode === 'title' ? 'ollama.title' : 'ollama.tags_normalized')));
             } elseif ($mode !== 'embed') {
                 $sql .= ' LEFT JOIN ollama_results o ON o.media_id = m.id AND o.mode = :mode';
                 $params[':mode'] = $mode;
@@ -366,8 +368,8 @@ if ($action === 'enqueue') {
             $conditions[] = 'mm_prompt.id IS NULL';
             $conditions[] = '(mm_caption.id IS NOT NULL OR mm_tags.id IS NOT NULL)';
         } elseif (!$allFlag || $mode === 'nsfw_classify') {
-            if ($mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
-                $conditions[] = 'mm.id IS NULL';
+            if ($mode === 'caption' || $mode === 'title' || $mode === 'tags_normalize' || $mode === 'quality' || $mode === 'nsfw_classify') {
+                $conditions[] = '(mm.id IS NULL OR TRIM(COALESCE(mm.meta_value, "")) = "")';
             } elseif ($mode !== 'embed') {
                 $conditions[] = 'o.id IS NULL';
             }

@@ -469,6 +469,24 @@ function sv_ollama_attempt_autostart(
     int $batch,
     int $verifySeconds
 ): array {
+    return sv_ollama_spawn_background_worker(
+        $config,
+        $pdo,
+        $source,
+        $pendingJobs,
+        $batch,
+        $verifySeconds
+    );
+}
+
+function sv_ollama_spawn_background_worker(
+    array $config,
+    PDO $pdo,
+    string $source,
+    int $pendingJobs,
+    int $batch,
+    int $verifyWindowSeconds = 0
+): array {
     $logPaths = sv_ollama_worker_log_paths($config);
 
     if ($pendingJobs <= 0) {
@@ -515,21 +533,6 @@ function sv_ollama_attempt_autostart(
         ];
     }
 
-    $logger = static function (string $message): void {
-    };
-    $preflight = sv_ollama_preflight($pdo, $config, $logger, false);
-    if (empty($preflight['ok'])) {
-        return [
-            'ok' => false,
-            'status' => 'config_failed',
-            'reason_code' => $preflight['reason'] ?? 'preflight_failed',
-            'spawned' => false,
-            'skipped' => true,
-            'source' => $source,
-            'log_paths' => $logPaths,
-        ];
-    }
-
     $spawnLock = sv_ollama_acquire_launcher_lock_for_spawn(
         $config,
         'autostart:' . $source,
@@ -565,12 +568,12 @@ function sv_ollama_attempt_autostart(
                 'log_paths' => $logPaths,
             ];
         }
-        $workerScript = realpath(sv_base_dir() . '/SCRIPTS/ollama_worker_cli.php');
+        $workerScript = realpath(sv_base_dir() . '/SCRIPTS/ollama_service_cli.php');
         if ($workerScript === false) {
             return [
                 'ok' => false,
                 'status' => 'config_failed',
-                'reason_code' => 'worker_script_missing',
+                'reason_code' => 'service_script_missing',
                 'spawned' => false,
                 'skipped' => false,
                 'pid' => null,
@@ -581,8 +584,9 @@ function sv_ollama_attempt_autostart(
 
         $args = [
             '--batch=' . $batch,
+            '--sleep-ms=1000',
         ];
-        $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, $verifySeconds, $logPaths);
+        $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, $verifyWindowSeconds, $logPaths);
         $spawn['source'] = $source;
         $spawn['pending_jobs'] = sv_ollama_pending_job_count($pdo);
         $spawn['batch'] = $batch;
@@ -4913,6 +4917,12 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             }
         }
 
+        if ($mode === 'title' && ($title === null || trim($title) === '')) {
+            $progressBits = 900;
+            sv_ollama_touch_job_progress($pdo, $jobId, $progressBits, $progressTotal, 'parse_error');
+            throw new RuntimeException('parse_error: title missing/empty');
+        }
+
         $promptReconErrorType = null;
         $promptReconErrorDetail = null;
         if ($mode === 'prompt_recon') {
@@ -4961,6 +4971,18 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
                 }
             }
         }
+        $titleErrorType = null;
+        $titleErrorDetail = null;
+        if ($mode === 'title') {
+            if ($parseError) {
+                $titleErrorType = 'parse_error';
+                $titleErrorDetail = $parseErrorDetail ?? 'Ollama-Antwort für title konnte nicht geparst werden.';
+            } elseif ($title === null) {
+                $titleErrorType = 'missing_key';
+                $titleErrorDetail = 'missing_key: title';
+            }
+        }
+
         $nsfwErrorType = null;
         $nsfwErrorDetail = null;
         if ($mode === 'nsfw_classify') {
@@ -4985,6 +5007,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             $parseError = true;
         }
         if ($nsfwErrorType !== null) {
+            $parseError = true;
+        }
+        if ($titleErrorType !== null) {
             $parseError = true;
         }
 
@@ -5022,6 +5047,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
         if ($nsfwErrorType !== null) {
             $meta['error_type'] = $nsfwErrorType;
+        }
+        if ($titleErrorType !== null) {
+            $meta['error_type'] = $titleErrorType;
         }
         if ($parseError && $parseErrorReason !== null && empty($meta['error_type'])) {
             $meta['error_type'] = $parseErrorReason;

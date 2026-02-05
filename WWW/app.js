@@ -1091,6 +1091,9 @@
         let autoRunNextAllowedAt = 0;
         let runRequestInFlight = false;
         let lastCounts = { queued: 0, pending: 0 };
+        let lastRunnerLocked = false;
+        let lastWorkerRunning = false;
+        let lastWorkerRecent = false;
 
         function showMessage(type, title, text) {
             if (!messageBox) return;
@@ -1157,12 +1160,24 @@
                 if (maxEl) maxEl.textContent = String(data.max_concurrency ?? '0');
             }
             if ('runner_locked' in data) {
+                lastRunnerLocked = !!data.runner_locked;
                 const lockedEl = root.querySelector('[data-ollama-runner-locked]');
                 if (lockedEl) {
                     lockedEl.textContent = data.runner_locked ? 'ja' : 'nein';
                 }
             }
+            const spawnLast = data.worker_spawn_last || null;
+            if (spawnLast && spawnLast.ts) {
+                const ts = Date.parse(String(spawnLast.ts));
+                if (Number.isFinite(ts)) {
+                    const ageMs = Date.now() - ts;
+                    lastWorkerRecent = ageMs >= 0 && ageMs <= (pollInterval * 3);
+                }
+            } else {
+                lastWorkerRecent = false;
+            }
             if ('worker_running' in data) {
+                lastWorkerRunning = !!data.worker_running;
                 if (workerRunningEl) {
                     workerRunningEl.textContent = data.worker_running ? 'ja' : 'nein';
                 }
@@ -1499,12 +1514,14 @@
 
         function triggerAutoRun() {
             if (!autoRunEnabled || autoRunBusy) return;
+            if (runRequestInFlight) return;
             const queued = Number(lastCounts.queued || 0) + Number(lastCounts.pending || 0);
             if (queued <= 0) return;
+            if (lastRunnerLocked || lastWorkerRunning || lastWorkerRecent) return;
             if (Date.now() < autoRunNextAllowedAt) return;
             autoRunBusy = true;
             triggerRun().then((result) => {
-                if (result && (result.status === 'busy' || result.status === 'locked')) {
+                if (result && (result.status === 'busy' || result.status === 'locked' || result.status === 'started')) {
                     autoRunNextAllowedAt = Date.now() + pollInterval;
                 }
             }).finally(() => {
