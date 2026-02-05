@@ -1049,7 +1049,7 @@
         if (!root) return;
 
         const endpoint = root.dataset.endpoint || 'ollama.php';
-        const pollInterval = Number(root.dataset.pollInterval || '10000');
+        const basePollInterval = Number(root.dataset.pollInterval || '10000');
         const heartbeatStaleSec = Number(root.dataset.heartbeatStale || '180');
         const statusOrder = {
             running: 1,
@@ -1094,6 +1094,38 @@
         let lastRunnerLocked = false;
         let lastWorkerRunning = false;
         let lastWorkerRecent = false;
+        let pollInterval = basePollInterval;
+        let pollTimer = null;
+        let pollFailures = 0;
+        let lastDetailsPollAt = 0;
+
+        function computePollIntervalMs() {
+            const staleAgeMs = Number((root.dataset.staleAgeMs || '0'));
+            if (Number.isFinite(staleAgeMs) && staleAgeMs > 10000) {
+                return Math.min(30000, basePollInterval * 2);
+            }
+            if (lastWorkerRunning) {
+                return 3000;
+            }
+            return 10000;
+        }
+
+        function schedulePoll(nextMs) {
+            if (pollTimer) {
+                window.clearTimeout(pollTimer);
+                pollTimer = null;
+            }
+            const delay = Math.max(1000, Math.floor(nextMs));
+            pollTimer = window.setTimeout(() => {
+                pollStatus().finally(() => {
+                    pollJobs();
+                    const dynamicInterval = computePollIntervalMs();
+                    const backoff = Math.min(60000, dynamicInterval * Math.max(1, Math.pow(2, pollFailures)));
+                    pollInterval = backoff;
+                    schedulePoll(pollInterval);
+                });
+            }, delay);
+        }
 
         function showMessage(type, title, text) {
             if (!messageBox) return;
@@ -1362,18 +1394,28 @@
             rows.forEach((row) => tbody.appendChild(row));
         }
 
-        function pollStatus() {
-            postAction({ action: 'status' })
+        function pollStatus(details = 0) {
+            return postAction({ action: 'status', details })
                 .then((data) => {
                     if (data && data.ok) {
+                        pollFailures = 0;
+                        if ('stale_age_ms' in data) {
+                            root.dataset.staleAgeMs = String(data.stale_age_ms ?? 0);
+                        }
                         updateStatusCounts(data);
                         updateGlobalStatus(data);
                         if (autoRunEnabled) {
                             triggerAutoRun();
                         }
+                        if (!details && (Date.now() - lastDetailsPollAt) > 60000) {
+                            lastDetailsPollAt = Date.now();
+                            pollStatus(1);
+                        }
                     }
                 })
-                .catch(() => {});
+                .catch(() => {
+                    pollFailures++;
+                });
         }
 
         function pollJobs() {
@@ -1522,7 +1564,7 @@
             autoRunBusy = true;
             triggerRun().then((result) => {
                 if (result && (result.status === 'busy' || result.status === 'locked' || result.status === 'started')) {
-                    autoRunNextAllowedAt = Date.now() + pollInterval;
+                    autoRunNextAllowedAt = Date.now() + computePollIntervalMs();
                 }
             }).finally(() => {
                 autoRunBusy = false;
@@ -1610,10 +1652,7 @@
 
         pollStatus();
         pollJobs();
-        setInterval(() => {
-            pollStatus();
-            pollJobs();
-        }, pollInterval);
+        schedulePoll(computePollIntervalMs());
     }
 
     function initOllamaMediaAnalyze() {

@@ -27,6 +27,10 @@ try {
         ]);
     }
     $pdo = sv_open_pdo($config);
+    try {
+        $pdo->exec('PRAGMA busy_timeout = 200');
+    } catch (Throwable $e) {
+    }
 } catch (Throwable $e) {
     $respond(500, ['ok' => false, 'error' => $e->getMessage()]);
 }
@@ -56,10 +60,9 @@ try {
 $logsPath = sv_logs_root($config);
 
 if ($action === 'status') {
-    $jobTypes = sv_ollama_job_types();
-    $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
-    $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY status');
-    $stmt->execute($jobTypes);
+    $detailsParam = $_POST['details'] ?? ($jsonBody['details'] ?? null);
+    $details = (int)$detailsParam === 1;
+
     $counts = [
         'queued' => 0,
         'pending' => 0,
@@ -68,57 +71,8 @@ if ($action === 'status') {
         'error' => 0,
         'cancelled' => 0,
     ];
-    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        $status = (string)($row['status'] ?? '');
-        if (array_key_exists($status, $counts)) {
-            $counts[$status] = (int)($row['cnt'] ?? 0);
-        }
-    }
-
     $modeCounts = [];
-    $modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'dupe_hints'];
-    foreach ($modeList as $mode) {
-        $modeCounts[$mode] = [
-            'queued' => 0,
-            'pending' => 0,
-            'running' => 0,
-            'done' => 0,
-            'error' => 0,
-            'cancelled' => 0,
-        ];
-    }
-    $modeStmt = $pdo->prepare(
-        'SELECT type, status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY type, status'
-    );
-    $modeStmt->execute($jobTypes);
-    foreach ($modeStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        $jobType = (string)($row['type'] ?? '');
-        $status = (string)($row['status'] ?? '');
-        if (!isset($counts[$status])) {
-            continue;
-        }
-        try {
-            $mode = sv_ollama_mode_for_job_type($jobType);
-        } catch (Throwable $e) {
-            continue;
-        }
-        if (isset($modeCounts[$mode])) {
-            $modeCounts[$mode][$status] = (int)($row['cnt'] ?? 0);
-        }
-    }
-
-    $errorStmt = $pdo->prepare(
-        'SELECT last_error_code, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') AND last_error_code IS NOT NULL AND last_error_code != "" GROUP BY last_error_code ORDER BY last_error_code ASC'
-    );
-    $errorStmt->execute($jobTypes);
     $errorCounts = [];
-    foreach ($errorStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        $code = (string)($row['last_error_code'] ?? '');
-        if ($code === '') {
-            continue;
-        }
-        $errorCounts[$code] = (int)($row['cnt'] ?? 0);
-    }
 
     $maxConcurrency = sv_ollama_max_concurrency($config);
     $running = sv_ollama_running_job_count($pdo);
@@ -128,6 +82,73 @@ if ($action === 'status') {
     $runnerLocked = !empty($lockSnapshot['active']);
 
     $globalStatus = sv_ollama_read_global_status($config);
+    $runtimeStatus = sv_ollama_read_runtime_global_status($config);
+    $runtimeTs = is_string($runtimeStatus['ts_utc'] ?? null) ? strtotime((string)$runtimeStatus['ts_utc']) : false;
+    $staleAgeMs = $runtimeTs !== false ? max(0, (int)((microtime(true) - (float)$runtimeTs) * 1000)) : null;
+    $lightAvailable = $runtimeStatus !== [];
+
+    if ($lightAvailable) {
+        $counts['queued'] = (int)($runtimeStatus['queue_queued'] ?? 0);
+        $counts['pending'] = max(0, (int)($runtimeStatus['queue_pending'] ?? 0) - (int)($runtimeStatus['queue_queued'] ?? 0));
+        $counts['running'] = (int)($runtimeStatus['queue_running'] ?? 0);
+    }
+
+    if ($details || !$lightAvailable) {
+        $jobTypes = sv_ollama_job_types();
+        $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
+        $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY status');
+        $stmt->execute($jobTypes);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $status = (string)($row['status'] ?? '');
+            if (array_key_exists($status, $counts)) {
+                $counts[$status] = (int)($row['cnt'] ?? 0);
+            }
+        }
+
+        $modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'dupe_hints'];
+        foreach ($modeList as $mode) {
+            $modeCounts[$mode] = [
+                'queued' => 0,
+                'pending' => 0,
+                'running' => 0,
+                'done' => 0,
+                'error' => 0,
+                'cancelled' => 0,
+            ];
+        }
+        $modeStmt = $pdo->prepare(
+            'SELECT type, status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY type, status'
+        );
+        $modeStmt->execute($jobTypes);
+        foreach ($modeStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $jobType = (string)($row['type'] ?? '');
+            $status = (string)($row['status'] ?? '');
+            if (!isset($counts[$status])) {
+                continue;
+            }
+            try {
+                $mode = sv_ollama_mode_for_job_type($jobType);
+            } catch (Throwable $e) {
+                continue;
+            }
+            if (isset($modeCounts[$mode])) {
+                $modeCounts[$mode][$status] = (int)($row['cnt'] ?? 0);
+            }
+        }
+
+        $errorStmt = $pdo->prepare(
+            'SELECT last_error_code, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') AND last_error_code IS NOT NULL AND last_error_code != "" GROUP BY last_error_code ORDER BY last_error_code ASC'
+        );
+        $errorStmt->execute($jobTypes);
+        foreach ($errorStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $code = (string)($row['last_error_code'] ?? '');
+            if ($code === '') {
+                continue;
+            }
+            $errorCounts[$code] = (int)($row['cnt'] ?? 0);
+        }
+    }
+
     $ollamaDownActive = !empty($globalStatus['ollama_down']['active']);
     $spawnLast = sv_ollama_read_spawn_last($config);
 
@@ -145,6 +166,10 @@ if ($action === 'status') {
         'worker_source' => $workerState['source'] ?? null,
         'worker_pid' => $workerState['pid'] ?? null,
         'global_status' => $globalStatus,
+        'status_cache' => $runtimeStatus,
+        'stale_age_ms' => $staleAgeMs,
+        'light_status' => $lightAvailable,
+        'details' => $details,
         'worker_spawn_last' => $spawnLast,
         'blocked_by_ollama' => $ollamaDownActive,
     ]);

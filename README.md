@@ -131,7 +131,11 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Spawn-Status wird in `ollama_worker_spawn.last.json` protokolliert und kann im Status-Endpoint eingesehen werden.
 - Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
 - Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
-- Der Worker schreibt `worker_active` in `LOGS/ollama_status.json` (Heartbeat), damit Start/Status verlässlich geprüft werden kann.
+- Der Worker schreibt zusätzlich einen Runtime-Heartbeat nach `LOGS/runtime/ollama_worker_heartbeat.json` (`ts_utc`, `pid`, `state`, optional `current_job_id`/`last_batch_ts`); dieser wird im Status-Polling primär genutzt.
+- Der Worker schreibt einen kompakten Runtime-Cache nach `LOGS/runtime/ollama_global_status.json` (`queue_pending`, `queue_queued`, `queue_running`, `worker_pid`, `worker_running`, optional `last_error`).
+- `action=status` nutzt standardmäßig den Light-Status aus Runtime-Cache; schwere DB-Aggregate werden nur bei `details=1` oder fehlendem Cache ausgeführt.
+- `WWW/app.js` pollt dynamisch (kürzer bei aktivem Worker, länger im Idle) und nutzt Backoff bei Fehlern/Stale-Cache.
+- Web setzt für Ollama-Status einen kurzen SQLite `busy_timeout` (200ms), Worker einen höheren (3500ms), um Lock-Contention zu reduzieren.
 - Runner/Spawn-Antworten liefern ein einheitliches Statusschema mit `status` (started|running|locked|busy|start_failed|open_failed|config_failed) und `reason_code` (z. B. `spawn_unverified`, `lock_busy`, `log_root_unavailable`), damit UI/CLI zwischen Lock, IO/Path und Spawn-Fehlern eindeutig unterscheiden.
 - Worker-„running“ wird zentral über Lock/Heartbeat geprüft (`is_ollama_worker_running`): Launcher-Locks oder `web:*`-Owner zählen nicht, und Locks mit `php_server.pid` gelten als ungültig.
 
@@ -142,6 +146,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **Ollama-Jobs:** `LOGS/ollama_jobs.jsonl`, `LOGS/ollama_errors.jsonl`
 - **Ollama-Service:** `LOGS/ollama_service.jsonl`
 - **Ollama-Status:** `LOGS/ollama_status.json`
+- **Ollama Runtime:** `LOGS/runtime/ollama_worker_heartbeat.json`, `LOGS/runtime/ollama_global_status.json`
 - **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`
 - **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.last.json`
 - **System-Fehlerlog:** `LOGS/system_errors.jsonl` (kritische IO/Spawn-Fehler)
