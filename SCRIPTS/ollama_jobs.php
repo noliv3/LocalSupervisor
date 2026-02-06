@@ -2041,6 +2041,12 @@ function sv_ollama_mark_cancelled(PDO $pdo, int $jobId, array $context, callable
 function sv_ollama_error_code_for_message(string $message, ?Throwable $imageLoadError): string
 {
     $normalized = strtolower($message);
+    if (strpos($normalized, 'connection refused') !== false || strpos($normalized, 'econnrefused') !== false) {
+        return 'ollama_down';
+    }
+    if (strpos($normalized, 'timeout') !== false || strpos($normalized, 'timed out') !== false) {
+        return 'timeout';
+    }
     if (strpos($normalized, 'parse_error:') === 0 || strpos($normalized, 'parse_error') !== false) {
         return 'parse_error';
     }
@@ -3352,6 +3358,7 @@ function sv_ollama_downscale_image(string $raw, int $maxBytes): ?array
     }
 
     $current = $image;
+    $original = $image;
     $quality = 85;
     $best = null;
     $width = imagesx($current);
@@ -3378,7 +3385,10 @@ function sv_ollama_downscale_image(string $raw, int $maxBytes): ?array
         $height = (int)max(1, floor($height * 0.85));
         $resized = @imagescale($current, $width, $height);
         if ($resized !== false) {
-            if ($current !== $image) {
+            if ($current === $original) {
+                imagedestroy($original);
+                $original = null;
+            } else {
                 imagedestroy($current);
             }
             $current = $resized;
@@ -3386,10 +3396,12 @@ function sv_ollama_downscale_image(string $raw, int $maxBytes): ?array
         $quality = 85;
     }
 
-    if ($current !== $image) {
+    if (is_resource($current) || (class_exists('GdImage') && $current instanceof GdImage)) {
         imagedestroy($current);
     }
-    imagedestroy($image);
+    if ($original !== null && $original !== $current) {
+        imagedestroy($original);
+    }
 
     if ($best === null) {
         return null;
@@ -3548,6 +3560,47 @@ function sv_ollama_load_image_source(PDO $pdo, array $config, int $mediaId, arra
     ];
 }
 
+function sv_ollama_force_kill_pid(int $pid, array $config, string $reason, array $context = []): array
+{
+    $result = [
+        'pid' => $pid,
+        'reason' => $reason,
+        'method' => null,
+        'ok' => false,
+        'exit_code' => null,
+        'output' => null,
+    ];
+    if ($pid <= 0) {
+        return $result;
+    }
+
+    if (stripos(PHP_OS, 'WIN') === 0) {
+        $taskOutput = [];
+        $taskCode = 0;
+        @exec('taskkill /F /T /PID ' . (int)$pid, $taskOutput, $taskCode);
+        $result['method'] = 'taskkill';
+        $result['exit_code'] = $taskCode;
+        $result['output'] = implode("\n", $taskOutput);
+        $result['ok'] = $taskCode === 0;
+    } elseif (function_exists('posix_kill')) {
+        $result['method'] = 'posix_kill';
+        $result['ok'] = @posix_kill($pid, 9);
+    }
+
+    if ($result['method'] !== null) {
+        sv_log_system_error($config, 'ollama_forced_kill', array_merge($context, [
+            'pid' => $pid,
+            'reason' => $reason,
+            'method' => $result['method'],
+            'ok' => $result['ok'],
+            'exit_code' => $result['exit_code'],
+            'output' => $result['output'],
+        ]));
+    }
+
+    return $result;
+}
+
 function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, callable $logger): array
 {
     $jobId = (int)($jobRow['id'] ?? 0);
@@ -3566,10 +3619,73 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
         : sv_ollama_mode_for_job_type($jobType);
     $attempt = sv_ollama_job_attempt_from_payload($payload);
     $traceFile = sv_ollama_job_trace_file_for_attempt($config, $jobId, $mode, $attempt);
+    $owner = 'cli:ollama_worker_cli.php';
+
+    $existingPid = isset($jobRow['worker_pid']) ? (int)$jobRow['worker_pid'] : 0;
+    if ($existingPid > 0) {
+        $pidInfo = sv_is_pid_running($existingPid);
+        if (!($pidInfo['unknown'] ?? false) && !empty($pidInfo['running'])) {
+            $terminationLog = [
+                sv_ollama_force_kill_pid($existingPid, $config, 'pre_spawn_existing_worker', [
+                    'job_id' => $jobId,
+                    'mode' => $mode,
+                    'attempt' => $attempt,
+                ]),
+            ];
+            usleep(200000);
+            $pidInfo = sv_is_pid_running($existingPid);
+            if (!($pidInfo['unknown'] ?? false) && !empty($pidInfo['running'])) {
+                $now = date('c');
+                $payload['attempts'] = $attempt;
+                $payload['last_error_at'] = $now;
+                $payload['last_error'] = 'preexisting_pid_running';
+                sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+                sv_update_job_status($pdo, $jobId, 'error', null, 'preexisting_pid_running');
+                sv_ollama_update_job_columns($pdo, $jobId, [
+                    'last_error_code' => 'preexisting_pid_running',
+                    'error_message' => 'preexisting_pid_running',
+                    'stage' => 'child_preexisting_pid',
+                    'stage_changed_at' => $now,
+                    'heartbeat_at' => $now,
+                    'worker_owner' => $owner,
+                ], true);
+                $progressTotal = sv_ollama_progress_bits_total($mode);
+                sv_ollama_touch_job_progress($pdo, $jobId, 1000, $progressTotal, 'preexisting_pid_running');
+                sv_ollama_trace_update($config, $traceFile, [
+                    'stage_at_fail' => 'child_preexisting_pid',
+                    'error_code' => 'preexisting_pid_running',
+                    'error_message' => 'preexisting_pid_running',
+                    'termination' => $terminationLog,
+                ]);
+                sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                    'ts' => $now,
+                    'event' => 'preexisting_pid_running',
+                    'job_id' => $jobId,
+                    'attempt' => $attempt,
+                    'mode' => $mode,
+                    'status' => 'error',
+                    'error_code' => 'preexisting_pid_running',
+                    'error' => 'preexisting_pid_running',
+                    'pid' => $existingPid,
+                    'termination' => $terminationLog,
+                    'trace_file' => $traceFile,
+                ]);
+                return [
+                    'job_id' => $jobId,
+                    'status' => 'error',
+                    'error' => 'preexisting_pid_running',
+                ];
+            }
+            sv_ollama_update_job_columns($pdo, $jobId, [
+                'worker_pid' => null,
+                'worker_owner' => null,
+                'heartbeat_at' => date('c'),
+            ], true);
+        }
+    }
 
     $childScript = __DIR__ . '/ollama_job_child_cli.php';
     $phpCli = sv_get_php_cli($config);
-    $owner = 'cli:ollama_worker_cli.php';
     if (stripos(PHP_OS, 'WIN') === 0) {
         $winQuote = static function (string $value): string {
             $value = str_replace('/', '\\', $value);
@@ -3712,26 +3828,17 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
             'method' => 'proc_terminate',
             'ok' => $terminateOk,
         ];
-        usleep(200000);
-        $status = proc_get_status($process);
-        if (!empty($status['running'])) {
-            $terminateOk = @proc_terminate($process);
-            $terminationLog[] = [
-                'method' => 'proc_terminate_retry',
-                'ok' => $terminateOk,
-            ];
+        $waitStart = microtime(true);
+        do {
             usleep(200000);
             $status = proc_get_status($process);
-        }
-        if (!empty($status['running']) && $pid !== null && stripos(PHP_OS, 'WIN') === 0) {
-            $taskOutput = [];
-            $taskCode = 0;
-            @exec('taskkill /F /PID ' . (int)$pid, $taskOutput, $taskCode);
-            $terminationLog[] = [
-                'method' => 'taskkill',
-                'exit_code' => $taskCode,
-                'output' => implode("\n", $taskOutput),
-            ];
+        } while (!empty($status['running']) && (microtime(true) - $waitStart) < 2.0);
+        if (!empty($status['running']) && $pid !== null) {
+            $terminationLog[] = sv_ollama_force_kill_pid($pid, $config, 'child_' . ($killedReason ?? 'unknown'), [
+                'job_id' => $jobId,
+                'mode' => $mode,
+                'attempt' => $attempt,
+            ]);
             usleep(200000);
             $status = proc_get_status($process);
         }
