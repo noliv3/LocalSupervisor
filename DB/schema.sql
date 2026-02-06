@@ -361,3 +361,6 @@ CREATE TABLE IF NOT EXISTS media_meta (
 
 CREATE INDEX IF NOT EXISTS idx_media_meta_media
     ON media_meta(media_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_meta_key_value
+    ON media_meta(meta_key, meta_value);

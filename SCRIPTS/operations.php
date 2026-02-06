@@ -17,6 +17,9 @@ const SV_JOB_TYPE_SCAN_PATH       = 'scan_path';
 const SV_JOB_TYPE_RESCAN_MEDIA    = 'rescan_media';
 const SV_JOB_TYPE_SCAN_BACKFILL_TAGS = 'scan_backfill_tags';
 const SV_JOB_TYPE_LIBRARY_RENAME  = 'library_rename';
+const SV_JOB_TYPE_INTEGRITY_CHECK = 'integrity_check';
+const SV_JOB_TYPE_HASH_COMPUTE    = 'hash_compute';
+const SV_JOB_TYPE_UPSCALE         = 'upscale';
 const SV_FORGE_DEFAULT_BASE_URL   = 'http://127.0.0.1:7861/';
 const SV_FORGE_MODEL_LIST_PATH    = '/sdapi/v1/sd-models';
 const SV_FORGE_TXT2IMG_PATH       = '/sdapi/v1/txt2img';
@@ -222,9 +225,104 @@ function sv_update_job_checkpoint_payload(PDO $pdo, int $jobId, array $payload):
     });
 }
 
+function sv_fetch_job_payload(PDO $pdo, array $jobRow): array
+{
+    $column = sv_jobs_supports_payload_json($pdo) ? 'payload_json' : 'forge_request_json';
+    $raw = $jobRow[$column] ?? ($jobRow['payload_json'] ?? ($jobRow['forge_request_json'] ?? null));
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function sv_enqueue_job_with_payload(
+    PDO $pdo,
+    array $config,
+    int $mediaId,
+    string $type,
+    array $payload,
+    bool $dedupe = true
+): array {
+    if ($mediaId <= 0) {
+        throw new InvalidArgumentException('Media-ID fehlt.');
+    }
+
+    $type = trim($type);
+    if ($type === '') {
+        throw new InvalidArgumentException('Job-Typ fehlt.');
+    }
+
+    sv_enforce_job_queue_capacity($pdo, $config, $type, $mediaId);
+
+    if ($dedupe) {
+        $placeholders = implode(',', array_fill(0, count(SV_JOB_QUEUE_STATUSES), '?'));
+        $check = $pdo->prepare(
+            'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN (' . $placeholders . ') ORDER BY id DESC LIMIT 1'
+        );
+        $check->execute(array_merge([
+            ':media_id' => $mediaId,
+            ':type'     => $type,
+        ], SV_JOB_QUEUE_STATUSES));
+        $existing = (int)$check->fetchColumn();
+        if ($existing > 0) {
+            return [
+                'job_id'  => $existing,
+                'deduped' => true,
+            ];
+        }
+    }
+
+    $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $payloadJson = $payloadJson === false ? null : $payloadJson;
+    $column = sv_jobs_supports_payload_json($pdo) ? 'payload_json' : 'forge_request_json';
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, ' . $column . ') '
+        . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
+    );
+    $now = date('c');
+    $stmt->execute([
+        ':media_id'  => $mediaId,
+        ':type'      => $type,
+        ':status'    => 'queued',
+        ':created_at'=> $now,
+        ':updated_at'=> $now,
+        ':payload'   => $payloadJson,
+    ]);
+    $jobId = (int)$pdo->lastInsertId();
+
+    sv_audit_log($pdo, 'job_created', 'jobs', $jobId, [
+        'type'     => $type,
+        'media_id' => $mediaId,
+    ]);
+
+    return [
+        'job_id'  => $jobId,
+        'deduped' => false,
+    ];
+}
+
+function sv_resolve_derivatives_root(array $config): string
+{
+    $pathsCfg = $config['paths'] ?? [];
+    $candidate = $pathsCfg['derivatives'] ?? (sv_base_dir() . '/LIBRARY/derivatives');
+    $normalized = sv_normalize_directory((string)$candidate);
+    if ($normalized === '') {
+        $normalized = sv_base_dir() . '/LIBRARY/derivatives';
+    }
+
+    return $normalized;
+}
+
 function sv_scan_job_types(): array
 {
     return [SV_JOB_TYPE_SCAN_PATH, SV_JOB_TYPE_RESCAN_MEDIA, SV_JOB_TYPE_SCAN_BACKFILL_TAGS];
+}
+
+function sv_media_job_types(): array
+{
+    return [SV_JOB_TYPE_INTEGRITY_CHECK, SV_JOB_TYPE_HASH_COMPUTE, SV_JOB_TYPE_UPSCALE];
 }
 
 function sv_finished_job_statuses(): array
@@ -4803,6 +4901,382 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
     ];
 }
 
+function sv_compute_sha256_for_media(PDO $pdo, int $mediaId): array
+{
+    $stmt = $pdo->prepare('SELECT id, path FROM media WHERE id = :id');
+    $stmt->execute([':id' => $mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        throw new RuntimeException('Media nicht gefunden.');
+    }
+
+    $path = (string)($row['path'] ?? '');
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Datei fehlt.');
+    }
+    if (!is_readable($path)) {
+        throw new RuntimeException('Datei nicht lesbar.');
+    }
+
+    $hash = @hash_file('sha256', $path);
+    if (!is_string($hash) || $hash === '') {
+        throw new RuntimeException('SHA256 konnte nicht berechnet werden.');
+    }
+
+    sv_set_media_meta_value($pdo, $mediaId, 'hash.sha256', $hash, 'hash_compute');
+    sv_set_media_meta_value($pdo, $mediaId, 'hash.checked_at', date('c'), 'hash_compute');
+
+    return [
+        'sha256' => $hash,
+    ];
+}
+
+function sv_check_media_integrity(PDO $pdo, int $mediaId): array
+{
+    $stmt = $pdo->prepare('SELECT id, path, type FROM media WHERE id = :id');
+    $stmt->execute([':id' => $mediaId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        throw new RuntimeException('Media nicht gefunden.');
+    }
+
+    $path = (string)($row['path'] ?? '');
+    $type = (string)($row['type'] ?? '');
+    $errorCode = null;
+    $errorMessage = null;
+    $ok = 1;
+
+    if ($path === '' || !is_file($path)) {
+        $ok = 0;
+        $errorCode = 'missing_file';
+        $errorMessage = 'Datei fehlt.';
+    } elseif (!is_readable($path)) {
+        $ok = 0;
+        $errorCode = 'not_readable';
+        $errorMessage = 'Datei nicht lesbar.';
+    } else {
+        $size = @filesize($path);
+        if ($size === false || $size <= 0) {
+            $ok = 0;
+            $errorCode = 'empty_file';
+            $errorMessage = 'Datei ist leer.';
+        } elseif ($type === 'image') {
+            $info = @getimagesize($path);
+            if ($info === false) {
+                $ok = 0;
+                $errorCode = 'invalid_header';
+                $errorMessage = 'Bildheader ungültig.';
+            } elseif (!function_exists('imagecreatefromstring')) {
+                $ok = 0;
+                $errorCode = 'decode_unavailable';
+                $errorMessage = 'Bilddecoder nicht verfügbar.';
+            } else {
+                $raw = @file_get_contents($path);
+                if ($raw === false || $raw === '') {
+                    $ok = 0;
+                    $errorCode = 'read_failed';
+                    $errorMessage = 'Datei konnte nicht gelesen werden.';
+                } else {
+                    $image = @imagecreatefromstring($raw);
+                    if ($image === false) {
+                        $ok = 0;
+                        $errorCode = 'decode_failed';
+                        $errorMessage = 'Bild konnte nicht decodiert werden.';
+                    } else {
+                        imagedestroy($image);
+                    }
+                }
+            }
+        }
+    }
+
+    sv_set_media_meta_value($pdo, $mediaId, 'integrity.ok', $ok, 'integrity_check');
+    sv_set_media_meta_value($pdo, $mediaId, 'integrity.error_code', $errorCode ?? '', 'integrity_check');
+    sv_set_media_meta_value($pdo, $mediaId, 'integrity.error_message', $errorMessage ?? '', 'integrity_check');
+    sv_set_media_meta_value($pdo, $mediaId, 'integrity.checked_at', date('c'), 'integrity_check');
+
+    return [
+        'ok'            => $ok,
+        'error_code'    => $errorCode,
+        'error_message' => $errorMessage,
+    ];
+}
+
+function sv_write_upscaled_image(string $sourcePath, string $targetPath, float $scale): array
+{
+    if (!function_exists('imagecreatefromstring')) {
+        throw new RuntimeException('GD-Image-Decoder fehlt.');
+    }
+
+    $raw = @file_get_contents($sourcePath);
+    if ($raw === false || $raw === '') {
+        throw new RuntimeException('Quelldatei konnte nicht gelesen werden.');
+    }
+
+    $image = @imagecreatefromstring($raw);
+    if ($image === false) {
+        throw new RuntimeException('Quelldatei ist kein decodierbares Bild.');
+    }
+
+    $width  = imagesx($image);
+    $height = imagesy($image);
+    $targetWidth  = max(1, (int)round($width * $scale));
+    $targetHeight = max(1, (int)round($height * $scale));
+
+    $resized = function_exists('imagescale')
+        ? @imagescale($image, $targetWidth, $targetHeight)
+        : null;
+    if ($resized === false || $resized === null) {
+        $resized = imagecreatetruecolor($targetWidth, $targetHeight);
+        imagecopyresampled($resized, $image, 0, 0, 0, 0, $targetWidth, $targetHeight, $width, $height);
+    }
+    imagedestroy($image);
+
+    $targetExt = strtolower(pathinfo($targetPath, PATHINFO_EXTENSION));
+    $writeOk = false;
+    if (in_array($targetExt, ['jpg', 'jpeg'], true)) {
+        $writeOk = @imagejpeg($resized, $targetPath, 94);
+    } elseif ($targetExt === 'png') {
+        $writeOk = @imagepng($resized, $targetPath, 6);
+    } elseif ($targetExt === 'webp' && function_exists('imagewebp')) {
+        $writeOk = @imagewebp($resized, $targetPath, 90);
+    } else {
+        $targetPath = preg_replace('~\\.[^.]+$~', '', $targetPath) . '.png';
+        $writeOk = @imagepng($resized, $targetPath, 6);
+    }
+
+    imagedestroy($resized);
+
+    if (!$writeOk) {
+        throw new RuntimeException('Upscale konnte nicht geschrieben werden.');
+    }
+
+    $finalPath = $targetPath;
+    $hash = @hash_file('md5', $finalPath) ?: null;
+    $filesize = @filesize($finalPath);
+
+    return [
+        'path'     => $finalPath,
+        'width'    => $targetWidth,
+        'height'   => $targetHeight,
+        'hash'     => $hash,
+        'filesize' => $filesize === false ? null : (int)$filesize,
+    ];
+}
+
+function sv_create_upscale_derivative(PDO $pdo, array $config, int $mediaId, array $payload): array
+{
+    $stmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+    $stmt->execute([':id' => $mediaId]);
+    $parent = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$parent) {
+        throw new RuntimeException('Parent-Media fehlt.');
+    }
+
+    $type = (string)($parent['type'] ?? '');
+    if ($type !== 'image') {
+        throw new RuntimeException('Upscale unterstützt nur Bilder.');
+    }
+
+    $sourcePath = (string)($parent['path'] ?? '');
+    if ($sourcePath === '' || !is_file($sourcePath)) {
+        throw new RuntimeException('Quelldatei fehlt.');
+    }
+
+    $scale = isset($payload['scale']) ? (float)$payload['scale'] : 2.0;
+    if ($scale <= 0) {
+        throw new RuntimeException('Ungültiger Scale-Wert.');
+    }
+
+    $model = isset($payload['model']) ? (string)$payload['model'] : '';
+    $steps = isset($payload['steps']) ? (int)$payload['steps'] : null;
+    $seed  = isset($payload['seed']) ? (string)$payload['seed'] : null;
+
+    $derivativesRoot = sv_resolve_derivatives_root($config);
+    if (!is_dir($derivativesRoot)) {
+        if (!mkdir($derivativesRoot, 0777, true) && !is_dir($derivativesRoot)) {
+            throw new RuntimeException('Derivatives-Verzeichnis konnte nicht angelegt werden.');
+        }
+    }
+
+    $ext = strtolower((string)pathinfo($sourcePath, PATHINFO_EXTENSION));
+    $ext = $ext !== '' ? $ext : 'png';
+    $timestamp = date('Ymd_His');
+    $baseName = sprintf('upscale_%d_%s_x%s', $mediaId, $timestamp, str_replace('.', '_', (string)$scale));
+    $targetPath = rtrim($derivativesRoot, '/') . '/' . $baseName . '.' . $ext;
+    $suffix = 0;
+    while (file_exists($targetPath)) {
+        $suffix++;
+        $targetPath = rtrim($derivativesRoot, '/') . '/' . $baseName . '_' . $suffix . '.' . $ext;
+    }
+
+    sv_assert_media_path_allowed($targetPath, $config['paths'] ?? [], 'upscale_output');
+
+    $upscaled = sv_write_upscaled_image($sourcePath, $targetPath, $scale);
+
+    $now = date('c');
+    $insert = $pdo->prepare(
+        'INSERT INTO media (path, type, source, width, height, duration, fps, filesize, hash, created_at, imported_at, rating, has_nsfw, parent_media_id, status) '
+        . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    $insert->execute([
+        $upscaled['path'],
+        $type,
+        'upscale',
+        $upscaled['width'],
+        $upscaled['height'],
+        $parent['duration'] ?? null,
+        $parent['fps'] ?? null,
+        $upscaled['filesize'],
+        $upscaled['hash'],
+        $now,
+        $now,
+        $parent['rating'] ?? null,
+        $parent['has_nsfw'] ?? null,
+        $mediaId,
+        'active',
+    ]);
+    $childId = (int)$pdo->lastInsertId();
+
+    sv_set_media_meta_value($pdo, $childId, 'variant.role', 'upscale', 'upscale');
+    sv_set_media_meta_value($pdo, $childId, 'variant.is_hd', 1, 'upscale');
+    sv_set_media_meta_value($pdo, $childId, 'upscale.scale', $scale, 'upscale');
+    if ($model !== '') {
+        sv_set_media_meta_value($pdo, $childId, 'upscale.model', $model, 'upscale');
+    }
+    if ($steps !== null) {
+        sv_set_media_meta_value($pdo, $childId, 'upscale.steps', $steps, 'upscale');
+    }
+    if ($seed !== null && $seed !== '') {
+        sv_set_media_meta_value($pdo, $childId, 'upscale.seed', $seed, 'upscale');
+    }
+    sv_set_media_meta_value($pdo, $childId, 'upscale.created_at', $now, 'upscale');
+
+    return [
+        'child_id' => $childId,
+        'path'     => $upscaled['path'],
+        'width'    => $upscaled['width'],
+        'height'   => $upscaled['height'],
+        'hash'     => $upscaled['hash'],
+        'filesize' => $upscaled['filesize'],
+        'scale'    => $scale,
+    ];
+}
+
+function sv_update_preferred_upscale_variant(PDO $pdo, int $parentId, int $childId): bool
+{
+    $childStmt = $pdo->prepare('SELECT id, path, width, height FROM media WHERE id = :id');
+    $childStmt->execute([':id' => $childId]);
+    $childRow = $childStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$childRow) {
+        return false;
+    }
+    $childPath = (string)($childRow['path'] ?? '');
+    if ($childPath === '' || !is_file($childPath) || !is_readable($childPath)) {
+        return false;
+    }
+
+    $childScaleRaw = sv_get_media_meta_value($pdo, $childId, 'upscale.scale');
+    $childScale = is_numeric($childScaleRaw) ? (float)$childScaleRaw : null;
+    $childCreatedAt = sv_get_media_meta_value($pdo, $childId, 'upscale.created_at');
+    $childScore = sv_score_upscale_candidate($childRow, $childScale, $childCreatedAt);
+
+    $preferredRaw = sv_get_media_meta_value($pdo, $parentId, 'variant.preferred_media_id');
+    $preferredId = is_numeric($preferredRaw) ? (int)$preferredRaw : 0;
+    if ($preferredId > 0 && $preferredId !== $childId) {
+        $prefStmt = $pdo->prepare('SELECT id, path, width, height FROM media WHERE id = :id');
+        $prefStmt->execute([':id' => $preferredId]);
+        $prefRow = $prefStmt->fetch(PDO::FETCH_ASSOC);
+        if ($prefRow) {
+            $prefPath = (string)($prefRow['path'] ?? '');
+            if ($prefPath !== '' && is_file($prefPath) && is_readable($prefPath)) {
+                $prefScaleRaw = sv_get_media_meta_value($pdo, $preferredId, 'upscale.scale');
+                $prefScale = is_numeric($prefScaleRaw) ? (float)$prefScaleRaw : null;
+                $prefCreatedAt = sv_get_media_meta_value($pdo, $preferredId, 'upscale.created_at');
+                $prefScore = sv_score_upscale_candidate($prefRow, $prefScale, $prefCreatedAt);
+                if (!sv_is_upscale_candidate_better($childScore, $prefScore)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    sv_set_media_meta_value($pdo, $parentId, 'variant.preferred_media_id', $childId, 'upscale');
+    sv_set_media_meta_value($pdo, $parentId, 'variant.preferred_reason', 'upscale', 'upscale');
+
+    return true;
+}
+
+function sv_process_media_jobs(PDO $pdo, array $config, int $limit, callable $logger): array
+{
+    $limit = max(1, min(200, $limit));
+    $types = sv_media_job_types();
+    $placeholders = implode(',', array_fill(0, count($types), '?'));
+
+    $stmt = $pdo->prepare(
+        'SELECT * FROM jobs WHERE status = "queued" AND type IN (' . $placeholders . ') ORDER BY id ASC LIMIT ?'
+    );
+    $stmt->execute(array_merge($types, [$limit]));
+    $jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $done = 0;
+    $error = 0;
+
+    foreach ($jobs as $job) {
+        $jobId = (int)($job['id'] ?? 0);
+        $type  = (string)($job['type'] ?? '');
+        $mediaId = (int)($job['media_id'] ?? 0);
+        $payload = sv_fetch_job_payload($pdo, $job);
+
+        $claimReason = null;
+        if (!sv_claim_job_running($pdo, $jobId, ['queued'], ['media_id' => $mediaId, 'type' => $type], $claimReason)) {
+            $logger('Media-Job #' . $jobId . ' übersprungen (claim failed): ' . ($claimReason ?? 'claim_failed'));
+            continue;
+        }
+
+        try {
+            $response = [];
+            if ($type === SV_JOB_TYPE_HASH_COMPUTE) {
+                $response = sv_compute_sha256_for_media($pdo, $mediaId);
+            } elseif ($type === SV_JOB_TYPE_INTEGRITY_CHECK) {
+                $response = sv_check_media_integrity($pdo, $mediaId);
+            } elseif ($type === SV_JOB_TYPE_UPSCALE) {
+                $response = sv_create_upscale_derivative($pdo, $config, $mediaId, $payload);
+                if (!empty($response['child_id'])) {
+                    sv_update_preferred_upscale_variant($pdo, $mediaId, (int)$response['child_id']);
+                }
+            } else {
+                throw new RuntimeException('Unbekannter Media-Jobtyp.');
+            }
+
+            sv_update_job_status(
+                $pdo,
+                $jobId,
+                'done',
+                json_encode(['result' => $response], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                null
+            );
+            $done++;
+        } catch (Throwable $e) {
+            $error++;
+            sv_update_job_status(
+                $pdo,
+                $jobId,
+                'error',
+                json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                $e->getMessage()
+            );
+            $logger('Media-Job #' . $jobId . ' Fehler: ' . $e->getMessage());
+        }
+    }
+
+    return [
+        'total' => count($jobs),
+        'done'  => $done,
+        'error' => $error,
+    ];
+}
+
 function sv_requeue_job(PDO $pdo, int $jobId, callable $logger): array
 {
     $job = sv_load_job($pdo, $jobId);
@@ -4898,7 +5372,7 @@ function sv_cancel_job(PDO $pdo, int $jobId, callable $logger): array
     $type   = (string)($job['type'] ?? '');
     $status = (string)($job['status'] ?? '');
 
-    $cancelableTypes = array_merge([SV_FORGE_JOB_TYPE], sv_scan_job_types());
+    $cancelableTypes = array_merge([SV_FORGE_JOB_TYPE], sv_scan_job_types(), sv_media_job_types());
     if (!in_array($type, $cancelableTypes, true)) {
         throw new InvalidArgumentException('Abbruch wird für diesen Job-Typ nicht unterstützt.');
     }
@@ -6025,6 +6499,85 @@ function sv_inc_media_meta_int(PDO $pdo, int $mediaId, string $key, int $delta =
         }
         throw $e;
     }
+}
+
+function sv_resolve_effective_media(PDO $pdo, array $config, int $parentMediaId, bool $forceParent = false): array
+{
+    $result = [
+        'parent_id'        => $parentMediaId,
+        'effective_id'     => $parentMediaId,
+        'preferred_id'     => null,
+        'preferred_reason' => null,
+        'is_hd'            => false,
+    ];
+
+    if ($forceParent || $parentMediaId <= 0) {
+        return $result;
+    }
+
+    $preferredRaw = sv_get_media_meta_value($pdo, $parentMediaId, 'variant.preferred_media_id');
+    $preferredId  = is_numeric($preferredRaw) ? (int)$preferredRaw : 0;
+    if ($preferredId <= 0 || $preferredId === $parentMediaId) {
+        return $result;
+    }
+
+    $stmt = $pdo->prepare('SELECT id, path, parent_media_id FROM media WHERE id = :id');
+    $stmt->execute([':id' => $preferredId]);
+    $preferredRow = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$preferredRow) {
+        return $result;
+    }
+
+    $parentRef = isset($preferredRow['parent_media_id']) ? (int)$preferredRow['parent_media_id'] : 0;
+    if ($parentRef !== $parentMediaId) {
+        return $result;
+    }
+
+    $path = (string)($preferredRow['path'] ?? '');
+    if ($path === '' || !is_file($path) || !is_readable($path)) {
+        return $result;
+    }
+
+    try {
+        sv_assert_media_path_allowed($path, $config['paths'] ?? [], 'effective_media');
+    } catch (Throwable $e) {
+        return $result;
+    }
+
+    $result['preferred_id'] = $preferredId;
+    $result['preferred_reason'] = sv_get_media_meta_value($pdo, $parentMediaId, 'variant.preferred_reason');
+    $result['effective_id'] = $preferredId;
+    $result['is_hd'] = true;
+
+    return $result;
+}
+
+function sv_score_upscale_candidate(array $mediaRow, ?float $scale, ?string $createdAt): array
+{
+    $width  = isset($mediaRow['width']) && is_numeric($mediaRow['width']) ? (int)$mediaRow['width'] : 0;
+    $height = isset($mediaRow['height']) && is_numeric($mediaRow['height']) ? (int)$mediaRow['height'] : 0;
+    $pixels = $width > 0 && $height > 0 ? ($width * $height) : 0;
+    $scaleScore = $scale !== null ? (float)$scale : 0.0;
+    $createdTs = $createdAt ? strtotime($createdAt) : false;
+    $createdScore = $createdTs !== false ? (int)$createdTs : 0;
+
+    return [
+        'pixels'  => $pixels,
+        'scale'   => $scaleScore,
+        'created' => $createdScore,
+    ];
+}
+
+function sv_is_upscale_candidate_better(array $candidateScore, array $currentScore): bool
+{
+    if ($candidateScore['pixels'] !== $currentScore['pixels']) {
+        return $candidateScore['pixels'] > $currentScore['pixels'];
+    }
+    if ($candidateScore['scale'] !== $currentScore['scale']) {
+        return $candidateScore['scale'] > $currentScore['scale'];
+    }
+
+    return $candidateScore['created'] > $currentScore['created'];
 }
 
 function sv_resolve_negative_prompt(array $mediaRow, array $overrides, array $regenPlan, array $tags): array
@@ -9241,7 +9794,7 @@ function sv_collect_health_snapshot(PDO $pdo, array $config = [], int $jobLimit 
     ];
 
     try {
-        $types         = array_merge(SV_FORGE_JOB_TYPES, [SV_JOB_TYPE_SCAN_PATH, SV_JOB_TYPE_RESCAN_MEDIA, SV_JOB_TYPE_LIBRARY_RENAME]);
+        $types         = array_merge(SV_FORGE_JOB_TYPES, [SV_JOB_TYPE_SCAN_PATH, SV_JOB_TYPE_RESCAN_MEDIA, SV_JOB_TYPE_LIBRARY_RENAME], sv_media_job_types());
         $placeholder   = implode(',', array_fill(0, count($types), '?'));
         $stmt = $pdo->prepare(
             'SELECT id, media_id, type, status, created_at, updated_at, forge_request_json, forge_response_json, error_message '
@@ -9256,7 +9809,7 @@ function sv_collect_health_snapshot(PDO $pdo, array $config = [], int $jobLimit 
         $stmt->execute();
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($rows as $row) {
-            $payload  = json_decode((string)($row['forge_request_json'] ?? ''), true) ?: [];
+            $payload  = sv_fetch_job_payload($pdo, $row);
             $response = json_decode((string)($row['forge_response_json'] ?? ''), true) ?: [];
             $jobHealth['recent_jobs'][] = [
                 'id'          => (int)$row['id'],

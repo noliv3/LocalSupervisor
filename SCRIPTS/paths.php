@@ -31,6 +31,7 @@ function sv_media_roots(array $pathsCfg): array
         'images_nsfw' => $pathsCfg['images_nsfw'] ?? ($pathsCfg['images_18'] ?? null),
         'videos_sfw'  => $pathsCfg['videos_sfw'] ?? ($pathsCfg['videos'] ?? null),
         'videos_nsfw' => $pathsCfg['videos_nsfw'] ?? ($pathsCfg['videos_18'] ?? null),
+        'derivatives' => $pathsCfg['derivatives'] ?? null,
     ];
 
     $normalized = [];

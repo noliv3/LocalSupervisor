@@ -164,6 +164,8 @@ if ($id <= 0) {
     echo 'Ungültige ID';
     exit;
 }
+$variant = isset($_GET['variant']) && is_string($_GET['variant']) ? strtolower(trim((string)$_GET['variant'])) : 'effective';
+$forceParent = $variant === 'parent';
 
 $ajaxAction = isset($_GET['ajax']) && is_string($_GET['ajax']) ? trim((string)$_GET['ajax']) : null;
 if ($ajaxAction === 'forge_jobs') {
@@ -591,6 +593,22 @@ if (!$showAdult && (int)($media['has_nsfw'] ?? 0) === 1) {
     exit;
 }
 
+$effectiveInfo = sv_resolve_effective_media($pdo, $config, $id, $forceParent);
+$effectiveId = (int)($effectiveInfo['effective_id'] ?? $id);
+$isHd = !empty($effectiveInfo['is_hd']) && $effectiveId !== $id;
+$displayMedia = $media;
+if ($effectiveId !== $id) {
+    $effStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+    $effStmt->execute([':id' => $effectiveId]);
+    $effRow = $effStmt->fetch(PDO::FETCH_ASSOC);
+    if ($effRow) {
+        $displayMedia = $effRow;
+    } else {
+        $effectiveId = $id;
+        $isHd = false;
+    }
+}
+
 if ($hasInternalAccess && $_SERVER['REQUEST_METHOD'] === 'GET') {
     try {
         sv_inc_media_meta_int($pdo, $id, 'activity.clicks', 1);
@@ -740,20 +758,22 @@ if ($requestedVersion >= 0 && $requestedVersion < count($versions)) {
     $activeVersionIndex = $requestedVersion;
 }
 $activeVersion = $versions[$activeVersionIndex] ?? $versions[0];
-$activeAssetSet = $activeVersion['_asset_set'] ?? sv_prepare_version_asset_set($activeVersion, $media);
+$activeAssetSet = $activeVersion['_asset_set'] ?? sv_prepare_version_asset_set($activeVersion, $displayMedia);
 $activeAssetSelection = sv_select_asset_from_set($activeAssetSet, $requestedAssetType);
 $activeAssetWarning = ($requestedAssetType !== null && !in_array($requestedAssetType, $activeAssetSelection['options'], true))
     ? 'Asset-Auswahl nicht verfügbar, verwende ' . sv_asset_label($activeAssetSelection['type']) . '.'
     : null;
-$activeUrls = sv_build_asset_urls($id, $showAdult, $activeAssetSelection);
-$activePath = (string)($activeAssetSelection['path'] ?? ($activeVersion['output_path'] ?? ($media['path'] ?? '')));
+$variantParams = $forceParent ? ['variant' => 'parent'] : [];
+$activeVariantParams = !empty($activeAssetSelection['job_id']) ? [] : $variantParams;
+$activeUrls = sv_build_asset_urls($id, $showAdult, $activeAssetSelection, $activeVariantParams);
+$activePath = (string)($activeAssetSelection['path'] ?? ($activeVersion['output_path'] ?? ($displayMedia['path'] ?? '')));
 if ($activePath === '') {
-    $activePath = (string)($media['path'] ?? '');
+    $activePath = (string)($displayMedia['path'] ?? '');
 }
 $activePathLabel = sv_safe_path_label($activePath);
-$activeHash = (string)($activeVersion['hash_display'] ?? ($media['hash'] ?? ''));
-$activeWidth = $activeVersion['width'] ?? $media['width'] ?? null;
-$activeHeight = $activeVersion['height'] ?? $media['height'] ?? null;
+$activeHash = (string)($activeVersion['hash_display'] ?? ($displayMedia['hash'] ?? ''));
+$activeWidth = $activeVersion['width'] ?? $displayMedia['width'] ?? null;
+$activeHeight = $activeVersion['height'] ?? $displayMedia['height'] ?? null;
 $activeModel = $activeVersion['model_used'] ?? $activeVersion['model_requested'] ?? ($prompt['model'] ?? '');
 $forgeFallbackModel = sv_forge_fallback_model($config);
 $modelDropdownValue = $latestRequestedModel ?? $activeModel;
@@ -803,7 +823,8 @@ foreach ($activeAssetSelection['options'] as $candidate) {
         break;
     }
 }
-$secondaryAssetUrls = $secondaryAssetSelection ? sv_build_asset_urls($id, $showAdult, $secondaryAssetSelection) : [];
+$secondaryAssetVariant = ($secondaryAssetSelection && !empty($secondaryAssetSelection['job_id'])) ? [] : $variantParams;
+$secondaryAssetUrls = $secondaryAssetSelection ? sv_build_asset_urls($id, $showAdult, $secondaryAssetSelection, $secondaryAssetVariant) : [];
 $versionCompareA = isset($_GET['compare_a']) ? (int)$_GET['compare_a'] : $activeVersionIndex;
 $versionCompareB = isset($_GET['compare_b']) ? (int)$_GET['compare_b'] : $activeVersionIndex;
 if ($versionCompareA < 0 || $versionCompareA >= count($versions)) {
@@ -818,8 +839,8 @@ $compareAssetTypeA = isset($_GET['compare_asset_a']) && is_string($_GET['compare
 $compareAssetTypeB = isset($_GET['compare_asset_b']) && is_string($_GET['compare_asset_b']) ? strtolower(trim((string)$_GET['compare_asset_b'])) : null;
 $compareAssetSelectionA = $compareVersionA ? sv_select_asset_from_set($compareVersionA['_asset_set'] ?? sv_prepare_version_asset_set($compareVersionA, $media), $compareAssetTypeA) : null;
 $compareAssetSelectionB = $compareVersionB ? sv_select_asset_from_set($compareVersionB['_asset_set'] ?? sv_prepare_version_asset_set($compareVersionB, $media), $compareAssetTypeB) : null;
-$compareAssetUrlsA = $compareAssetSelectionA ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionA) : [];
-$compareAssetUrlsB = $compareAssetSelectionB ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionB) : [];
+$compareAssetUrlsA = $compareAssetSelectionA ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionA, !empty($compareAssetSelectionA['job_id']) ? [] : $variantParams) : [];
+$compareAssetUrlsB = $compareAssetSelectionB ? sv_build_asset_urls($id, $showAdult, $compareAssetSelectionB, !empty($compareAssetSelectionB['job_id']) ? [] : $variantParams) : [];
 $compareIdenticalSources = $compareAssetSelectionA && $compareAssetSelectionB
     ? (($compareAssetSelectionA['path'] ?? '') !== '' && ($compareAssetSelectionA['path'] ?? '') === ($compareAssetSelectionB['path'] ?? ''))
     : false;
@@ -997,7 +1018,7 @@ function sv_asset_label(string $type): string
     };
 }
 
-function sv_build_asset_urls(int $mediaId, bool $adult, array $selection): array
+function sv_build_asset_urls(int $mediaId, bool $adult, array $selection, array $extraParams = []): array
 {
     $params = ['adult' => $adult ? '1' : '0'];
     if (!empty($selection['job_id'])) {
@@ -1005,6 +1026,10 @@ function sv_build_asset_urls(int $mediaId, bool $adult, array $selection): array
         $params['asset']  = (string)$selection['type'];
     } else {
         $params['id'] = $mediaId;
+    }
+
+    if ($extraParams !== []) {
+        $params = array_merge($params, $extraParams);
     }
 
     if (!empty($selection['version_token'])) {
@@ -1122,7 +1147,7 @@ $isMissing = (int)($media['is_missing'] ?? 0) === 1 || (string)($media['status']
 $hasFileIssue = array_reduce($mediaIssues, static function (bool $carry, array $issue): bool {
     return $carry || ((string)($issue['type'] ?? '') === 'file');
 }, false);
-$rawTitle = $media['path'] ? pathinfo((string)$media['path'], PATHINFO_FILENAME) : ('Media #' . $id);
+$rawTitle = $displayMedia['path'] ? pathinfo((string)$displayMedia['path'], PATHINFO_FILENAME) : ('Media #' . $id);
 $prettyTitle = trim((string)preg_replace('~[\\._-]+~', ' ', (string)$rawTitle));
 $filenameTitle = $prettyTitle !== '' ? $prettyTitle : (string)$rawTitle;
 $ollamaTitleText = is_string($ollamaTitle) ? trim($ollamaTitle) : '';
@@ -1271,13 +1296,24 @@ $latestScanMetaText    = $latestScan
 $latestScanTagsText    = $latestScanTagsWritten !== null ? ((int)$latestScanTagsWritten . ' Tags') : '–';
 $downloadUrl = $activeStreamUrl !== '' ? $activeStreamUrl . (str_contains($activeStreamUrl, '?') ? '&' : '?') . 'dl=1' : '';
 $metaResolution = ($activeWidth && $activeHeight) ? ($activeWidth . '×' . $activeHeight) : '–';
-$metaSize = !empty($media['filesize']) ? (string)$media['filesize'] : '–';
-$metaDuration = !empty($media['duration']) ? number_format((float)$media['duration'], 1) . 's' : '–';
-$metaFps = !empty($media['fps']) ? (string)$media['fps'] : '–';
+$metaSize = !empty($displayMedia['filesize']) ? (string)$displayMedia['filesize'] : '–';
+$metaDuration = !empty($displayMedia['duration']) ? number_format((float)$displayMedia['duration'], 1) . 's' : '–';
+$metaFps = !empty($displayMedia['fps']) ? (string)$displayMedia['fps'] : '–';
 $metaScanner = $latestScanScanner !== '' ? $latestScanScanner : '–';
 $metaScanAt = $latestScanRunAt !== '' ? $latestScanRunAt : '–';
 
+$variantToggleHtml = '';
+if ($isHd) {
+    $variantToggleHtml = '<a class="toggle-link' . ($forceParent ? ' is-active' : '') . '" href="media_view.php?'
+        . htmlspecialchars(http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'variant' => 'parent'])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+        . '">Original (SD)</a>'
+        . '<a class="toggle-link' . ($forceParent ? '' : ' is-active') . '" href="media_view.php?'
+        . htmlspecialchars(http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'variant' => 'effective'])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+        . '">HD</a>';
+}
+
 $adultToggleHtml = '<div class="header-toggle">'
+    . $variantToggleHtml
     . '<a class="toggle-link' . ($showAdult ? '' : ' is-active') . '" href="media_view.php?' . htmlspecialchars(http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'adult' => '0'])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">Adult aus</a>'
     . '<a class="toggle-link' . ($showAdult ? ' is-active' : '') . '" href="media_view.php?' . htmlspecialchars(http_build_query(array_merge($filteredParams, ['id' => (int)$id, 'adult' => '1'])), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">Adult an</a>'
     . '</div>';
@@ -1372,7 +1408,7 @@ $adultToggleHtml = '<div class="header-toggle">'
                             <select id="version-select">
                                 <?php foreach ($versions as $idx => $version): ?>
                                     <?php
-                                    $versionAssetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
+                                    $versionAssetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $displayMedia);
                                     $versionAssetLabel = sv_asset_label($versionAssetSet['primary_type'] ?? 'baseline');
                                     $versionJobLabel = !empty($version['job_id']) ? (' · Job #' . (int)$version['job_id']) : '';
                                     ?>
@@ -1410,13 +1446,16 @@ $adultToggleHtml = '<div class="header-toggle">'
                         <div class="preview-card preview-card--primary">
                             <div class="preview-label original">AKTIV: <?= htmlspecialchars(sv_asset_label((string)$activeAssetSelection['type']), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                             <div class="preview-frame preview-frame--primary">
+                                <?php if ($isHd): ?>
+                                    <span class="hd-badge">HD</span>
+                                <?php endif; ?>
                                 <?php if ($activeAssetExists): ?>
                                     <img id="media-preview-thumb" class="full-preview" src="<?= htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="Vorschau" data-full-info="<?= htmlspecialchars(json_encode([
                                         'path'   => $activePathLabel,
                                         'hash'   => $activeHash,
                                         'width'  => $activeWidth,
                                         'height' => $activeHeight,
-                                        'size'   => (int)($media['filesize'] ?? 0),
+                                        'size'   => (int)($displayMedia['filesize'] ?? 0),
                                     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                 <?php else: ?>
                                     <div class="preview-placeholder">
@@ -2060,7 +2099,7 @@ $adultToggleHtml = '<div class="header-toggle">'
                         <?php
                         $assetSet = $version['_asset_set'] ?? sv_prepare_version_asset_set($version, $media);
                         $primarySelection = sv_select_asset_from_set($assetSet, $assetSet['primary_type'] ?? null);
-                        $primaryUrls = sv_build_asset_urls($id, $showAdult, $primarySelection);
+                        $primaryUrls = sv_build_asset_urls($id, $showAdult, $primarySelection, !empty($primarySelection['job_id']) ? [] : $variantParams);
                         $versionLinkParams = array_merge($filteredParams, ['id' => (int)$id, 'version' => (int)$idx, 'asset' => $primarySelection['type']]);
                         $versionLink = 'media_view.php?' . http_build_query($versionLinkParams) . '#visual';
                         $versionAssetLabel = sv_asset_label((string)$primarySelection['type']);
