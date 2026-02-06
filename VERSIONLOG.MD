@@ -1,5 +1,8 @@
 # VERSIONLOG
 
+## 2026-02-06
+- Optimierung der SQLite-Performance durch Transaktions-Batching im Ollama-Enqueue und Anpassung der Pragmas.
+
 ## Stage 1 – Caption & Title
 - Jobtypen für Caption/Title eingeführt; Ergebnisse werden in `ollama_results` persistiert und in `media_meta` als `ollama.caption`/`ollama.title` (inkl. `.meta`) gespiegelt.
 

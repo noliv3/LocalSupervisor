@@ -192,6 +192,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ## Troubleshooting (kurz)
 - **SQLite busy_timeout/WAL:** Werte in `CONFIG/config.php` prüfen (`db.sqlite`).
+- **Ollama-Enqueue-Performance:** Das Enqueue fasst Job-Erstellung in eine Transaktion; bei Bedarf WAL/`synchronous=NORMAL` und `busy_timeout` in der SQLite-Config prüfen.
 - **Jobs hängen/Queue voll:** `jobs_admin.php` und `jobs_prune.php` nutzen.
 - **Scanner/Ollama/Forge nicht erreichbar:** `base_url` in der Config prüfen.
 

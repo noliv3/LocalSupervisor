@@ -459,50 +459,59 @@ if ($action === 'enqueue') {
                 'already' => 0,
             ];
 
-            foreach ($modes as $mode) {
-                $candidateIds = $selectCandidates($mode);
+            $pdo->beginTransaction();
+            try {
+                foreach ($modes as $mode) {
+                    $candidateIds = $selectCandidates($mode);
 
-                foreach ($candidateIds as $candidateId) {
-                    $candidateId = (int)$candidateId;
-                    if ($candidateId <= 0) {
-                        continue;
-                    }
-                    $summary['candidates']++;
-
-                    $payload = [];
-                    if ($mode === 'prompt_eval') {
-                        $promptInfo = sv_ollama_fetch_prompt($pdo, $config, $candidateId);
-                        $prompt = $promptInfo['prompt'] ?? null;
-                        if (!is_string($prompt) || trim($prompt) === '') {
-                            $logger('Prompt-Eval übersprungen (kein Prompt): Media ' . $candidateId . '.');
-                            $summary['skipped']++;
+                    foreach ($candidateIds as $candidateId) {
+                        $candidateId = (int)$candidateId;
+                        if ($candidateId <= 0) {
                             continue;
                         }
-                        $payload['prompt'] = $prompt;
-                        $payload['prompt_source'] = $promptInfo['source'] ?? null;
-                    }
-                    if ($mode === 'embed') {
-                        $candidate = sv_ollama_embed_candidate($pdo, $config, $candidateId, $allFlag);
-                        if (empty($candidate['eligible'])) {
-                            $reason = isset($candidate['reason']) ? (string)$candidate['reason'] : 'Embed übersprungen.';
-                            $logger('Embed übersprungen (Media ' . $candidateId . '): ' . $reason);
-                            $summary['skipped']++;
-                            continue;
-                        }
-                    }
+                        $summary['candidates']++;
 
-                    try {
-                        $result = sv_enqueue_ollama_job($pdo, $config, $candidateId, $mode, $payload, $logger);
-                        if (!empty($result['deduped'])) {
-                            $summary['already']++;
-                        } else {
-                            $summary['enqueued']++;
+                        $payload = [];
+                        if ($mode === 'prompt_eval') {
+                            $promptInfo = sv_ollama_fetch_prompt($pdo, $config, $candidateId);
+                            $prompt = $promptInfo['prompt'] ?? null;
+                            if (!is_string($prompt) || trim($prompt) === '') {
+                                $logger('Prompt-Eval übersprungen (kein Prompt): Media ' . $candidateId . '.');
+                                $summary['skipped']++;
+                                continue;
+                            }
+                            $payload['prompt'] = $prompt;
+                            $payload['prompt_source'] = $promptInfo['source'] ?? null;
                         }
-                    } catch (Throwable $e) {
-                        $logger('Enqueue-Fehler (Media ' . $candidateId . '): ' . $e->getMessage());
-                        $summary['skipped']++;
+                        if ($mode === 'embed') {
+                            $candidate = sv_ollama_embed_candidate($pdo, $config, $candidateId, $allFlag);
+                            if (empty($candidate['eligible'])) {
+                                $reason = isset($candidate['reason']) ? (string)$candidate['reason'] : 'Embed übersprungen.';
+                                $logger('Embed übersprungen (Media ' . $candidateId . '): ' . $reason);
+                                $summary['skipped']++;
+                                continue;
+                            }
+                        }
+
+                        try {
+                            $result = sv_enqueue_ollama_job($pdo, $config, $candidateId, $mode, $payload, $logger);
+                            if (!empty($result['deduped'])) {
+                                $summary['already']++;
+                            } else {
+                                $summary['enqueued']++;
+                            }
+                        } catch (Throwable $e) {
+                            $logger('Enqueue-Fehler (Media ' . $candidateId . '): ' . $e->getMessage());
+                            $summary['skipped']++;
+                        }
                     }
                 }
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $e;
             }
 
             return [
