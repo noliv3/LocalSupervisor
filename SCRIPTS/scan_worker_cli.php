@@ -26,6 +26,7 @@ if ($logsRoot === null) {
 
 $lockPath = $logsRoot . '/scan_worker.lock.json';
 $errLogPath = $logsRoot . '/scan_worker.err.log';
+$heartbeatPath = $logsRoot . '/scan_worker_heartbeat.json';
 
 $writeErrLog = static function (string $message) use ($errLogPath): void {
     $line = '[' . date('c') . '] ' . $message . PHP_EOL;
@@ -120,10 +121,34 @@ $updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$l
     }
 };
 
-$logger = function (string $msg) use ($updateHeartbeat): void {
+$writeHeartbeat = static function (string $state, ?int $currentJobId = null, ?string $lastProgressTs = null) use ($heartbeatPath, $pid): void {
+    $payload = [
+        'ts_utc' => gmdate('c'),
+        'pid' => $pid,
+        'state' => $state,
+        'current_job_id' => $currentJobId,
+        'last_progress_ts' => $lastProgressTs,
+    ];
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json !== false) {
+        @file_put_contents($heartbeatPath, $json);
+    }
+};
+
+$logger = function (string $msg) use ($updateHeartbeat, $writeHeartbeat): void {
     $updateHeartbeat();
+    $writeHeartbeat('running', null, gmdate('c'));
     fwrite(STDOUT, $msg . PHP_EOL);
 };
+
+fwrite(STDOUT, sprintf(
+    'scan_worker_started pid=%d limit=%s media_id=%s config_path=%s' . PHP_EOL,
+    (int)$pid,
+    $limit !== null ? (string)$limit : '-',
+    $mediaId !== null ? (string)$mediaId : '-',
+    (string)($config['_config_path'] ?? 'unknown')
+));
+$writeHeartbeat('starting', null, gmdate('c'));
 
 try {
     $options = [];
@@ -147,11 +172,16 @@ try {
         (int)($summary['backfill'] ?? 0)
     );
     fwrite(STDOUT, $line . PHP_EOL);
+    $writeHeartbeat('idle', null, gmdate('c'));
     exit(0);
 } catch (Throwable $e) {
+    $writeHeartbeat('error', null, gmdate('c'));
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 } finally {
+    if (is_file($heartbeatPath)) {
+        @unlink($heartbeatPath);
+    }
     if (is_file($lockPath) && !unlink($lockPath)) {
         $writeErrLog('Scan-Worker Lock konnte nicht entfernt werden (finally).');
         sv_log_system_error($config, 'scan_worker_lock_remove_failed_finally', ['path' => $lockPath]);

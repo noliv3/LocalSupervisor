@@ -212,10 +212,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $actionError = 'Keine gültigen Scan-Pfade.';
             } else {
                 try {
-                    $worker  = sv_spawn_scan_worker($config, null, null, $logger, null);
+                    $worker  = sv_spawn_scan_worker($config, null, null, $logger, null, 0);
+                    $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
                     $workerStatus = (string)($worker['status'] ?? '');
                     $workerReason = (string)($worker['reason_code'] ?? ($worker['reason'] ?? ''));
-                    $workerOk = !empty($worker['running']) && $workerStatus === 'running';
+                    $workerOk = in_array($workerStatus, ['running', 'started_unverified'], true) && !empty($worker['spawned']);
 
                     foreach ($createdJobs as $jobId) {
                         sv_merge_job_response_metadata($pdo, $jobId, [
@@ -280,11 +281,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $result = sv_enqueue_rescan_unscanned_jobs($pdo, $config, $limit, $offset, $logger);
                 $worker = null;
                 if (($result['total'] ?? 0) > 0) {
-                    $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
+                    $worker = sv_spawn_scan_worker($config, null, null, $logger, null, 0);
+                    $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
                 }
                 $workerStatus = (string)($worker['status'] ?? '');
                 $workerReason = (string)($worker['reason_code'] ?? ($worker['reason'] ?? ''));
-                $workerOk = $worker === null || (!empty($worker['running']) && $workerStatus === 'running');
+                $workerOk = $worker === null || (in_array($workerStatus, ['running', 'started_unverified'], true) && !empty($worker['spawned']));
                 if (!$workerOk) {
                     $actionError = 'Rescan-Worker-Start fehlgeschlagen (status='
                         . ($workerStatus !== '' ? $workerStatus : 'unknown')
@@ -335,10 +337,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'chunk' => $chunk,
                     'max'   => $max,
                 ], $logger);
-                $worker = sv_spawn_scan_worker($config, null, null, $logger, null);
+                $worker = sv_spawn_scan_worker($config, null, null, $logger, null, 0);
+                $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
                 $workerStatus = (string)($worker['status'] ?? '');
                 $workerReason = (string)($worker['reason_code'] ?? ($worker['reason'] ?? ''));
-                $workerOk = !empty($worker['running']) && $workerStatus === 'running';
+                $workerOk = in_array($workerStatus, ['running', 'started_unverified'], true) && !empty($worker['spawned']);
                 $jobId = (int)($result['job_id'] ?? 0);
                 if ($jobId > 0) {
                     sv_merge_job_response_metadata($pdo, $jobId, [

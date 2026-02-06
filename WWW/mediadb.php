@@ -88,7 +88,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $logLines = [];
             $logger = sv_operation_logger(null, $logLines);
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $mediaId, $logger);
-            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $mediaId);
+            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $mediaId, 0);
+            $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
             $jobId   = (int)($enqueue['job_id'] ?? 0);
             $deduped = (bool)($enqueue['deduped'] ?? false);
             if ($jobId <= 0) {

@@ -841,6 +841,46 @@ function sv_scanner_format_error_message(array $errorMeta): string
     return $message;
 }
 
+function sv_scanner_validate_runtime_config(array $scannerCfg): ?array
+{
+    $baseUrl = trim((string)($scannerCfg['base_url'] ?? ''));
+    $token   = trim((string)($scannerCfg['token'] ?? ''));
+    $apiKey  = trim((string)($scannerCfg['api_key'] ?? ''));
+    $apiHdr  = trim((string)($scannerCfg['api_key_header'] ?? ''));
+    $configPath = trim((string)($scannerCfg['_config_path'] ?? ''));
+
+    if ($baseUrl === '') {
+        return [
+            'reason_code' => 'scanner_not_configured',
+            'missing_keys' => ['scanner.base_url'],
+            'config_path' => $configPath !== '' ? $configPath : null,
+        ];
+    }
+
+    $missingAuth = [];
+    if ($token === '') {
+        if ($apiKey === '') {
+            $missingAuth[] = 'scanner.token|scanner.api_key';
+        }
+        if ($apiKey !== '' && $apiHdr === '') {
+            $missingAuth[] = 'scanner.api_key_header';
+        }
+        if ($apiKey === '' && $apiHdr !== '') {
+            $missingAuth[] = 'scanner.api_key';
+        }
+    }
+
+    if ($missingAuth !== []) {
+        return [
+            'reason_code' => 'scanner_auth_missing',
+            'missing_keys' => $missingAuth,
+            'config_path' => $configPath !== '' ? $configPath : null,
+        ];
+    }
+
+    return null;
+}
+
 /**
  * Lokalen PixAI-Scanner via HTTP /check aufrufen.
  * - Feldname: "image"
@@ -861,54 +901,21 @@ function sv_scan_with_local_scanner(
     $apiHdr  = (string)($scannerCfg['api_key_header'] ?? '');
     $allowFallback = isset($options['allow_fallback']) ? (bool)$options['allow_fallback'] : true;
 
-    if ($baseUrl === '') {
+    $configError = sv_scanner_validate_runtime_config($scannerCfg);
+    if ($configError !== null) {
         if ($logger) {
-            $logger('Scanner nicht konfiguriert (base_url fehlt).');
-        }
-        return [
-            'ok'    => false,
-            'error' => 'Scanner nicht konfiguriert',
-            'error_meta' => [
-                'http_status' => null,
-                'endpoint'    => null,
-                'error'       => 'scanner_not_configured',
-                'error_code'  => 'scanner_not_configured',
-                'body_snippet'=> null,
-                'response_type_detected' => 'none',
-            ],
-            'debug' => [
-                'response_shape'     => 'none',
-                'merged_parts_count' => 0,
-                'fallback_used'      => false,
-            ],
-        ];
-    }
-
-    $missingAuth = [];
-    if ($token === '') {
-        if ($apiKey === '') {
-            $missingAuth[] = 'scanner.token|scanner.api_key';
-        }
-        if ($apiKey !== '' && $apiHdr === '') {
-            $missingAuth[] = 'scanner.api_key_header';
-        }
-        if ($apiKey === '' && $apiHdr !== '') {
-            $missingAuth[] = 'scanner.api_key';
-        }
-    }
-    if ($missingAuth !== []) {
-        if ($logger) {
-            $logger('Scanner nicht konfiguriert (Auth fehlt).');
+            $logger('Scanner nicht konfiguriert (' . $configError['reason_code'] . ').');
         }
         $errorMeta = [
             'http_status' => null,
             'endpoint'    => null,
-            'error'       => 'scanner_auth_missing',
-            'error_code'  => 'scanner_auth_missing',
-            'reason_code' => 'scanner_auth_missing',
-            'missing_keys'=> $missingAuth,
+            'error'       => (string)$configError['reason_code'],
+            'error_code'  => (string)$configError['reason_code'],
+            'reason_code' => (string)$configError['reason_code'],
+            'missing_keys'=> $configError['missing_keys'] ?? [],
+            'config_path' => $configError['config_path'] ?? null,
             'body_snippet'=> null,
-            'response_type_detected' => 'none',
+            'response_type_detected' => 'config_error',
         ];
         sv_scanner_log_event($pathsCfg, 'scanner_ingest', [
             'media_id'    => $logContext['media_id'] ?? null,
@@ -920,11 +927,14 @@ function sv_scan_with_local_scanner(
             'file_size'   => @filesize($file),
             'http_status' => null,
             'response_type_detected' => 'config_error',
+            'reason_code' => $configError['reason_code'] ?? null,
+            'missing_keys' => $configError['missing_keys'] ?? [],
+            'config_path' => $configError['config_path'] ?? null,
             'response_snippet_sanitized' => null,
         ]);
         return [
             'ok'         => false,
-            'error'      => 'Scanner Auth fehlt',
+            'error'      => (string)$configError['reason_code'],
             'error_meta' => $errorMeta,
             'debug'      => [
                 'response_shape'     => 'none',

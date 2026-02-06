@@ -486,7 +486,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'rescan_job') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'rescan_single_job', $actionLogs, 10);
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $id, $logger);
-            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $id);
+            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $id, 0);
+            $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
             $jobId   = (int)($enqueue['job_id'] ?? 0);
             $deduped = (bool)($enqueue['deduped'] ?? false);
             $actionSuccess = $jobId > 0;
