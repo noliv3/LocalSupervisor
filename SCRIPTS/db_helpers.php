@@ -110,6 +110,8 @@ function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
                 $pdo->exec('PRAGMA synchronous = NORMAL');
             }
         }
+
+        $pdo->exec('PRAGMA temp_store = MEMORY');
     } catch (Throwable $e) {
         // Pragmas sind optional; Fehler sollen den Verbindungsaufbau nicht blockieren.
     }

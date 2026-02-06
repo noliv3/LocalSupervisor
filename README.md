@@ -148,6 +148,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Child-Timeouts/Cancels werden nach kurzer Grace-Period hart beendet (posix `SIGKILL` oder `taskkill /F /T`) und als System-Error geloggt.
 - Der Worker schreibt zusätzlich einen Runtime-Heartbeat nach `LOGS/runtime/ollama_worker_heartbeat.json` (`ts_utc`, `pid`, `state`, optional `current_job_id`/`last_batch_ts`); dieser wird im Status-Polling primär genutzt.
 - Der Worker schreibt einen kompakten Runtime-Cache nach `LOGS/runtime/ollama_global_status.json` (`queue_pending`, `queue_queued`, `queue_running`, `worker_pid`, `worker_running`, optional `last_error`).
+- Ollama- und System-JSONL-Logs werden automatisch rotiert, sobald sie 10 MB überschreiten (Archiv via `.old` oder Trunkierung auf 1000 Zeilen).
 - `action=status` nutzt standardmäßig den Light-Status aus Runtime-Cache; schwere DB-Aggregate werden nur bei `details=1` oder fehlendem Cache ausgeführt.
 - `WWW/app.js` pollt dynamisch (kürzer bei aktivem Worker, länger im Idle) und nutzt Backoff bei Fehlern/Stale-Cache.
 - Web setzt für Ollama-Status einen kurzen SQLite `busy_timeout` (200ms), Worker einen höheren (3500ms), um Lock-Contention zu reduzieren.
