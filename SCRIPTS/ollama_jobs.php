@@ -1931,6 +1931,8 @@ function sv_ollama_watchdog_stale_running(PDO $pdo, array $config, int $minutes 
         $count++;
     }
 
+    sv_rotate_logs($config);
+
     return $count;
 }
 
@@ -3625,6 +3627,52 @@ function sv_ollama_run_job_in_child(PDO $pdo, array $config, array $jobRow, call
     if ($existingPid > 0) {
         $pidInfo = sv_is_pid_running($existingPid);
         if (!($pidInfo['unknown'] ?? false) && !empty($pidInfo['running'])) {
+            $heartbeatRaw = isset($jobRow['heartbeat_at']) ? (string)$jobRow['heartbeat_at'] : '';
+            $heartbeatTs = $heartbeatRaw !== '' ? strtotime($heartbeatRaw) : false;
+            $heartbeatFresh = $heartbeatTs !== false && (time() - (int)$heartbeatTs) <= 7200;
+            $workerOwner = isset($jobRow['worker_owner']) ? (string)$jobRow['worker_owner'] : '';
+            $ownerMatches = $workerOwner !== '' && $workerOwner === $owner;
+            if (!$heartbeatFresh && !$ownerMatches) {
+                $now = date('c');
+                $payload['attempts'] = $attempt;
+                $payload['last_error_at'] = $now;
+                $payload['last_error'] = 'preexisting_pid_untrusted';
+                sv_update_job_checkpoint_payload($pdo, $jobId, $payload);
+                sv_update_job_status($pdo, $jobId, 'error', null, 'preexisting_pid_untrusted');
+                sv_ollama_update_job_columns($pdo, $jobId, [
+                    'last_error_code' => 'preexisting_pid_untrusted',
+                    'error_message' => 'preexisting_pid_untrusted',
+                    'stage' => 'child_preexisting_pid_untrusted',
+                    'stage_changed_at' => $now,
+                    'heartbeat_at' => $now,
+                ], true);
+                $progressTotal = sv_ollama_progress_bits_total($mode);
+                sv_ollama_touch_job_progress($pdo, $jobId, 1000, $progressTotal, 'preexisting_pid_untrusted');
+                sv_ollama_trace_update($config, $traceFile, [
+                    'stage_at_fail' => 'child_preexisting_pid_untrusted',
+                    'error_code' => 'preexisting_pid_untrusted',
+                    'error_message' => 'preexisting_pid_untrusted',
+                    'termination' => [],
+                ]);
+                sv_ollama_log_jsonl($config, 'ollama_jobs.jsonl', [
+                    'ts' => $now,
+                    'event' => 'preexisting_pid_untrusted',
+                    'job_id' => $jobId,
+                    'attempt' => $attempt,
+                    'mode' => $mode,
+                    'status' => 'error',
+                    'error_code' => 'preexisting_pid_untrusted',
+                    'error' => 'preexisting_pid_untrusted',
+                    'pid' => $existingPid,
+                    'termination' => [],
+                    'trace_file' => $traceFile,
+                ]);
+                return [
+                    'job_id' => $jobId,
+                    'status' => 'error',
+                    'error' => 'preexisting_pid_untrusted',
+                ];
+            }
             $terminationLog = [
                 sv_ollama_force_kill_pid($existingPid, $config, 'pre_spawn_existing_worker', [
                     'job_id' => $jobId,
@@ -5316,13 +5364,16 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         $metaJson = sv_ollama_encode_json($meta);
 
         if ($mode === 'quality' && $qualityErrorType !== null) {
+            $qualityScoreForInsert = $qualityScore !== null && $qualityScore >= 0 && $qualityScore <= 100
+                ? (float)$qualityScore
+                : null;
             $resultId = sv_ollama_insert_result($pdo, [
                 'media_id' => $mediaId,
                 'mode' => $mode,
                 'model' => (string)($response['model'] ?? $options['model']),
                 'title' => null,
                 'caption' => null,
-                'score' => $qualityScore !== null && $qualityScore >= 0 && $qualityScore <= 100 ? $qualityScore : null,
+                'score' => $qualityScoreForInsert,
                 'contradictions' => null,
                 'missing' => null,
                 'rationale' => $rationale,
@@ -5394,13 +5445,14 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
         }
 
         if ($mode === 'nsfw_classify' && $nsfwErrorType !== null) {
+            $nsfwScoreForInsert = $nsfwScore !== null ? (float)$nsfwScore : null;
             $resultId = sv_ollama_insert_result($pdo, [
                 'media_id' => $mediaId,
                 'mode' => $mode,
                 'model' => (string)($response['model'] ?? $options['model']),
                 'title' => null,
                 'caption' => null,
-                'score' => $nsfwScore,
+                'score' => $nsfwScoreForInsert,
                 'contradictions' => null,
                 'missing' => null,
                 'rationale' => $nsfwRationale,
@@ -5431,6 +5483,9 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             throw new RuntimeException('parse_error: ' . $detail);
         }
 
+        $scoreForInsert = $score !== null ? (int)$score : null;
+        $qualityScoreForInsert = $qualityScore !== null ? (float)$qualityScore : null;
+        $nsfwScoreForInsert = $nsfwScore !== null ? (float)$nsfwScore : null;
         $resultId = sv_ollama_insert_result($pdo, [
             'media_id' => $mediaId,
             'mode' => $mode,
@@ -5438,8 +5493,10 @@ function sv_process_ollama_job(PDO $pdo, array $config, array $jobRow, callable 
             'title' => $title,
             'caption' => $mode === 'prompt_recon' ? $promptReconPrompt : $caption,
             'score' => $mode === 'quality'
-                ? ($qualityScore !== null && $qualityScore >= 0 && $qualityScore <= 100 ? $qualityScore : null)
-                : ($mode === 'nsfw_classify' ? $nsfwScore : $score),
+                ? ($qualityScoreForInsert !== null && $qualityScoreForInsert >= 0 && $qualityScoreForInsert <= 100
+                    ? $qualityScoreForInsert
+                    : null)
+                : ($mode === 'nsfw_classify' ? $nsfwScoreForInsert : $scoreForInsert),
             'contradictions' => $contradictions,
             'missing' => $missing,
             'rationale' => $mode === 'nsfw_classify' ? $nsfwRationale : $rationale,

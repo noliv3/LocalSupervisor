@@ -65,7 +65,7 @@ function sv_log_system_error(array $config, string $message, array $context = []
     }
 }
 
-function sv_rotate_logs(string $dir, string $prefix, int $retention): void
+function sv_rotate_channel_logs(string $dir, string $prefix, int $retention): void
 {
     $files = glob($dir . DIRECTORY_SEPARATOR . $prefix . '_*.log');
     if ($files === false || $files === []) {
@@ -77,8 +77,55 @@ function sv_rotate_logs(string $dir, string $prefix, int $retention): void
     foreach ($surplus as $file) {
         if (is_file($file)) {
             if (!unlink($file)) {
-                error_log('[sv_rotate_logs] log_delete_failed file=' . $file);
+                error_log('[sv_rotate_channel_logs] log_delete_failed file=' . $file);
             }
+        }
+    }
+}
+
+function sv_rotate_logs(array $config): void
+{
+    $logsRoot = sv_logs_root($config);
+    $targets = [
+        $logsRoot . DIRECTORY_SEPARATOR . 'ollama_jobs.jsonl',
+        $logsRoot . DIRECTORY_SEPARATOR . 'system_errors.jsonl',
+    ];
+    $maxBytes = 10 * 1024 * 1024;
+    $maxLines = 1000;
+
+    foreach ($targets as $path) {
+        if (!is_file($path)) {
+            continue;
+        }
+        $size = filesize($path);
+        if ($size === false || $size <= $maxBytes) {
+            continue;
+        }
+
+        $oldPath = $path . '.old';
+        if (is_file($oldPath) && !unlink($oldPath)) {
+            error_log('[sv_rotate_logs] log_old_delete_failed file=' . $oldPath);
+        }
+
+        if (@rename($path, $oldPath)) {
+            continue;
+        }
+
+        $lines = [];
+        $file = new SplFileObject($path, 'r');
+        while (!$file->eof()) {
+            $line = $file->fgets();
+            if ($line === false) {
+                break;
+            }
+            $lines[] = $line;
+            if (count($lines) > $maxLines) {
+                array_shift($lines);
+            }
+        }
+        $result = file_put_contents($path, implode('', $lines));
+        if ($result === false) {
+            error_log('[sv_rotate_logs] log_truncate_failed file=' . $path);
         }
     }
 }
@@ -96,7 +143,7 @@ function sv_prepare_log_file(array $config, string $type, bool $unique, int $ret
     $suffix = $unique ? date('Ymd_His') : date('Ymd');
     $logFile = $channelDir . DIRECTORY_SEPARATOR . $type . '_' . $suffix . '.log';
 
-    sv_rotate_logs($channelDir, $type, $retention);
+    sv_rotate_channel_logs($channelDir, $type, $retention);
 
     return $logFile;
 }
@@ -121,7 +168,7 @@ function sv_write_jsonl_log(array $config, string $filename, array $payload, int
             if (!rename($logFile, $archive)) {
                 error_log('[sv_write_jsonl_log] log_rotate_rename_failed from=' . $logFile . ' to=' . $archive);
             }
-            sv_rotate_logs($logsRoot, $prefix, $retention);
+            sv_rotate_channel_logs($logsRoot, $prefix, $retention);
         }
     }
 
