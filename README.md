@@ -174,7 +174,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 ## Web UI Seiten
 - `mediadb.php`: Listing/Filter der Medien.
 - `media_view.php`: Detailansicht (Metadaten, Tags, Prompts, Assets).
-- `dashboard_ollama.php`: Ollama-Übersicht (nur Loopback/Intern).
+- `dashboard_ollama.php`: Ollama-Übersicht (nur Loopback/Intern) inkl. System-Errors (Last 50) aus `LOGS/system_errors.jsonl`.
 - `internal_ollama.php`: interner API-Endpoint (nur Loopback/Intern).
 - `health.php`: Healthcheck.
 - `jobs_prune.php`: Jobs-Bereinigung.

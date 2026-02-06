@@ -1746,7 +1746,7 @@ function sv_ollama_mode_for_job_type(string $jobType): string
 
 function sv_ollama_payload_column(PDO $pdo): string
 {
-    return sv_jobs_supports_payload_json($pdo) ? 'payload_json' : 'forge_request_json';
+    return 'payload_json';
 }
 
 function sv_ollama_jobs_columns(PDO $pdo): array
@@ -1830,10 +1830,7 @@ function sv_ollama_watchdog_stale_running(PDO $pdo, array $config, int $minutes 
     }
 
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
-    $sql = 'SELECT id, type, heartbeat_at, forge_request_json';
-    if (sv_jobs_supports_payload_json($pdo)) {
-        $sql .= ', payload_json';
-    }
+    $sql = 'SELECT id, type, heartbeat_at, payload_json';
     if (sv_ollama_job_has_column($pdo, 'cancel_requested')) {
         $sql .= ', cancel_requested';
     }
@@ -2067,9 +2064,6 @@ function sv_ollama_decode_job_payload(array $jobRow): array
     $payloadJson = null;
     if (array_key_exists('payload_json', $jobRow) && is_string($jobRow['payload_json'])) {
         $payloadJson = $jobRow['payload_json'];
-    }
-    if ($payloadJson === null && isset($jobRow['forge_request_json']) && is_string($jobRow['forge_request_json'])) {
-        $payloadJson = $jobRow['forge_request_json'];
     }
 
     $payload = is_string($payloadJson) ? json_decode($payloadJson, true) : null;
@@ -2665,10 +2659,7 @@ function sv_ollama_fetch_pending_jobs(PDO $pdo, array $jobTypes, int $limit, ?in
     $limit = $limit > 0 ? $limit : 5;
     $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
     $params = $jobTypes;
-    $sql = 'SELECT id, media_id, type, status, created_at, updated_at, forge_request_json';
-    if (sv_jobs_supports_payload_json($pdo)) {
-        $sql .= ', payload_json';
-    }
+    $sql = 'SELECT id, media_id, type, status, created_at, updated_at, payload_json';
     $sql .= ' FROM jobs WHERE type IN (' . $placeholders . ') AND status IN ("pending","queued")';
     if (sv_ollama_job_has_column($pdo, 'not_before')) {
         $sql .= ' AND (not_before IS NULL OR not_before <= ?)';
@@ -2691,10 +2682,7 @@ function sv_ollama_fetch_job_row(PDO $pdo, int $jobId): array
         return [];
     }
 
-    $sql = 'SELECT id, media_id, type, status, created_at, updated_at, forge_request_json';
-    if (sv_jobs_supports_payload_json($pdo)) {
-        $sql .= ', payload_json';
-    }
+    $sql = 'SELECT id, media_id, type, status, created_at, updated_at, payload_json';
     $sql .= ' FROM jobs WHERE id = :id';
 
     $stmt = $pdo->prepare($sql);

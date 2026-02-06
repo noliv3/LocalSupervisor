@@ -1,6 +1,7 @@
 # VERSIONLOG
 
 ## 2026-02-06
+- Phase 3: Dashboard für System-Errors hinzugefügt, Legacy-Payload-Checks entfernt und Selftests (Logs/WAL) erweitert.
 - Mega-Update Stabilität: Aggressives Prozess-Management (Terminierung Prozessbaum), robustes Markdown-JSON-Parsing und GD-Speicheroptimierung.
 - Optimierung der SQLite-Performance durch Transaktions-Batching im Ollama-Enqueue und Anpassung der Pragmas.
 - Sicherheits-Update: Verfeinerte PID-Prüfung zur Vermeidung von Kollisionen, automatische Log-Rotation eingeführt und Datentyp-Validierung für KI-Ergebnisse gehärtet.
