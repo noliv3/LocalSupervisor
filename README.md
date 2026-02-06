@@ -6,6 +6,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Medien-DB für Bilder/Videos inkl. Hashing, Metadaten, Rating/NSFW, Tags, Prompts und Collections.
 - Scanner-Integration mit Scan-Ergebnissen (scan_core/scan_results) und Import-Workflow.
 - Job/Queue-System (jobs) mit Worker-Runnern für Scan, Forge und Ollama.
+- Additive Medien-Jobs für Integrity-Checks, SHA256-Hashing und Upscale-Derivate (Parent → Child).
 - Web UI für Listing, Detailansicht, Thumbnails und Streaming.
 - Forge-Anbindung für Regeneration/Rezepte/Worker.
 - Ollama-Anreicherung als Modul (Caption/Title/Prompt-Eval/Tags Normalize/Quality/Prompt Recon/Embeddings/Dupe Hints/NSFW).
@@ -14,6 +15,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 ## Projektstruktur
 - `WWW/`: Web-UI und interne Endpoints (mediadb.php, media_view.php, dashboard_ollama.php, internal_ollama.php, health.php, jobs_prune.php).
 - `SCRIPTS/`: Runner/CLI (migrate.php, init_db.php, db_status.php, scan_path_cli.php, scan_worker_cli.php, rescan_cli.php, prompts_rebuild_cli.php, forge_worker_cli.php, forge_recipes.php, ollama_enqueue_cli.php, ollama_service_cli.php, jobs_admin.php, cleanup_missing_cli.php, consistency_check.php, selftest_cli.php).
+- `SCRIPTS/media_worker_cli.php`: Worker für Integrity-Check-, SHA256- und Upscale-Jobs.
 - `DB/`: Datenbank, Schema und Migrationen.
 - `CONFIG/`: Konfigurationsvorlagen (`config.example.php`).
 - `PROMPTS/ollama/`: dateibasierte Prompt-Templates (caption/title/prompt_eval/tags_normalize/quality/prompt_recon/nsfw_classify).
@@ -25,7 +27,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
    ```bash
    cp CONFIG/config.example.php CONFIG/config.php
    ```
-   Pfade in `CONFIG/config.php` prüfen/anpassen.
+   Pfade in `CONFIG/config.php` prüfen/anpassen (inkl. `paths.derivatives` für Upscale-Derivate).
 2. **DB**
    ```bash
    php SCRIPTS/init_db.php
@@ -39,6 +41,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
    ```bash
    php SCRIPTS/scan_worker_cli.php --limit=50
    php SCRIPTS/forge_worker_cli.php --limit=10
+   php SCRIPTS/media_worker_cli.php --limit=50
    php SCRIPTS/ollama_service_cli.php --sleep-ms=1000 --batch=5 --limit=20
    ```
 
@@ -68,6 +71,17 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
   ```
 - Änderungen erscheinen in `prompts` und `prompt_history`.
 - Bei Fehlern `consistency_check.php` für eine Prüfung nutzen.
+
+### Integrity/Hash/Upscale Jobs
+- Neue Media-Jobs laufen über `media_worker_cli.php`:
+  ```bash
+  php SCRIPTS/media_worker_cli.php --limit=50
+  ```
+- Integrity-Check schreibt `media_meta` (z. B. `integrity.ok`, `integrity.error_code`, `integrity.checked_at`).
+- SHA256-Hash wird in `media_meta` abgelegt (`hash.sha256`, `hash.checked_at`) und im UI für Dupe-Grouping genutzt.
+- Upscale erzeugt neue Media-Datensätze (Child) im Derivatives-Pfad und setzt `variant.preferred_media_id` am Parent.
+- UI zeigt automatisch HD-Derivate (Badge „HD“), das Original bleibt per „Original (SD)“-Toggle erreichbar.
+- Scanner-Character-Tags werden als `danbooru.character.v1` gespeichert und zusätzlich in `media_meta` (`scanner.character.tags`) dokumentiert.
 
 ### Forge Regeneration
 - Forge-Rezepte stammen aus `SCRIPTS/forge_recipes.php` (oder `CONFIG/forge_recipes.json`).
@@ -151,7 +165,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **Ollama-Service:** `LOGS/ollama_service.jsonl`
 - **Ollama-Status:** `LOGS/ollama_status.json`
 - **Ollama Runtime:** `LOGS/runtime/ollama_worker_heartbeat.json`, `LOGS/runtime/ollama_global_status.json`
-- **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`
+- **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`, `LOGS/media_worker.lock.json`
 - **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/scan_worker_spawn_last.json`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.last.json`
 - **System-Fehlerlog:** `LOGS/system_errors.jsonl` (kritische IO/Spawn-Fehler)
 

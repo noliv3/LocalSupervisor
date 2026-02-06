@@ -383,6 +383,21 @@ function sv_normalize_tag_payload($candidate): array
     return $candidate;
 }
 
+function sv_scanner_tag_type(array $tag, string $fallback = 'content'): string
+{
+    $namespace = isset($tag['namespace']) ? strtolower(trim((string)$tag['namespace'])) : '';
+    if ($namespace === '' && isset($tag['category'])) {
+        $namespace = strtolower(trim((string)$tag['category']));
+    }
+    $type = isset($tag['type']) ? strtolower(trim((string)$tag['type'])) : '';
+
+    if ($namespace === 'character' || $type === 'character') {
+        return 'danbooru.character.v1';
+    }
+
+    return $type !== '' ? $type : $fallback;
+}
+
 function sv_move_file(string $src, string $dest): bool
 {
     $destDir = dirname($dest);
@@ -405,6 +420,43 @@ function sv_move_file(string $src, string $dest): bool
     }
 
     return false;
+}
+
+function sv_enqueue_media_job_simple(PDO $pdo, int $mediaId, string $type, array $payload = []): ?int
+{
+    if ($mediaId <= 0 || $type === '') {
+        return null;
+    }
+
+    $check = $pdo->prepare(
+        'SELECT id FROM jobs WHERE media_id = :media_id AND type = :type AND status IN ("queued","running","pending","created") ORDER BY id DESC LIMIT 1'
+    );
+    $check->execute([
+        ':media_id' => $mediaId,
+        ':type'     => $type,
+    ]);
+    $existing = (int)$check->fetchColumn();
+    if ($existing > 0) {
+        return $existing;
+    }
+
+    $payloadJson = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $payloadJson = $payloadJson === false ? null : $payloadJson;
+    $stmt = $pdo->prepare(
+        'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
+        . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
+    );
+    $now = date('c');
+    $stmt->execute([
+        ':media_id'   => $mediaId,
+        ':type'       => $type,
+        ':status'     => 'queued',
+        ':created_at' => $now,
+        ':updated_at' => $now,
+        ':payload'    => $payloadJson,
+    ]);
+
+    return (int)$pdo->lastInsertId();
 }
 
 function sv_get_image_size(string $file): array
@@ -579,7 +631,7 @@ function sv_interpret_scanner_response(
             if ($confidence === null) {
                 $confidence = 1.0;
             }
-            $type = is_string($t['type'] ?? null) ? (string)$t['type'] : 'content';
+            $type = sv_scanner_tag_type($t, 'content');
         } else {
             return;
         }
@@ -620,6 +672,8 @@ function sv_interpret_scanner_response(
 
     $scanner = null;
     $runAt   = null;
+    $modelId = null;
+    $modelVersion = null;
     if (isset($data['meta']) && is_array($data['meta'])) {
         $scanner = isset($data['meta']['scanner']) && is_string($data['meta']['scanner'])
             ? $data['meta']['scanner']
@@ -627,12 +681,24 @@ function sv_interpret_scanner_response(
         $runAt = isset($data['meta']['run_at']) && is_string($data['meta']['run_at'])
             ? $data['meta']['run_at']
             : null;
+        if (isset($data['meta']['model_id']) && is_string($data['meta']['model_id'])) {
+            $modelId = $data['meta']['model_id'];
+        }
+        if (isset($data['meta']['model_version']) && is_string($data['meta']['model_version'])) {
+            $modelVersion = $data['meta']['model_version'];
+        }
     }
     if ($scanner === null && isset($data['scanner']) && is_string($data['scanner'])) {
         $scanner = $data['scanner'];
     }
     if ($runAt === null && isset($data['run_at']) && is_string($data['run_at'])) {
         $runAt = $data['run_at'];
+    }
+    if ($modelId === null && isset($data['model_id']) && is_string($data['model_id'])) {
+        $modelId = $data['model_id'];
+    }
+    if ($modelVersion === null && isset($data['model_version']) && is_string($data['model_version'])) {
+        $modelVersion = $data['model_version'];
     }
 
     $rating = null;
@@ -670,6 +736,8 @@ function sv_interpret_scanner_response(
         'flags'      => [],
         'scanner'    => $scanner,
         'run_at'     => $runAt,
+        'model_id'   => $modelId,
+        'model_version' => $modelVersion,
         'rating'     => $rating,
         'has_nsfw'   => $hasNsfw,
         'raw'        => $data,
@@ -684,6 +752,8 @@ function sv_interpret_scanner_response(
             'rating_detected'     => $rating,
             'has_nsfw'            => $hasNsfw,
             'empty_reason'        => $emptyReason,
+            'model_id'            => $modelId,
+            'model_version'       => $modelVersion,
         ],
     ];
 }
@@ -766,6 +836,8 @@ function sv_scanner_merge_parts(array $parts): ?array
     $hasNsfw = null;
     $scanner = null;
     $runAt = null;
+    $modelId = null;
+    $modelVersion = null;
     $flags = [];
 
     foreach ($parts as $part) {
@@ -777,6 +849,12 @@ function sv_scanner_merge_parts(array $parts): ?array
         }
         if ($runAt === null && isset($part['run_at'])) {
             $runAt = $part['run_at'];
+        }
+        if ($modelId === null && isset($part['model_id']) && is_string($part['model_id'])) {
+            $modelId = $part['model_id'];
+        }
+        if ($modelVersion === null && isset($part['model_version']) && is_string($part['model_version'])) {
+            $modelVersion = $part['model_version'];
         }
         if (isset($part['nsfw_score']) && is_numeric($part['nsfw_score'])) {
             $score = (float)$part['nsfw_score'];
@@ -824,6 +902,8 @@ function sv_scanner_merge_parts(array $parts): ?array
         'flags'      => array_values(array_unique($flags)),
         'scanner'    => $scanner,
         'run_at'     => $runAt,
+        'model_id'   => $modelId,
+        'model_version' => $modelVersion,
         'rating'     => $rating,
         'has_nsfw'   => $hasNsfw,
     ];
@@ -1405,7 +1485,61 @@ function sv_store_tags(PDO $pdo, int $mediaId, array $tags): int
         $written += (int)$insertMediaTag->rowCount();
     }
 
+    sv_store_character_tags_meta($pdo, $mediaId, array_values($normalized));
+
     return $written;
+}
+
+function sv_extract_character_tags(array $tags): array
+{
+    $result = [];
+    foreach ($tags as $tag) {
+        if (!is_array($tag)) {
+            continue;
+        }
+        $name = isset($tag['name']) ? trim((string)$tag['name']) : '';
+        if ($name === '') {
+            continue;
+        }
+        $namespace = isset($tag['type']) ? (string)$tag['type'] : '';
+        if (!str_starts_with($namespace, 'danbooru.character') && !str_starts_with($namespace, 'scanner.character')) {
+            continue;
+        }
+        $confidence = isset($tag['confidence']) && is_numeric($tag['confidence']) ? (float)$tag['confidence'] : 1.0;
+        if ($confidence <= 0.0) {
+            continue;
+        }
+        $result[] = [
+            'name'       => $name,
+            'confidence' => $confidence,
+            'source'     => 'scanner',
+            'namespace'  => $namespace,
+        ];
+    }
+
+    return $result;
+}
+
+function sv_store_character_tags_meta(PDO $pdo, int $mediaId, array $tags): void
+{
+    $characterTags = sv_extract_character_tags($tags);
+    if ($characterTags === []) {
+        return;
+    }
+    $payload = sv_stringify_meta_value($characterTags);
+    if ($payload === null) {
+        return;
+    }
+    $stmt = $pdo->prepare(
+        'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
+    );
+    $stmt->execute([
+        $mediaId,
+        'scanner',
+        'scanner.character.tags',
+        $payload,
+        date('c'),
+    ]);
 }
 
 function sv_store_scan_result(
@@ -1455,6 +1589,12 @@ function sv_merge_scan_result_meta(array $baseMeta, array $scanData, ?array $err
     $baseMeta['endpoint'] = $errorMeta['endpoint'] ?? ($debug['endpoint'] ?? null);
     $baseMeta['body_snippet'] = $errorMeta['body_snippet'] ?? null;
     $baseMeta['response_type_detected'] = $errorMeta['response_type_detected'] ?? ($debug['response_type_detected'] ?? null);
+    if (isset($scanData['model_id']) && is_string($scanData['model_id'])) {
+        $baseMeta['scanner.model_id'] = $scanData['model_id'];
+    }
+    if (isset($scanData['model_version']) && is_string($scanData['model_version'])) {
+        $baseMeta['scanner.model_version'] = $scanData['model_version'];
+    }
 
     return $baseMeta;
 }
@@ -2249,6 +2389,9 @@ function sv_import_file(
                 false
             );
         }
+
+        sv_enqueue_media_job_simple($pdo, $mediaId, 'hash_compute', ['media_id' => $mediaId]);
+        sv_enqueue_media_job_simple($pdo, $mediaId, 'integrity_check', ['media_id' => $mediaId]);
 
         $logStmt = $pdo->prepare("
             INSERT INTO import_log (path, status, message, created_at)

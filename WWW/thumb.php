@@ -90,6 +90,8 @@ $showAdult = sv_normalize_adult_flag($_GET);
 $jobId   = isset($_GET['job_id']) ? sv_clamp_int((int)$_GET['job_id'], 1, 1_000_000_000, 0) : 0;
 $asset   = isset($_GET['asset']) && is_string($_GET['asset']) ? strtolower(trim((string)$_GET['asset'])) : null;
 $id      = isset($_GET['id']) ? sv_clamp_int((int)$_GET['id'], 1, 1_000_000_000, 0) : 0;
+$variant = isset($_GET['variant']) && is_string($_GET['variant']) ? strtolower(trim((string)$_GET['variant'])) : 'effective';
+$forceParent = $variant === 'parent';
 $jobAsset = null;
 $usingJobAsset = false;
 
@@ -118,6 +120,11 @@ if ($jobId > 0) {
 if ($id <= 0) {
     http_response_code(400);
     exit;
+}
+
+if (!$usingJobAsset) {
+    $effective = sv_resolve_effective_media($pdo, $config, $id, $forceParent);
+    $id = (int)$effective['effective_id'];
 }
 
 $stmt = $pdo->prepare('SELECT path, type, has_nsfw, width, height, duration FROM media WHERE id = :id');

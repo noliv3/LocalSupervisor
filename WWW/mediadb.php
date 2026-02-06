@@ -236,6 +236,11 @@ $dupeHashFilter = sv_limit_string((string)($_GET['dupe_hash'] ?? ''), 64);
 if ($dupeHashFilter !== '') {
     $dupeFilter = true;
 }
+$dupeShaFilter = isset($_GET['dupes_sha']) && ((string)$_GET['dupes_sha'] === '1');
+$dupeShaHashFilter = sv_limit_string((string)($_GET['dupe_sha'] ?? ''), 64);
+if ($dupeShaHashFilter !== '') {
+    $dupeShaFilter = true;
+}
 
 $typeFilter       = $_GET['type'] ?? 'all';
 $hasPromptFilter  = $_GET['has_prompt'] ?? 'all';
@@ -254,6 +259,8 @@ $activeFilter     = $_GET['active'] ?? 'active';
 $deletedFilter    = $_GET['deleted'] ?? 'exclude_deleted';
 $aiTitleFilter    = $_GET['ai_title'] ?? 'all';
 $aiCaptionFilter  = $_GET['ai_caption'] ?? 'all';
+$brokenFilter     = $_GET['broken'] ?? 'all';
+$characterFilter  = $_GET['character'] ?? 'all';
 
 $allowedTypes     = ['all', 'image', 'video'];
 $allowedPrompt    = ['all', 'with', 'without'];
@@ -269,6 +276,8 @@ $allowedLowActivity = ['all', 'low'];
 $allowedActive    = ['all', 'active', 'inactive'];
 $allowedDeleted   = ['exclude_deleted', 'only_deleted', 'all'];
 $allowedAi        = ['all', 'with', 'without'];
+$allowedBroken    = ['all', 'broken', 'ok'];
+$allowedCharacter = ['all', 'with', 'without'];
 $typeFilter       = sv_normalize_enum($typeFilter, $allowedTypes, 'all');
 $hasPromptFilter  = sv_normalize_enum($hasPromptFilter, $allowedPrompt, 'all');
 $hasMetaFilter    = sv_normalize_enum($hasMetaFilter, $allowedMeta, 'all');
@@ -285,6 +294,8 @@ $activeFilter     = sv_normalize_enum($activeFilter, $allowedActive, 'active');
 $deletedFilter    = sv_normalize_enum($deletedFilter, $allowedDeleted, 'exclude_deleted');
 $aiTitleFilter    = sv_normalize_enum($aiTitleFilter, $allowedAi, 'all');
 $aiCaptionFilter  = sv_normalize_enum($aiCaptionFilter, $allowedAi, 'all');
+$brokenFilter     = sv_normalize_enum($brokenFilter, $allowedBroken, 'all');
+$characterFilter  = sv_normalize_enum($characterFilter, $allowedCharacter, 'all');
 
 if (!$hasInternalAccess) {
     $voteFilter = 'all';
@@ -305,6 +316,8 @@ $activityScoreSql = "COALESCE($activityClicksSql, 0) - CAST((:activity_now - $ac
 $ollamaTitleSql = "(SELECT meta_value FROM media_meta mmt WHERE mmt.media_id = m.id AND mmt.meta_key = 'ollama.title' ORDER BY mmt.id DESC LIMIT 1)";
 $ollamaCaptionSql = "(SELECT meta_value FROM media_meta mmc WHERE mmc.media_id = m.id AND mmc.meta_key = 'ollama.caption' ORDER BY mmc.id DESC LIMIT 1)";
 $checkedStateSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mmc WHERE mmc.media_id = m.id AND mmc.meta_key = 'curation.checked' ORDER BY mmc.id DESC LIMIT 1)";
+$sha256Sql = "(SELECT meta_value FROM media_meta mmh WHERE mmh.media_id = m.id AND mmh.meta_key = 'hash.sha256' ORDER BY mmh.id DESC LIMIT 1)";
+$integrityOkSql = "(SELECT CAST(meta_value AS INTEGER) FROM media_meta mmi WHERE mmi.media_id = m.id AND mmi.meta_key = 'integrity.ok' ORDER BY mmi.id DESC LIMIT 1)";
 
 if (!$showAdult) {
     $where[] = '(m.has_nsfw IS NULL OR m.has_nsfw = 0)';
@@ -393,12 +406,33 @@ if ($hasInternalAccess) {
     }
 }
 
+if ($brokenFilter === 'broken') {
+    $where[] = 'COALESCE(' . $integrityOkSql . ', 1) = 0';
+} elseif ($brokenFilter === 'ok') {
+    $where[] = 'COALESCE(' . $integrityOkSql . ', 1) = 1';
+}
+
+if ($characterFilter === 'with') {
+    $where[] = 'EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.type = :character_type)';
+    $params[':character_type'] = 'danbooru.character.v1';
+} elseif ($characterFilter === 'without') {
+    $where[] = 'NOT EXISTS (SELECT 1 FROM media_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.media_id = m.id AND t.type = :character_type)';
+    $params[':character_type'] = 'danbooru.character.v1';
+}
+
 if ($dupeFilter) {
     $where[] = 'm.hash IN (SELECT hash FROM media WHERE hash IS NOT NULL GROUP BY hash HAVING COUNT(*) > 1)';
 }
 if ($dupeHashFilter !== '') {
     $where[]              = 'm.hash = :dupe_hash';
     $params[':dupe_hash'] = $dupeHashFilter;
+}
+if ($dupeShaFilter) {
+    $where[] = $sha256Sql . " IN (SELECT meta_value FROM media_meta WHERE meta_key = 'hash.sha256' GROUP BY meta_value HAVING COUNT(*) > 1)";
+}
+if ($dupeShaHashFilter !== '') {
+    $where[]               = $sha256Sql . ' = :dupe_sha';
+    $params[':dupe_sha'] = $dupeShaHashFilter;
 }
 
 $promptCompleteExists = 'EXISTS (SELECT 1 FROM prompts p WHERE p.media_id = m.id AND ' . $promptCompleteClause . ')';
@@ -458,6 +492,8 @@ $baseSelectCols = "m.id, m.path, m.type, m.has_nsfw, m.rating, m.status, m.lifec
            p.prompt AS prompt_text, p.width AS prompt_width, p.height AS prompt_height, p.model AS prompt_model,
            $ollamaTitleSql AS ollama_title,
            $ollamaCaptionSql AS ollama_caption,
+           $sha256Sql AS hash_sha256,
+           COALESCE($integrityOkSql, 1) AS integrity_ok,
            EXISTS (SELECT 1 FROM prompts p3 WHERE p3.media_id = m.id) AS has_prompt,
             EXISTS (SELECT 1 FROM prompts p4 WHERE p4.media_id = m.id AND $promptCompleteClause) AS prompt_complete,
            EXISTS (SELECT 1 FROM media_meta mm WHERE mm.media_id = m.id) AS has_meta,
@@ -607,30 +643,51 @@ $queryParams = [
     'deleted'        => $deletedFilter,
     'ai_title'       => $aiTitleFilter,
     'ai_caption'     => $aiCaptionFilter,
+    'broken'         => $brokenFilter,
+    'character'      => $characterFilter,
     'issues'         => $issueFilter ? '1' : '0',
     'prompt_quality' => $promptQualityFilter,
     'adult'          => $showAdult ? '1' : '0',
     'dupes'          => $dupeFilter ? '1' : '0',
     'dupe_hash'      => $dupeHashFilter,
+    'dupes_sha'      => $dupeShaFilter ? '1' : '0',
+    'dupe_sha'       => $dupeShaHashFilter,
     'view'           => $viewMode,
 ];
 
 $issuesByMedia = $issueReport['by_media'] ?? [];
 
 $dupeCounts = [];
+$dupeShaCounts = [];
 $hashes = [];
+$shaHashes = [];
 foreach ($rows as $row) {
     if (!empty($row['hash'])) {
         $hashes[] = (string)$row['hash'];
     }
+    if (!empty($row['hash_sha256'])) {
+        $shaHashes[] = (string)$row['hash_sha256'];
+    }
 }
 $hashes = array_values(array_unique($hashes));
+$shaHashes = array_values(array_unique($shaHashes));
 if ($hashes) {
     $ph = implode(',', array_fill(0, count($hashes), '?'));
     $dupeStmt = $pdo->prepare('SELECT hash, COUNT(*) AS cnt FROM media WHERE hash IN (' . $ph . ') GROUP BY hash HAVING COUNT(*) > 1');
     $dupeStmt->execute($hashes);
     foreach ($dupeStmt->fetchAll(PDO::FETCH_ASSOC) as $dupeRow) {
         $dupeCounts[(string)$dupeRow['hash']] = (int)$dupeRow['cnt'];
+    }
+}
+if ($shaHashes) {
+    $ph = implode(',', array_fill(0, count($shaHashes), '?'));
+    $dupeStmt = $pdo->prepare(
+        "SELECT meta_value AS hash, COUNT(*) AS cnt FROM media_meta WHERE meta_key = 'hash.sha256' AND meta_value IN (" . $ph . ') '
+        . 'GROUP BY meta_value HAVING COUNT(*) > 1'
+    );
+    $dupeStmt->execute($shaHashes);
+    foreach ($dupeStmt->fetchAll(PDO::FETCH_ASSOC) as $dupeRow) {
+        $dupeShaCounts[(string)$dupeRow['hash']] = (int)$dupeRow['cnt'];
     }
 }
 
@@ -692,6 +749,31 @@ function sv_render_media_card(array $row, array $context): void
     $path    = (string)$row['path'];
     $pathLabel = sv_safe_path_label($path);
     $type    = (string)$row['type'];
+    $pdo     = $context['pdo'] ?? null;
+    $config  = $context['config'] ?? [];
+    $effectiveId = $id;
+    $isHd = false;
+    $displayPath = $path;
+    $displayType = $type;
+    $displayWidth = $row['width'] ?? null;
+    $displayHeight = $row['height'] ?? null;
+    if ($pdo instanceof PDO) {
+        $effectiveInfo = sv_resolve_effective_media($pdo, $config, $id, false);
+        $effectiveId = (int)($effectiveInfo['effective_id'] ?? $id);
+        $isHd = !empty($effectiveInfo['is_hd']) && $effectiveId !== $id;
+        if ($effectiveId !== $id) {
+            $effStmt = $pdo->prepare('SELECT path, type, width, height FROM media WHERE id = :id');
+            $effStmt->execute([':id' => $effectiveId]);
+            $effRow = $effStmt->fetch(PDO::FETCH_ASSOC);
+            if ($effRow) {
+                $displayPath = (string)($effRow['path'] ?? $displayPath);
+                $displayType = (string)($effRow['type'] ?? $displayType);
+                $displayWidth = $effRow['width'] ?? $displayWidth;
+                $displayHeight = $effRow['height'] ?? $displayHeight;
+            }
+        }
+    }
+    $pathLabel = sv_safe_path_label($displayPath);
     $hasNsfw = (int)($row['has_nsfw'] ?? 0) === 1;
     $rating  = (int)($row['rating'] ?? 0);
     $status  = (string)($row['status'] ?? '');
@@ -708,8 +790,11 @@ function sv_render_media_card(array $row, array $context): void
     $qualityLabels = $context['qualityStatusLabels'] ?? [];
     $qualityLabel = $qualityLabels[$qualityStatus] ?? $qualityStatus;
     $hash    = (string)($row['hash'] ?? '');
+    $hashSha = (string)($row['hash_sha256'] ?? '');
     $dupeCounts = $context['dupeCounts'] ?? [];
+    $dupeShaCounts = $context['dupeShaCounts'] ?? [];
     $dupeCount = ($hash !== '' && isset($dupeCounts[$hash])) ? (int)$dupeCounts[$hash] : 0;
+    $dupeShaCount = ($hashSha !== '' && isset($dupeShaCounts[$hashSha])) ? (int)$dupeShaCounts[$hashSha] : 0;
     $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
     $promptComplete = (int)($row['prompt_complete'] ?? 0) === 1;
     $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
@@ -770,9 +855,9 @@ function sv_render_media_card(array $row, array $context): void
     $thumbUrl = 'thumb.php?' . http_build_query(['id' => $id, 'adult' => $showAdult ? '1' : '0']);
     $streamUrl = sv_media_stream_url($id, $showAdult, false);
 
-    $mediaWidth  = isset($row['width']) ? (int)$row['width'] : null;
-    $mediaHeight = isset($row['height']) ? (int)$row['height'] : null;
-    if ($type === 'image') {
+    $mediaWidth  = isset($displayWidth) ? (int)$displayWidth : null;
+    $mediaHeight = isset($displayHeight) ? (int)$displayHeight : null;
+    if ($displayType === 'image') {
         if ($mediaWidth && $mediaHeight) {
             $resolution = $mediaWidth . '×' . $mediaHeight;
         } elseif (isset($row['prompt_width'], $row['prompt_height']) && $row['prompt_width'] && $row['prompt_height']) {
@@ -783,7 +868,8 @@ function sv_render_media_card(array $row, array $context): void
     } else {
         $resolution = ($mediaWidth && $mediaHeight) ? ($mediaWidth . '×' . $mediaHeight) : 'keine Größe';
     }
-    $duration = $type === 'video' && isset($row['duration']) ? (float)$row['duration'] : null;
+    $duration = $displayType === 'video' && isset($row['duration']) ? (float)$row['duration'] : null;
+    $integrityOk = isset($row['integrity_ok']) ? (int)$row['integrity_ok'] : 1;
 
     $voteState = (string)($row['vote_state'] ?? 'neutral');
     if (!in_array($voteState, ['neutral', 'approved', 'rejected'], true)) {
@@ -804,8 +890,17 @@ function sv_render_media_card(array $row, array $context): void
             <?php if ($dupeCount > 1): ?>
                 <span class="pill pill-warn">Dupe x<?= (int)$dupeCount ?></span>
             <?php endif; ?>
+            <?php if ($dupeShaCount > 1): ?>
+                <span class="pill pill-warn">SHA x<?= (int)$dupeShaCount ?></span>
+            <?php endif; ?>
             <?php if ($hasIssues): ?>
                 <span class="pill pill-warn" title="Integritätsprobleme erkannt">Issues</span>
+            <?php endif; ?>
+            <?php if ($integrityOk === 0): ?>
+                <span class="pill pill-bad" title="Integritätsprüfung fehlgeschlagen">Broken</span>
+            <?php endif; ?>
+            <?php if ($isHd): ?>
+                <span class="pill pill-hd">HD</span>
             <?php endif; ?>
             <?php if ($hasNsfw): ?>
                 <span class="pill pill-nsfw">FSK18</span>
@@ -851,6 +946,9 @@ function sv_render_media_card(array $row, array $context): void
                     loading="lazy"
                     alt="ID <?= $id ?>">
             </a>
+            <?php if ($isHd): ?>
+                <span class="hd-badge">HD</span>
+            <?php endif; ?>
         </div>
 
         <div class="card-info">
@@ -869,7 +967,7 @@ function sv_render_media_card(array $row, array $context): void
                 <?php if ($lastScanError): ?><span class="status-chip chip-bad">Parse-Error</span><?php endif; ?>
             </div>
             <div class="info-line">
-                <span class="info-chip"><?= $type === 'video' ? 'Video' : 'Bild' ?></span>
+                <span class="info-chip"><?= $displayType === 'video' ? 'Video' : 'Bild' ?></span>
                 <span class="info-chip"><?= htmlspecialchars($resolution, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span>
                 <?php if ($duration !== null): ?>
                     <span class="info-chip"><?= htmlspecialchars(number_format($duration, 1), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>s</span>
@@ -986,6 +1084,15 @@ if ($issueFilter) {
 }
 if ($dupeFilter) {
     $filterChips[] = $dupeHashFilter !== '' ? 'Dupe: ' . $dupeHashFilter : 'Dupes';
+}
+if ($dupeShaFilter) {
+    $filterChips[] = $dupeShaHashFilter !== '' ? 'SHA: ' . $dupeShaHashFilter : 'SHA Dupes';
+}
+if ($brokenFilter !== 'all') {
+    $filterChips[] = $brokenFilter === 'broken' ? 'Broken' : 'Integrity ok';
+}
+if ($characterFilter !== 'all') {
+    $filterChips[] = $characterFilter === 'with' ? 'Character: mit' : 'Character: ohne';
 }
 if ($hasInternalAccess) {
     if ($voteFilter !== 'all') {
@@ -1110,7 +1217,7 @@ $adultToggleHtml = '<div class="header-toggle">'
     </summary>
     <div class="details-body">
         <form id="filters-form" method="get" class="controls">
-            <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p','active','deleted','ai_title','ai_caption'], true)) { continue; } ?>
+            <?php foreach ($paginationBase as $key => $value): if (in_array($key, ['type','has_prompt','has_meta','status','curation','min_rating','incomplete','prompt_quality','vote','checked','low_activity','view','p','active','deleted','ai_title','ai_caption','broken','character','dupes','dupe_hash','dupes_sha','dupe_sha'], true)) { continue; } ?>
                 <input type="hidden" name="<?= htmlspecialchars((string)$key, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" value="<?= htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
             <?php endforeach; ?>
             <input type="hidden" name="p" value="1">
@@ -1211,6 +1318,38 @@ $adultToggleHtml = '<div class="header-toggle">'
                     <option value="without" <?= $aiCaptionFilter === 'without' ? 'selected' : '' ?>>ohne</option>
                 </select>
             </label>
+            <label>
+                Integrity
+                <select name="broken">
+                    <option value="all" <?= $brokenFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="broken" <?= $brokenFilter === 'broken' ? 'selected' : '' ?>>nur broken</option>
+                    <option value="ok" <?= $brokenFilter === 'ok' ? 'selected' : '' ?>>nur ok</option>
+                </select>
+            </label>
+            <label>
+                Character
+                <select name="character">
+                    <option value="all" <?= $characterFilter === 'all' ? 'selected' : '' ?>>alle</option>
+                    <option value="with" <?= $characterFilter === 'with' ? 'selected' : '' ?>>mit Tags</option>
+                    <option value="without" <?= $characterFilter === 'without' ? 'selected' : '' ?>>ohne Tags</option>
+                </select>
+            </label>
+            <label>
+                Dupe (MD5)
+                <select name="dupes">
+                    <option value="0" <?= $dupeFilter ? '' : 'selected' ?>>alle</option>
+                    <option value="1" <?= $dupeFilter ? 'selected' : '' ?>>nur Dupes</option>
+                </select>
+                <input type="text" name="dupe_hash" value="<?= htmlspecialchars($dupeHashFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Hash">
+            </label>
+            <label>
+                Dupe (SHA256)
+                <select name="dupes_sha">
+                    <option value="0" <?= $dupeShaFilter ? '' : 'selected' ?>>alle</option>
+                    <option value="1" <?= $dupeShaFilter ? 'selected' : '' ?>>nur Dupes</option>
+                </select>
+                <input type="text" name="dupe_sha" value="<?= htmlspecialchars($dupeShaHashFilter, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="SHA256">
+            </label>
             <?php if ($hasInternalAccess): ?>
                 <label>
                     Vote
@@ -1271,6 +1410,9 @@ $adultToggleHtml = '<div class="header-toggle">'
         'promptQualityLabels' => $promptQualityLabels,
         'issuesByMedia' => $issuesByMedia,
         'dupeCounts' => $dupeCounts,
+        'dupeShaCounts' => $dupeShaCounts,
+        'pdo' => $pdo,
+        'config' => $config,
         'hasInternalAccess' => $hasInternalAccess,
     ];
     ?>
@@ -1330,6 +1472,25 @@ $adultToggleHtml = '<div class="header-toggle">'
                             $path    = (string)$row['path'];
                             $pathLabel = sv_safe_path_label($path);
                             $type    = (string)$row['type'];
+                            $effectiveId = $id;
+                            $isHd = false;
+                            $displayPath = $path;
+                            $displayType = $type;
+                            if ($pdo instanceof PDO) {
+                                $effectiveInfo = sv_resolve_effective_media($pdo, $config, $id, false);
+                                $effectiveId = (int)($effectiveInfo['effective_id'] ?? $id);
+                                $isHd = !empty($effectiveInfo['is_hd']) && $effectiveId !== $id;
+                                if ($effectiveId !== $id) {
+                                    $effStmt = $pdo->prepare('SELECT path, type FROM media WHERE id = :id');
+                                    $effStmt->execute([':id' => $effectiveId]);
+                                    $effRow = $effStmt->fetch(PDO::FETCH_ASSOC);
+                                    if ($effRow) {
+                                        $displayPath = (string)($effRow['path'] ?? $displayPath);
+                                        $displayType = (string)($effRow['type'] ?? $displayType);
+                                    }
+                                }
+                            }
+                            $pathLabel = sv_safe_path_label($displayPath);
                             $qualityStatus = sv_normalize_quality_status((string)($row['quality_status'] ?? ''), SV_QUALITY_UNKNOWN);
                             $qualityLabel = $qualityStatusLabels[$qualityStatus] ?? $qualityStatus;
                             $hasPrompt = (int)($row['has_prompt'] ?? 0) === 1;
@@ -1337,6 +1498,7 @@ $adultToggleHtml = '<div class="header-toggle">'
                             $hasMeta   = (int)($row['has_meta'] ?? 0) === 1;
                             $hasTags   = (int)($row['has_tags'] ?? 0) === 1;
                             $hasIssues = isset($issuesByMedia[$id]);
+                            $integrityOk = isset($row['integrity_ok']) ? (int)$row['integrity_ok'] : 1;
                             $scanStale = (int)($row['scan_stale'] ?? 0) === 1;
                             $jobRunning = (int)($row['job_running'] ?? 0) === 1;
                             $lastScanAt = trim((string)($row['last_scan_at'] ?? ''));
@@ -1366,14 +1528,27 @@ $adultToggleHtml = '<div class="header-toggle">'
                             ?>
                             <tr>
                                 <td><?= $id ?></td>
-                                <td title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"><?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
+                                <td title="<?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                                    <?= htmlspecialchars($pathLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                                    <?php if ($isHd): ?>
+                                        <span class="pill pill-hd">HD</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= htmlspecialchars($displayType, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                                 <td><?= $hasPrompt ? ($promptComplete ? 'vollständig' : 'teilweise') : 'fehlend' ?></td>
                                 <td><?= $hasMeta ? 'ja' : 'nein' ?></td>
                                 <td><?= $hasTags ? 'ja' : 'nein' ?></td>
                                 <td><?= $promptModel !== '' ? htmlspecialchars($promptModel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '—' ?></td>
                                 <td><?= $lastScanAt !== '' ? htmlspecialchars($lastScanAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : 'fehlend' ?><?php if ($lastScanScanner !== ''): ?> (<?= htmlspecialchars($lastScanScanner, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>)<?php endif; ?><?php if ($lastScanError): ?> · <span title="<?= htmlspecialchars($lastScanError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Fehler</span><?php endif; ?></td>
-                                <td><?= $hasIssues ? 'ja' : '—' ?></td>
+                                <td>
+                                    <?php if ($integrityOk === 0): ?>
+                                        broken
+                                    <?php elseif ($hasIssues): ?>
+                                        ja
+                                    <?php else: ?>
+                                        —
+                                    <?php endif; ?>
+                                </td>
                                 <td><?= $rating > 0 ? (int)$rating : '—' ?></td>
                                 <td><?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($promptQualityLabels[$promptQualityClass] ?? $promptQualityClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
