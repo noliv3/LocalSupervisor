@@ -137,6 +137,10 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - `WWW/app.js` pollt dynamisch (kürzer bei aktivem Worker, länger im Idle) und nutzt Backoff bei Fehlern/Stale-Cache.
 - Web setzt für Ollama-Status einen kurzen SQLite `busy_timeout` (200ms), Worker einen höheren (3500ms), um Lock-Contention zu reduzieren.
 - Runner/Spawn-Antworten liefern ein einheitliches Statusschema mit `status` (started|running|locked|busy|start_failed|open_failed|config_failed) und `reason_code` (z. B. `spawn_unverified`, `lock_busy`, `log_root_unavailable`), damit UI/CLI zwischen Lock, IO/Path und Spawn-Fehlern eindeutig unterscheiden.
+- Scan-Worker-Starts aus Web-Aktionen laufen non-blocking (`verifyWindowSeconds=0`) und liefern `status=started_unverified`, damit der PHP Built-in Server nicht durch Verifikations-Polling blockiert wird.
+- Der letzte Spawn-Status des Scan-Workers wird in `LOGS/scan_worker_spawn_last.json` persistiert (`ts_utc`, `requested_by`, `pid`, `command`, `status`, `reason_code`, `out_log`, `err_log`).
+- Scanner-Konfigurationsfehler (`scanner_not_configured`, `scanner_auth_missing`) werden als harte Job-Fehler gespeichert (`jobs.error_message` + `forge_response_json`) und zusätzlich in `LOGS/scanner_ingest.jsonl` als `response_type_detected=config_error` inkl. `missing_keys`/`config_path` protokolliert.
+- `health.php` meldet `scan_worker_running` (primär Heartbeat-Freshness, Fallback Lockfile), damit die UI den tatsächlichen Worker-Laufzustand sichtbar machen kann.
 - Worker-„running“ wird zentral über Lock/Heartbeat geprüft (`is_ollama_worker_running`): Launcher-Locks oder `web:*`-Owner zählen nicht, und Locks mit `php_server.pid` gelten als ungültig.
 
 ### Logpfade
@@ -148,7 +152,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **Ollama-Status:** `LOGS/ollama_status.json`
 - **Ollama Runtime:** `LOGS/runtime/ollama_worker_heartbeat.json`, `LOGS/runtime/ollama_global_status.json`
 - **Worker-Locks:** `LOGS/scan_worker.lock.json`, `LOGS/forge_worker.lock.json`, `LOGS/library_rename_worker.lock.json`
-- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.last.json`
+- **Spawn-Logs:** `LOGS/scan_worker_spawn.*`, `LOGS/scan_worker_spawn_last.json`, `LOGS/forge_worker_spawn.*`, `LOGS/ollama_worker_spawn.last.json`
 - **System-Fehlerlog:** `LOGS/system_errors.jsonl` (kritische IO/Spawn-Fehler)
 
 ## Web UI Seiten

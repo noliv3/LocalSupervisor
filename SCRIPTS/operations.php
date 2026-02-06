@@ -3028,6 +3028,26 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         $path          = (string)($mediaRow['path'] ?? '');
         $pathsCfg      = $config['paths'] ?? [];
         $scannerCfg    = $config['scanner'] ?? [];
+        if (!isset($scannerCfg['_config_path'])) {
+            $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
+        }
+        $configJobError = sv_build_scanner_config_job_error($scannerCfg, $path !== '' ? $path : ('media:' . $mediaId), 'rescan_media');
+        if (is_array($configJobError)) {
+            $response = array_merge($response, $configJobError['response']);
+            sv_update_job_status(
+                $pdo,
+                $jobId,
+                'error',
+                json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                (string)$configJobError['error_message']
+            );
+            return [
+                'job_id' => $jobId,
+                'status' => 'error',
+                'error' => (string)$configJobError['error_message'],
+                'result' => $response,
+            ];
+        }
         $nsfwThreshold = isset($payload['nsfw_threshold']) ? (float)$payload['nsfw_threshold'] : (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
         if ($path === '' || !is_file($path)) {
@@ -3445,7 +3465,7 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
 }
 
 
-function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, callable $logger, ?int $mediaId = null): array
+function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, callable $logger, ?int $mediaId = null, int $verifyWindowSeconds = 0): array
 {
     if (!sv_is_cli() && !sv_has_valid_internal_key()) {
         throw new RuntimeException('Internal-Key erforderlich, um Scan-Worker zu starten.');
@@ -3472,7 +3492,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         ];
     }
     $spawnLockPath   = $logsRoot . '/scan_worker_spawn.lock';
-    $spawnLastPath   = $logsRoot . '/scan_worker_spawn.last.json';
+    $spawnLastPath   = $logsRoot . '/scan_worker_spawn_last.json';
     $spawnOutLog     = $logsRoot . '/scan_worker.out.log';
     $spawnErrLog     = $logsRoot . '/scan_worker.err.log';
     $workerLockPath  = $logsRoot . '/scan_worker.lock.json';
@@ -3482,6 +3502,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         'stderr' => $spawnErrLog,
     ];
 
+    $requestedBy = sv_is_cli() ? 'cli' : 'web';
     $lockHandle = fopen($spawnLockPath, 'c+');
     if ($lockHandle === false) {
         sv_log_system_error($config, 'scan_worker_spawn_lock_open_failed', ['path' => $spawnLockPath]);
@@ -3661,7 +3682,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         sv_log_system_error($config, 'scan_worker_spawn_last_write_failed', ['path' => $spawnLastPath]);
     }
 
-    $verifyWindowSeconds = 10;
+    $verifyWindowSeconds = max(0, (int)$verifyWindowSeconds);
     $lockVerified = false;
     $pidVerified = false;
     $lockReason = null;
@@ -3704,6 +3725,49 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         usleep(200000);
     }
     $verified = $spawned && ($pidVerified || $lockVerified);
+    if ($verifyWindowSeconds === 0) {
+        $status = $spawned ? 'started_unverified' : 'failed';
+        $reasonCode = $spawned ? 'spawn_unverified' : 'spawn_failed';
+        $spawnStatusPayload = [
+            'ts_utc' => gmdate('c'),
+            'requested_by' => $requestedBy,
+            'pid' => $pid,
+            'command' => $spawnCmd ?? $cmd,
+            'status' => $status,
+            'reason_code' => $reasonCode,
+            'out_log' => $spawnOutLog,
+            'err_log' => $spawnErrLog,
+            'last_spawn_at' => $now,
+        ];
+        $spawnStatusJson = json_encode($spawnStatusPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($spawnStatusJson === false || file_put_contents($spawnLastPath, $spawnStatusJson) === false) {
+            sv_log_system_error($config, 'scan_worker_spawn_last_write_failed', ['path' => $spawnLastPath]);
+        }
+
+        flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
+
+        return [
+            'pid' => $pid,
+            'started' => $startedAt,
+            'unknown' => $unknown,
+            'running' => false,
+            'skipped' => !$spawned,
+            'spawned' => $spawned,
+            'reason' => $spawnErr,
+            'reason_code' => $reasonCode,
+            'message' => $spawned ? 'Scan-Worker-Start ausgelöst (unverifiziert).' : 'Scan-Worker-Start fehlgeschlagen.',
+            'log_paths' => $logPaths,
+            'status' => $status,
+            'locked' => false,
+            'verify_window_seconds' => 0,
+            'command' => $spawnCmd ?? $cmd,
+            'out_log' => $spawnOutLog,
+            'err_log' => $spawnErrLog,
+            'last_spawn_at' => $now,
+        ];
+    }
+
     if (!$verified && $spawnErr === null) {
         $spawnErr = 'start_not_verified';
     }
@@ -3713,6 +3777,22 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
 
     $reasonCode = $verified ? 'start_verified' : ($spawnErr === 'start_not_verified' ? 'spawn_unverified' : 'spawn_failed');
     $status = $verified ? 'running' : 'start_failed';
+
+    $spawnStatusPayload = [
+        'ts_utc' => gmdate('c'),
+        'requested_by' => $requestedBy,
+        'pid' => $pid,
+        'command' => $spawnCmd ?? $cmd,
+        'status' => $verified ? 'started' : 'failed',
+        'reason_code' => $reasonCode,
+        'out_log' => $spawnOutLog,
+        'err_log' => $spawnErrLog,
+        'last_spawn_at' => $now,
+    ];
+    $spawnStatusJson = json_encode($spawnStatusPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($spawnStatusJson === false || file_put_contents($spawnLastPath, $spawnStatusJson) === false) {
+        sv_log_system_error($config, 'scan_worker_spawn_last_write_failed', ['path' => $spawnLastPath]);
+    }
 
     return [
         'pid'     => $pid,
@@ -3943,6 +4023,35 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
     }
 }
 
+
+function sv_build_scanner_config_job_error(array $scannerCfg, string $path, string $operation): ?array
+{
+    $configError = sv_scanner_validate_runtime_config($scannerCfg);
+    if (!is_array($configError)) {
+        return null;
+    }
+
+    $reasonCode = (string)($configError['reason_code'] ?? 'scanner_config_error');
+    $missingKeys = is_array($configError['missing_keys'] ?? null) ? $configError['missing_keys'] : [];
+    $configPath = isset($configError['config_path']) && is_string($configError['config_path']) && $configError['config_path'] !== ''
+        ? $configError['config_path']
+        : null;
+
+    return [
+        'reason_code' => $reasonCode,
+        'error_message' => $reasonCode . ($missingKeys !== [] ? ' (missing: ' . implode(', ', $missingKeys) . ')' : ''),
+        'response' => [
+            'operation' => $operation,
+            'path' => sv_safe_path_label($path),
+            'reason_code' => $reasonCode,
+            'missing_keys' => $missingKeys,
+            'config_path' => $configPath,
+            'response_type_detected' => 'config_error',
+            'finished_at' => date('c'),
+        ],
+    ];
+}
+
 function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, callable $logger): array
 {
     $jobId   = (int)($jobRow['id'] ?? 0);
@@ -3981,6 +4090,30 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     $cancelCheck = static function () use ($pdo, $jobId): bool {
         return sv_is_job_canceled($pdo, $jobId);
     };
+
+    $scannerCfg = $config['scanner'] ?? [];
+    if (!isset($scannerCfg['_config_path'])) {
+        $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
+    }
+    $configJobError = sv_build_scanner_config_job_error($scannerCfg, $path, 'scan_path');
+    if (is_array($configJobError)) {
+        $response = $configJobError['response'];
+        sv_update_job_status(
+            $pdo,
+            $jobId,
+            'error',
+            json_encode($response, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            (string)$configJobError['error_message']
+        );
+        $jobLogger('Scanner-Konfigurationsfehler: ' . (string)$configJobError['error_message']);
+        return [
+            'job_id' => $jobId,
+            'status' => 'error',
+            'error' => (string)$configJobError['error_message'],
+            'result' => $response,
+        ];
+    }
+
     $result = sv_run_scan_operation($pdo, $config, $path, $limit, $jobLogger, $cancelCheck);
 
     if (!empty($result['canceled'])) {
@@ -5143,6 +5276,9 @@ function sv_rescan_single_media(PDO $pdo, array $config, int $mediaId, callable 
 
     $pathsCfg      = $config['paths'] ?? [];
     $scannerCfg    = $config['scanner'] ?? [];
+    if (!isset($scannerCfg['_config_path'])) {
+        $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
+    }
     $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
     sv_assert_media_path_allowed($path, $pathsCfg, 'rescan_single');
@@ -6413,6 +6549,9 @@ function sv_refresh_media_after_regen(
     callable $logger
 ): array {
     $scannerCfg    = $config['scanner'] ?? [];
+    if (!isset($scannerCfg['_config_path'])) {
+        $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
+    }
     $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
     $result        = [
         'scan_updated'   => false,
@@ -8022,6 +8161,9 @@ function sv_fetch_forge_jobs_grouped(PDO $pdo, array $mediaIds, int $limitPerMed
 function sv_run_scan_operation(PDO $pdo, array $config, string $scanPath, ?int $limit, callable $logger, ?callable $cancelCheck = null): array
 {
     $scannerCfg    = $config['scanner'] ?? [];
+    if (!isset($scannerCfg['_config_path'])) {
+        $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
+    }
     $pathsCfg      = $config['paths'] ?? [];
     $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
@@ -8056,6 +8198,9 @@ function sv_run_rescan_operation(
     callable $logger
 ): array {
     $scannerCfg    = $config['scanner'] ?? [];
+    if (!isset($scannerCfg['_config_path'])) {
+        $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
+    }
     $pathsCfg      = $config['paths'] ?? [];
     $nsfwThreshold = (float)($scannerCfg['nsfw_threshold'] ?? 0.7);
 
