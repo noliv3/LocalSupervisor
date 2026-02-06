@@ -96,7 +96,7 @@ function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
         }
 
         $sqliteCfg = $config['db']['sqlite'] ?? [];
-        $busyTimeout = isset($sqliteCfg['busy_timeout_ms']) ? (int)$sqliteCfg['busy_timeout_ms'] : 5000;
+        $busyTimeout = isset($sqliteCfg['busy_timeout_ms']) ? (int)$sqliteCfg['busy_timeout_ms'] : 10000;
         if ($busyTimeout > 0) {
             $pdo->exec('PRAGMA busy_timeout = ' . $busyTimeout);
         }
@@ -106,6 +106,9 @@ function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
             : 'WAL';
         if ($journalMode !== '') {
             $pdo->exec('PRAGMA journal_mode = ' . $journalMode);
+            if ($journalMode === 'WAL') {
+                $pdo->exec('PRAGMA synchronous = NORMAL');
+            }
         }
     } catch (Throwable $e) {
         // Pragmas sind optional; Fehler sollen den Verbindungsaufbau nicht blockieren.
