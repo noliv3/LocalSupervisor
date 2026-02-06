@@ -145,6 +145,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Spawn-Status wird in `ollama_worker_spawn.last.json` protokolliert und kann im Status-Endpoint eingesehen werden.
 - Delete-Action unterstützt `force=1`, um laufende Jobs zu canceln und zu entfernen.
 - Trace-Dateien enthalten `stage_history` (Zeit + Dauer je Stage) und werden bei Fehlern/Cancels finalisiert.
+- Child-Timeouts/Cancels werden nach kurzer Grace-Period hart beendet (posix `SIGKILL` oder `taskkill /F /T`) und als System-Error geloggt.
 - Der Worker schreibt zusätzlich einen Runtime-Heartbeat nach `LOGS/runtime/ollama_worker_heartbeat.json` (`ts_utc`, `pid`, `state`, optional `current_job_id`/`last_batch_ts`); dieser wird im Status-Polling primär genutzt.
 - Der Worker schreibt einen kompakten Runtime-Cache nach `LOGS/runtime/ollama_global_status.json` (`queue_pending`, `queue_queued`, `queue_running`, `worker_pid`, `worker_running`, optional `last_error`).
 - `action=status` nutzt standardmäßig den Light-Status aus Runtime-Cache; schwere DB-Aggregate werden nur bei `details=1` oder fehlendem Cache ausgeführt.
@@ -212,6 +213,7 @@ Die folgenden Trigger helfen beim schnellen Einordnen von „Jobs hängen“ ode
 
 ### Parsing & Validierung
 - **Parse-Fehler:** Strenge JSON-Validierung in `ollama_jobs.php`. Symptom: Requeue bei non-JSON. Ergänzung: Determinismus (seed=42) hilft, aber Modellvarianten triggern weiter.
+- **Markdown-Wrapper:** JSON-Extraktion toleriert eingebettete `json`-Blöcke und extrahiert den ersten/letzten `{...}`-Block für robustes Parsing.
 
 ### Ergänzende Trigger (Konfig & Betrieb)
 - **DB-Locks:** SQLite WAL/Locks (README). 

@@ -22,7 +22,16 @@ function sv_ollama_try_extract_json_object(string $text): ?array
         return null;
     }
 
-    $jsonChunk = sv_ollama_extract_first_json_object($cleaned);
+    $candidate = null;
+    if (preg_match('/\{[\s\S]*\}/', $cleaned, $matches)) {
+        $candidate = $matches[0];
+    }
+    $candidate = is_string($candidate) && trim($candidate) !== '' ? $candidate : $cleaned;
+
+    $jsonChunk = sv_ollama_extract_first_json_object($candidate);
+    if (!is_string($jsonChunk) || trim($jsonChunk) === '') {
+        $jsonChunk = $candidate;
+    }
     if (!is_string($jsonChunk) || trim($jsonChunk) === '') {
         return null;
     }

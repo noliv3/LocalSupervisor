@@ -1,6 +1,7 @@
 # VERSIONLOG
 
 ## 2026-02-06
+- Mega-Update Stabilität: Aggressives Prozess-Management (Terminierung Prozessbaum), robustes Markdown-JSON-Parsing und GD-Speicheroptimierung.
 - Optimierung der SQLite-Performance durch Transaktions-Batching im Ollama-Enqueue und Anpassung der Pragmas.
 
 ## Stage 1 – Caption & Title
