@@ -31,6 +31,44 @@ $dbFile = $baseTemp . '/selftest.sqlite';
 $pdo = new PDO('sqlite:' . $dbFile);
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+$logger = static function (string $msg): void {
+    fwrite(STDOUT, $msg . PHP_EOL);
+};
+
+$allOk = true;
+
+$logsDir = __DIR__ . '/../LOGS';
+$logFiles = [
+    $logsDir . '/ollama_jobs.jsonl',
+    $logsDir . '/system_errors.jsonl',
+];
+$logsDirWritable = is_dir($logsDir) && is_writable($logsDir);
+foreach ($logFiles as $logFile) {
+    if (is_file($logFile)) {
+        if (!is_writable($logFile)) {
+            $logger('FAIL: Logdatei nicht beschreibbar: ' . $logFile);
+            $allOk = false;
+        } else {
+            $logger('OK: Logdatei beschreibbar: ' . $logFile);
+        }
+        continue;
+    }
+    if (!$logsDirWritable) {
+        $logger('FAIL: Log-Ordner nicht beschreibbar: ' . $logsDir);
+        $allOk = false;
+    } else {
+        $logger('OK: Log-Ordner beschreibbar für ' . basename($logFile));
+    }
+}
+
+$journalMode = $pdo->query('PRAGMA journal_mode')->fetchColumn();
+$journalMode = is_string($journalMode) ? strtolower($journalMode) : '';
+if ($journalMode === 'wal') {
+    $logger('OK: SQLite journal_mode=wal');
+} else {
+    $logger('WARN: SQLite journal_mode=' . ($journalMode !== '' ? $journalMode : 'unknown') . ' (Performance degradation risk)');
+}
+
 $schemaSql = @file_get_contents(__DIR__ . '/../DB/schema.sql');
 if (!is_string($schemaSql) || trim($schemaSql) === '') {
     fwrite(STDERR, "Schema konnte nicht geladen werden.\n");
@@ -46,10 +84,6 @@ if (is_file($migrationFile)) {
         $migration['run']($pdo);
     }
 }
-
-$logger = static function (string $msg): void {
-    fwrite(STDOUT, $msg . PHP_EOL);
-};
 
 // Testbild erzeugen
 $imgPath = $baseTemp . '/input/test.png';
@@ -101,7 +135,6 @@ $pathsCfg = [
 $scannerCfg = [];
 $nsfwThreshold = 0.7;
 
-$allOk = true;
 $videoOk = true;
 
 $logger('Importiere PNG …');

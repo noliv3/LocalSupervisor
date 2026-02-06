@@ -275,6 +275,25 @@ try {
 }
 
 $logsPath = sv_logs_root($config);
+$systemErrorsPath = __DIR__ . '/../LOGS/system_errors.jsonl';
+$systemErrorsAvailable = is_file($systemErrorsPath);
+$systemErrors = [];
+if ($systemErrorsAvailable) {
+    $lines = file($systemErrorsPath, FILE_IGNORE_NEW_LINES);
+    if (is_array($lines)) {
+        $lines = array_slice($lines, -50);
+        foreach ($lines as $line) {
+            $line = trim((string)$line);
+            if ($line === '') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $systemErrors[] = $decoded;
+            }
+        }
+    }
+}
 $statusOrder = [
     'running' => 1,
     'queued' => 2,
@@ -638,6 +657,48 @@ sv_ui_header('Ollama-Dashboard', 'ollama');
             </table>
         </div>
         <div class="hint small">Sortierung: Klick auf Status/Fortschritt/Heartbeat.</div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">System Errors (Last 50)</div>
+        <?php if (!$systemErrorsAvailable): ?>
+            <div class="hint small">No system errors logged yet.</div>
+        <?php else: ?>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp (UTC)</th>
+                            <th>PID</th>
+                            <th>Type</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($systemErrors === []): ?>
+                            <tr><td colspan="4" class="job-hint">Keine System-Errors gefunden.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($systemErrors as $entry): ?>
+                                <?php
+                                $ts = isset($entry['ts_utc']) ? (string)$entry['ts_utc'] : '';
+                                $pid = isset($entry['pid']) ? (string)$entry['pid'] : '';
+                                $type = isset($entry['type']) ? (string)$entry['type'] : '';
+                                $msg = isset($entry['msg']) ? (string)$entry['msg'] : '';
+                                $isForceKill = $type !== '' && strpos($type, 'force_kill') !== false;
+                                $rowStyle = $isForceKill ? ' style="color:#b00;font-weight:600;"' : '';
+                                ?>
+                                <tr<?= $rowStyle ?>>
+                                    <td><?= $ts !== '' ? htmlspecialchars($ts, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
+                                    <td><?= $pid !== '' ? htmlspecialchars($pid, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
+                                    <td><?= $type !== '' ? htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
+                                    <td><?= $msg !== '' ? htmlspecialchars($msg, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
     </div>
 </div>
 
