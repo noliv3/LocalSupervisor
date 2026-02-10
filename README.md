@@ -290,3 +290,6 @@ Zuverlässiger Start ohne Zombie-Running, valide Eingaben, konsistente Payloads,
 ## Verweise
 - `VERSIONLOG.MD`
 - `CONFIG/config.example.php`
+
+- Web-DB-Fast-Fail: WWW-Endpunkte nutzen `sv_open_pdo_web()` mit minimalem SQLite-`busy_timeout` (max. 25ms). Bei `SQLITE_BUSY/LOCKED` antworten `thumb.php`, `media_stream.php`, `mediadb.php`, `media_view.php` und `ollama.php` sofort (Busy/Placeholder statt Hänger).
+- `internal_ollama.php action=run_once` führt keinen synchronen Batch mehr im Request aus, sondern stößt nur noch den Hintergrund-Spawn an und antwortet sofort.

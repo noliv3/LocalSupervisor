@@ -1423,7 +1423,7 @@
         function pollJobs() {
             const rows = Array.from(root.querySelectorAll('tr[data-job-id]'));
             if (rows.length === 0) return Promise.resolve();
-            return Promise.all(rows.map((row) => {
+            return rows.reduce((chain, row) => chain.then(() => {
                 const jobId = row.dataset.jobId;
                 if (!jobId) return null;
                 return postAction({ action: 'job_status', job_id: jobId })
@@ -1433,7 +1433,7 @@
                         }
                     })
                     .catch(() => {});
-            })).finally(() => applySort());
+            }), Promise.resolve()).finally(() => applySort());
         }
 
         function handleActionClick(event) {
