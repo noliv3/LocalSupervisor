@@ -1032,9 +1032,10 @@ function sv_scan_with_local_scanner(
     }
 
     $mediaType = sv_scanner_detect_media_type($file);
+    $imageEndpoint = trim((string)($scannerCfg['image_endpoint'] ?? '/check'));
     $endpoint = $mediaType === 'video'
         ? (string)($scannerCfg['batch_endpoint'] ?? '/batch')
-        : '/check';
+        : ($imageEndpoint !== '' ? $imageEndpoint : '/check');
     $fieldName = $mediaType === 'video' ? 'file' : 'image';
     $connectTimeout = isset($scannerCfg['connect_timeout']) ? (int)$scannerCfg['connect_timeout'] : 5;
     $timeout = isset($scannerCfg['timeout']) ? (int)$scannerCfg['timeout'] : 30;
