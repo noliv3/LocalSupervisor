@@ -104,6 +104,9 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
   ```
 - Ergebnisse werden in `ollama_results` und `media_meta` abgelegt.
 - Status und Fehler im Ollama-Dashboard prüfen (siehe Web-UI).
+- Web-Fast-Path: `WWW/ollama.php action=status` läuft standardmäßig ohne DB-Zugriffe (`details=0`) und antwortet aus Runtime-Dateien (`runtime/ollama_global_status.json`, Spawn-Status, Heartbeat/Lock). Bei `details=1` wird DB nur mit sehr kurzem `busy_timeout` geöffnet; bei `SQLITE_BUSY/LOCKED` kommt sofort `status=busy` mit Light-/Stale-Daten.
+- `action=run` ist non-blocking/fire-and-forget: Pending-Counts kommen aus Runtime-Status; der Spawn läuft ohne Verify-Wartefenster (`verifyWindowSeconds=0`).
+- Das Dashboard (`WWW/dashboard_ollama.php`) rendert initial ohne DB-Queries und lädt nur den Light-Status; Detaildaten bleiben explizit/optional.
 
 ### Ollama Job-States & Retry-Policy
 - Zustände: `queued` → `running` → `done/error/cancelled` (`pending` ist legacy und wird nur noch gelesen).
