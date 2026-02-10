@@ -41,6 +41,27 @@ try {
     $migrationError = 'Migration fehlgeschlagen: ' . sv_sanitize_error_message($e->getMessage());
 }
 
+
+if ($migrationError !== null) {
+    sv_ui_header('Ollama-Dashboard', 'ollama');
+    ?>
+    <div class="page-header">
+        <div>
+            <h1 class="page-title">Ollama-Dashboard</h1>
+            <div class="hint">Interne Kontrolle der Ollama-Warteschlange (Polling via ollama.php).</div>
+        </div>
+    </div>
+    <div class="panel">
+        <div class="action-note error">
+            DB-Migration erforderlich: <?= htmlspecialchars($migrationError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><br>
+            Bitte ausführen: <code>php SCRIPTS/migrate.php</code>
+        </div>
+    </div>
+    <?php
+    sv_ui_footer();
+    exit;
+}
+
 function sv_ollama_normalize_enum(?string $value, array $allowed, string $default): string
 {
     if ($value === null) {
@@ -189,7 +210,7 @@ $jobsSelect = [
     $hasLastErrorCode ? 'j.last_error_code' : 'NULL AS last_error_code',
     'j.created_at',
     'j.updated_at',
-    'j.' . $payloadColumn . ' AS payload_json',
+    $payloadColumn !== '' ? ('j.' . $payloadColumn . ' AS payload_json') : 'NULL AS payload_json',
     'mm_stage.meta_value AS stage_version',
     'mm_quality.meta_value AS quality_score',
     'mm_domain.meta_value AS domain_type',
