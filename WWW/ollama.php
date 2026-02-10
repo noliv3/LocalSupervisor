@@ -54,7 +54,11 @@ if ($action === '') {
 try {
     sv_run_migrations_if_needed($pdo, $config);
 } catch (Throwable $e) {
-    $respond(500, ['ok' => false, 'error' => 'Migration fehlgeschlagen: ' . $e->getMessage()]);
+    $respond(503, [
+        'ok' => false,
+        'error' => 'DB-Migration erforderlich: ' . $e->getMessage(),
+        'hint' => 'Bitte `php SCRIPTS/migrate.php` ausführen.',
+    ]);
 }
 
 $logsPath = sv_logs_root($config);
@@ -547,7 +551,7 @@ if ($action === 'job_status') {
     $payloadColumn = sv_ollama_payload_column($pdo);
     $stmt = $pdo->prepare(
         'SELECT j.id, j.status, j.progress_bits, j.progress_bits_total, j.heartbeat_at, j.last_error_code, '
-        . 'j.' . $payloadColumn . ' AS payload_json, '
+        . ($payloadColumn !== '' ? ('j.' . $payloadColumn . ' AS payload_json, ') : 'NULL AS payload_json, ')
         . 'mm_stage.meta_value AS stage_version '
         . 'FROM jobs j '
         . 'LEFT JOIN media_meta mm_stage ON mm_stage.id = ('

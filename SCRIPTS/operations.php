@@ -183,13 +183,29 @@ function sv_db_exec_retry(callable $fn, int $retries = 5, int $minSleepMs = 50, 
     }
 }
 
+
+function sv_jobs_payload_column(PDO $pdo): string
+{
+    $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    $columns = sv_db_list_columns($pdo, $driver, 'jobs');
+    $map = array_fill_keys(array_map('strtolower', $columns), true);
+    if (isset($map['payload_json'])) {
+        return 'payload_json';
+    }
+    if (isset($map['payload'])) {
+        return 'payload';
+    }
+
+    throw new RuntimeException('jobs payload column missing; migration required');
+}
+
 function sv_update_job_checkpoint_payload(PDO $pdo, int $jobId, array $payload): void
 {
     $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($json === false) {
         return;
     }
-    $column = 'payload_json';
+    $column = sv_jobs_payload_column($pdo);
     sv_db_exec_retry(static function () use ($pdo, $jobId, $json, $column): void {
         $stmt = $pdo->prepare('UPDATE jobs SET ' . $column . ' = :payload, updated_at = :updated_at WHERE id = :id');
         $stmt->execute([
@@ -202,7 +218,7 @@ function sv_update_job_checkpoint_payload(PDO $pdo, int $jobId, array $payload):
 
 function sv_fetch_job_payload(PDO $pdo, array $jobRow): array
 {
-    $raw = $jobRow['payload_json'] ?? null;
+    $raw = $jobRow['payload_json'] ?? ($jobRow['payload'] ?? null);
     if (!is_string($raw) || trim($raw) === '') {
         return [];
     }
@@ -249,7 +265,7 @@ function sv_enqueue_job_with_payload(
 
     $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     $payloadJson = $payloadJson === false ? null : $payloadJson;
-    $column = 'payload_json';
+    $column = sv_jobs_payload_column($pdo);
 
     $stmt = $pdo->prepare(
         'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, ' . $column . ') '
