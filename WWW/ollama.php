@@ -26,14 +26,24 @@ try {
             'reason_code' => $access['reason_code'] ?? 'forbidden',
         ]);
     }
-    $pdo = sv_open_pdo($config);
-    try {
-        $pdo->exec('PRAGMA busy_timeout = 200');
-    } catch (Throwable $e) {
-    }
 } catch (Throwable $e) {
     $respond(500, ['ok' => false, 'error' => $e->getMessage()]);
 }
+
+$isBusyException = static function (Throwable $e): bool {
+    $msg = strtoupper($e->getMessage());
+    return str_contains($msg, 'SQLITE_BUSY') || str_contains($msg, 'SQLITE_LOCKED') || str_contains($msg, 'DATABASE IS LOCKED');
+};
+
+$openWebPdo = static function () use ($config): PDO {
+    $pdo = sv_open_pdo($config);
+    try {
+        $pdo->exec('PRAGMA busy_timeout = 25');
+    } catch (Throwable $e) {
+    }
+
+    return $pdo;
+};
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     $respond(405, ['ok' => false, 'error' => 'POST required.']);
@@ -50,17 +60,6 @@ $action = is_string($action) ? trim($action) : '';
 if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
 }
-
-try {
-    sv_run_migrations_if_needed($pdo, $config);
-} catch (Throwable $e) {
-    $respond(503, [
-        'ok' => false,
-        'error' => 'DB-Migration erforderlich: ' . $e->getMessage(),
-        'hint' => 'Bitte `php SCRIPTS/migrate.php` ausführen.',
-    ]);
-}
-
 $logsPath = sv_logs_root($config);
 
 if ($action === 'status') {
@@ -79,7 +78,7 @@ if ($action === 'status') {
     $errorCounts = [];
 
     $maxConcurrency = sv_ollama_max_concurrency($config);
-    $running = sv_ollama_running_job_count($pdo);
+    $running = 0;
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
     $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
     $lockSnapshot = $workerState['lock'] ?? null;
@@ -95,10 +94,13 @@ if ($action === 'status') {
         $counts['queued'] = (int)($runtimeStatus['queue_queued'] ?? 0);
         $counts['pending'] = max(0, (int)($runtimeStatus['queue_pending'] ?? 0) - (int)($runtimeStatus['queue_queued'] ?? 0));
         $counts['running'] = (int)($runtimeStatus['queue_running'] ?? 0);
+        $running = $counts['running'];
     }
 
     if ($details || !$lightAvailable) {
-        $jobTypes = sv_ollama_job_types();
+        try {
+            $pdo = $openWebPdo();
+            $jobTypes = sv_ollama_job_types();
         $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
         $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY status');
         $stmt->execute($jobTypes);
@@ -151,6 +153,13 @@ if ($action === 'status') {
             }
             $errorCounts[$code] = (int)($row['cnt'] ?? 0);
         }
+            $running = (int)($counts['running'] ?? $running);
+        } catch (Throwable $e) {
+            if ($isBusyException($e)) {
+                $respond(200, ['ok' => false, 'status' => 'busy', 'reason_code' => 'db_busy', 'light_status' => $lightAvailable, 'stale_age_ms' => $staleAgeMs, 'counts' => $counts]);
+            }
+            throw $e;
+        }
     }
 
     $ollamaDownActive = !empty($globalStatus['ollama_down']['active']);
@@ -180,6 +189,14 @@ if ($action === 'status') {
 }
 
 if ($action === 'enqueue') {
+    try {
+        $pdo = $openWebPdo();
+    } catch (Throwable $e) {
+        if ($isBusyException($e)) {
+            $respond(200, ['ok' => false, 'status' => 'busy', 'reason_code' => 'db_busy']);
+        }
+        throw $e;
+    }
     $modeArg = $_POST['mode'] ?? ($jsonBody['mode'] ?? 'all');
     $modeArg = is_string($modeArg) ? trim($modeArg) : 'all';
     $allowedModes = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'all'];
@@ -341,11 +358,12 @@ if ($action === 'enqueue') {
         $logs[] = $message;
     };
 
-    $enqueueResult = sv_ollama_enqueue_jobs_with_autostart(
-        $pdo,
-        $config,
-        'enqueue',
-        static function () use ($modes, $selectCandidates, $pdo, $config, $logger, $allFlag): array {
+    try {
+        $enqueueResult = sv_ollama_enqueue_jobs_with_autostart(
+            $pdo,
+            $config,
+            'enqueue',
+            static function () use ($modes, $selectCandidates, $pdo, $config, $logger, $allFlag): array {
             $summary = [
                 'candidates' => 0,
                 'enqueued' => 0,
@@ -402,8 +420,14 @@ if ($action === 'enqueue') {
             return [
                 'summary' => $summary,
             ];
+            }
+        );
+    } catch (Throwable $e) {
+        if ($isBusyException($e)) {
+            $respond(200, ['ok' => false, 'status' => 'busy', 'reason_code' => 'db_busy', 'logs' => $logs]);
         }
-    );
+        throw $e;
+    }
 
     $summary = $enqueueResult['enqueue']['summary'] ?? [
         'candidates' => 0,
@@ -428,8 +452,9 @@ if ($action === 'run') {
         $batch = 5;
     }
 
-    $pendingJobs = sv_ollama_pending_job_count($pdo);
-    $spawn = sv_ollama_spawn_background_worker($config, $pdo, 'web_run', $pendingJobs, $batch, 0);
+    $runtimeStatus = sv_ollama_read_runtime_global_status($config);
+    $pendingJobs = max(0, (int)($runtimeStatus['queue_pending'] ?? 0));
+    $spawn = sv_ollama_spawn_background_worker_fast($config, 'web_run', $pendingJobs, $batch, 0);
 
     $respond(200, [
         'ok' => !empty($spawn['spawned']),
@@ -446,6 +471,7 @@ if ($action === 'run') {
 }
 
 if ($action === 'cancel') {
+    $pdo = $openWebPdo();
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
@@ -479,6 +505,7 @@ if ($action === 'cancel') {
 }
 
 if ($action === 'delete') {
+    $pdo = $openWebPdo();
     $mediaId = $_POST['media_id'] ?? ($jsonBody['media_id'] ?? null);
     $mode = $_POST['mode'] ?? ($jsonBody['mode'] ?? null);
     $force = $_POST['force'] ?? ($jsonBody['force'] ?? null);
@@ -534,6 +561,7 @@ if ($action === 'delete') {
 }
 
 if ($action === 'job_status') {
+    $pdo = $openWebPdo();
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {

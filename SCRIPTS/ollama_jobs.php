@@ -479,6 +479,110 @@ function sv_ollama_attempt_autostart(
     );
 }
 
+function sv_ollama_spawn_background_worker_fast(
+    array $config,
+    string $source,
+    int $pendingJobs,
+    int $batch,
+    int $verifyWindowSeconds = 0
+): array {
+    $logPaths = sv_ollama_worker_log_paths($config);
+
+    if ($pendingJobs <= 0) {
+        return [
+            'ok' => false,
+            'status' => 'skipped',
+            'reason_code' => 'no_pending',
+            'spawned' => false,
+            'skipped' => true,
+            'pid' => null,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    if (!empty($workerState['running'])) {
+        return [
+            'ok' => false,
+            'status' => 'skipped',
+            'reason_code' => 'worker_running',
+            'spawned' => false,
+            'skipped' => true,
+            'pid' => $workerState['pid'] ?? null,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    $spawnLock = sv_ollama_acquire_launcher_lock_for_spawn(
+        $config,
+        'autostart:' . $source,
+        sv_ollama_launcher_cooldown_seconds($config)
+    );
+    if (empty($spawnLock['ok'])) {
+        return [
+            'ok' => false,
+            'status' => $spawnLock['status'] ?? 'locked',
+            'reason_code' => $spawnLock['reason_code'] ?? ($spawnLock['reason'] ?? 'launcher_locked'),
+            'spawned' => false,
+            'skipped' => true,
+            'pid' => null,
+            'lock_path' => $spawnLock['path'] ?? null,
+            'cooldown_remaining' => $spawnLock['cooldown_remaining'] ?? null,
+            'last_spawn_at' => $spawnLock['last_spawn_at'] ?? null,
+            'source' => $source,
+            'log_paths' => $logPaths,
+        ];
+    }
+
+    try {
+        $phpCli = sv_get_php_cli($config);
+        if ($phpCli === '') {
+            return [
+                'ok' => false,
+                'status' => 'config_failed',
+                'reason_code' => 'php_cli_missing',
+                'spawned' => false,
+                'skipped' => false,
+                'pid' => null,
+                'source' => $source,
+                'log_paths' => $logPaths,
+            ];
+        }
+        $workerScript = realpath(sv_base_dir() . '/SCRIPTS/ollama_service_cli.php');
+        if ($workerScript === false) {
+            return [
+                'ok' => false,
+                'status' => 'config_failed',
+                'reason_code' => 'service_script_missing',
+                'spawned' => false,
+                'skipped' => false,
+                'pid' => null,
+                'source' => $source,
+                'log_paths' => $logPaths,
+            ];
+        }
+
+        $args = [
+            '--batch=' . $batch,
+            '--sleep-ms=1000',
+        ];
+        $spawn = sv_ollama_spawn_worker($config, $phpCli, $workerScript, $args, $verifyWindowSeconds, $logPaths);
+        $spawn['source'] = $source;
+        $spawn['pending_jobs'] = $pendingJobs;
+        $spawn['batch'] = $batch;
+        $spawn['spawned'] = (bool)($spawn['spawned'] ?? false);
+        $spawn['skipped'] = false;
+        $spawn['log_paths'] = $spawn['spawn_logs'] ?? $logPaths;
+
+        return $spawn;
+    } finally {
+        sv_ollama_release_launcher_lock($spawnLock['handle']);
+    }
+}
+
 function sv_ollama_spawn_background_worker(
     array $config,
     PDO $pdo,
@@ -1414,7 +1518,18 @@ function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, 
     ];
 }
 
-function sv_ollama_worker_lock_snapshot(array $config, ?int $currentPid = null): array
+
+function sv_ollama_allow_process_probe(bool $default = false): bool
+{
+    $sapi = strtolower((string)(PHP_SAPI ?? php_sapi_name()));
+    if ($sapi === 'cli' || $sapi === 'phpdbg') {
+        return true;
+    }
+
+    return $default;
+}
+
+function sv_ollama_worker_lock_snapshot(array $config, ?int $currentPid = null, bool $allowProcessProbe = false): array
 {
     $lockPayload = sv_ollama_read_worker_lock_payload($config);
     $phpServerPid = sv_ollama_php_server_pid($config);
@@ -1436,11 +1551,13 @@ function sv_ollama_worker_lock_snapshot(array $config, ?int $currentPid = null):
     $heartbeatTs = $heartbeat !== '' ? strtotime($heartbeat) : false;
     $lockActive = $heartbeatTs !== false && (time() - (int)$heartbeatTs) <= 30;
     $pidAlive = null;
-    $pidInfo = sv_is_pid_running((int)$validation['pid']);
-    if (!($pidInfo['unknown'] ?? false)) {
-        $pidAlive = (bool)($pidInfo['running'] ?? false);
-        if ($pidAlive) {
-            $lockActive = true;
+    if ($allowProcessProbe && sv_ollama_allow_process_probe()) {
+        $pidInfo = sv_is_pid_running((int)$validation['pid']);
+        if (!($pidInfo['unknown'] ?? false)) {
+            $pidAlive = (bool)($pidInfo['running'] ?? false);
+            if ($pidAlive) {
+                $lockActive = true;
+            }
         }
     }
 

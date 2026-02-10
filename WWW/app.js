@@ -1097,7 +1097,6 @@
         let pollInterval = basePollInterval;
         let pollTimer = null;
         let pollFailures = 0;
-        let lastDetailsPollAt = 0;
 
         function computePollIntervalMs() {
             const staleAgeMs = Number((root.dataset.staleAgeMs || '0'));
@@ -1117,13 +1116,14 @@
             }
             const delay = Math.max(1000, Math.floor(nextMs));
             pollTimer = window.setTimeout(() => {
-                pollStatus().finally(() => {
-                    pollJobs();
-                    const dynamicInterval = computePollIntervalMs();
-                    const backoff = Math.min(60000, dynamicInterval * Math.max(1, Math.pow(2, pollFailures)));
-                    pollInterval = backoff;
-                    schedulePoll(pollInterval);
-                });
+                pollStatus()
+                    .then(() => pollJobs())
+                    .finally(() => {
+                        const dynamicInterval = computePollIntervalMs();
+                        const backoff = Math.min(60000, dynamicInterval * Math.max(1, Math.pow(2, pollFailures)));
+                        pollInterval = backoff;
+                        schedulePoll(pollInterval);
+                    });
             }, delay);
         }
 
@@ -1394,8 +1394,8 @@
             rows.forEach((row) => tbody.appendChild(row));
         }
 
-        function pollStatus(details = 0) {
-            return postAction({ action: 'status', details })
+        function pollStatus() {
+            return postAction({ action: 'status', details: 0 })
                 .then((data) => {
                     if (data && data.ok) {
                         pollFailures = 0;
@@ -1407,11 +1407,13 @@
                         if (autoRunEnabled) {
                             triggerAutoRun();
                         }
-                        if (!details && (Date.now() - lastDetailsPollAt) > 60000) {
-                            lastDetailsPollAt = Date.now();
-                            pollStatus(1);
-                        }
+                        return;
                     }
+                    if (data && data.status === 'busy') {
+                        pollFailures = Math.max(1, pollFailures + 1);
+                        return;
+                    }
+                    pollFailures++;
                 })
                 .catch(() => {
                     pollFailures++;
@@ -1420,8 +1422,8 @@
 
         function pollJobs() {
             const rows = Array.from(root.querySelectorAll('tr[data-job-id]'));
-            if (rows.length === 0) return;
-            Promise.all(rows.map((row) => {
+            if (rows.length === 0) return Promise.resolve();
+            return Promise.all(rows.map((row) => {
                 const jobId = row.dataset.jobId;
                 if (!jobId) return null;
                 return postAction({ action: 'job_status', job_id: jobId })

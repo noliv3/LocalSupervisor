@@ -2,7 +2,6 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../SCRIPTS/common.php';
-require_once __DIR__ . '/../SCRIPTS/operations.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/ollama_jobs.php';
 require_once __DIR__ . '/_layout.php';
@@ -26,302 +25,14 @@ if (!$isLoopback) {
 
 $internalAccess = sv_internal_access_result($config, 'dashboard_ollama', ['allow_loopback_bypass' => true]);
 
-try {
-    $pdo = sv_open_pdo($config);
-} catch (Throwable $e) {
-    http_response_code(503);
-    echo "<pre>DB-Fehler: " . htmlspecialchars($e->getMessage(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</pre>";
-    exit;
-}
-
-$migrationError = null;
-try {
-    sv_run_migrations_if_needed($pdo, $config);
-} catch (Throwable $e) {
-    $migrationError = 'Migration fehlgeschlagen: ' . sv_sanitize_error_message($e->getMessage());
-}
-
-
-if ($migrationError !== null) {
-    sv_ui_header('Ollama-Dashboard', 'ollama');
-    ?>
-    <div class="page-header">
-        <div>
-            <h1 class="page-title">Ollama-Dashboard</h1>
-            <div class="hint">Interne Kontrolle der Ollama-Warteschlange (Polling via ollama.php).</div>
-        </div>
-    </div>
-    <div class="panel">
-        <div class="action-note error">
-            DB-Migration erforderlich: <?= htmlspecialchars($migrationError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?><br>
-            Bitte ausführen: <code>php SCRIPTS/migrate.php</code>
-        </div>
-    </div>
-    <?php
-    sv_ui_footer();
-    exit;
-}
-
-function sv_ollama_normalize_enum(?string $value, array $allowed, string $default): string
-{
-    if ($value === null) {
-        return $default;
-    }
-
-    return in_array($value, $allowed, true) ? $value : $default;
-}
-
-function sv_ollama_clamp_int(int $value, int $min, int $max, int $default): int
-{
-    if ($value < $min || $value > $max) {
-        return $default;
-    }
-
-    return $value;
-}
-
-$statusList = ['queued', 'pending', 'running', 'done', 'error', 'cancelled'];
-$modeList = ['caption', 'title', 'prompt_eval', 'tags_normalize', 'quality', 'nsfw_classify', 'prompt_recon', 'embed', 'dupe_hints'];
-
-$allowedModes = array_merge(['all'], $modeList);
-$allowedStatuses = array_merge(['all'], $statusList);
-$allowedHasMeta = ['all', 'with', 'without'];
-$allowedQuality = ['all', 'high', 'mid', 'low', 'missing'];
-$allowedDomain = array_merge(['all', 'missing'], SV_OLLAMA_DOMAIN_TYPES);
-
-$modeFilter = sv_ollama_normalize_enum($_GET['mode'] ?? null, $allowedModes, 'all');
-$statusFilter = sv_ollama_normalize_enum($_GET['status'] ?? null, $allowedStatuses, 'all');
-$domainFilter = sv_ollama_normalize_enum($_GET['domain'] ?? null, $allowedDomain, 'all');
-$qualityFilter = sv_ollama_normalize_enum($_GET['quality'] ?? null, $allowedQuality, 'all');
-$hasMetaFilter = sv_ollama_normalize_enum($_GET['has_meta'] ?? null, $allowedHasMeta, 'all');
-$defaultLimit = 120;
-$limit = sv_ollama_clamp_int((int)($_GET['limit'] ?? $defaultLimit), 20, 500, $defaultLimit);
-
-$jobTypes = sv_ollama_job_types();
-$typePlaceholders = implode(',', array_fill(0, count($jobTypes), '?'));
-
-$jobColumns = [];
-try {
-    $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
-    if ($driver === 'mysql') {
-        $stmt = $pdo->query('SHOW COLUMNS FROM jobs');
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        foreach ($rows as $row) {
-            if (isset($row['Field'])) {
-                $jobColumns[] = strtolower((string)$row['Field']);
-            }
-        }
-    } else {
-        $stmt = $pdo->query('PRAGMA table_info(jobs)');
-        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        foreach ($rows as $row) {
-            if (isset($row['name'])) {
-                $jobColumns[] = strtolower((string)$row['name']);
-            }
-        }
-    }
-} catch (Throwable $e) {
-    $jobColumns = [];
-}
-$jobColumns = array_unique($jobColumns);
-
-$hasLastErrorCode = in_array('last_error_code', $jobColumns, true);
-$hasHeartbeatAt = in_array('heartbeat_at', $jobColumns, true);
-$hasProgressBits = in_array('progress_bits', $jobColumns, true);
-$hasProgressBitsTotal = in_array('progress_bits_total', $jobColumns, true);
-
-$errorCodes = [];
-if ($hasLastErrorCode) {
-    $errorCodeStmt = $pdo->prepare(
-        'SELECT DISTINCT last_error_code FROM jobs WHERE type IN (' . $typePlaceholders . ') AND last_error_code IS NOT NULL AND last_error_code != "" ORDER BY last_error_code ASC'
-    );
-    $errorCodeStmt->execute($jobTypes);
-    $errorCodes = array_values(array_filter(array_map('strval', $errorCodeStmt->fetchAll(PDO::FETCH_COLUMN, 0))));
-}
-$allowedErrorCodes = array_merge(['all', 'none'], $errorCodes);
-$errorFilter = sv_ollama_normalize_enum($_GET['error_code'] ?? null, $allowedErrorCodes, 'all');
-
-$filtersActive = $modeFilter !== 'all'
-    || $statusFilter !== 'all'
-    || $errorFilter !== 'all'
-    || $domainFilter !== 'all'
-    || $qualityFilter !== 'all'
-    || $hasMetaFilter !== 'all'
-    || $limit !== $defaultLimit;
-
-$payloadColumn = sv_ollama_payload_column($pdo);
-
-$conditions = ['j.type IN (' . $typePlaceholders . ')'];
-$params = $jobTypes;
-
-if ($modeFilter !== 'all' && $modeFilter !== 'dupe_hints') {
-    $conditions[] = 'j.type = ?';
-    $params[] = sv_ollama_job_type_for_mode($modeFilter);
-} elseif ($modeFilter === 'dupe_hints') {
-    $conditions[] = '1 = 0';
-}
-if ($statusFilter !== 'all') {
-    $conditions[] = 'j.status = ?';
-    $params[] = $statusFilter;
-}
-if ($errorFilter !== 'all') {
-    if ($hasLastErrorCode) {
-        if ($errorFilter === 'none') {
-            $conditions[] = '(j.last_error_code IS NULL OR j.last_error_code = "")';
-        } else {
-            $conditions[] = 'j.last_error_code = ?';
-            $params[] = $errorFilter;
-        }
-    }
-}
-if ($domainFilter !== 'all') {
-    if ($domainFilter === 'missing') {
-        $conditions[] = '(mm_domain.meta_value IS NULL OR mm_domain.meta_value = "")';
-    } else {
-        $conditions[] = 'mm_domain.meta_value = ?';
-        $params[] = $domainFilter;
-    }
-}
-if ($qualityFilter !== 'all') {
-    if ($qualityFilter === 'missing') {
-        $conditions[] = '(mm_quality.meta_value IS NULL OR mm_quality.meta_value = "")';
-    } elseif ($qualityFilter === 'high') {
-        $conditions[] = 'CAST(mm_quality.meta_value AS INTEGER) >= 80';
-    } elseif ($qualityFilter === 'mid') {
-        $conditions[] = 'CAST(mm_quality.meta_value AS INTEGER) BETWEEN 50 AND 79';
-    } elseif ($qualityFilter === 'low') {
-        $conditions[] = 'CAST(mm_quality.meta_value AS INTEGER) < 50';
-    }
-}
-if ($hasMetaFilter !== 'all') {
-    $conditions[] = $hasMetaFilter === 'with' ? 'mm_meta.id IS NOT NULL' : 'mm_meta.id IS NULL';
-}
-
-$whereClause = $conditions !== [] ? ('WHERE ' . implode(' AND ', $conditions)) : '';
-
-$jobsSelect = [
-    'j.id',
-    'j.media_id',
-    'j.type',
-    'j.status',
-    $hasProgressBits ? 'j.progress_bits' : 'NULL AS progress_bits',
-    $hasProgressBitsTotal ? 'j.progress_bits_total' : 'NULL AS progress_bits_total',
-    $hasHeartbeatAt ? 'j.heartbeat_at' : 'NULL AS heartbeat_at',
-    $hasLastErrorCode ? 'j.last_error_code' : 'NULL AS last_error_code',
-    'j.created_at',
-    'j.updated_at',
-    $payloadColumn !== '' ? ('j.' . $payloadColumn . ' AS payload_json') : 'NULL AS payload_json',
-    'mm_stage.meta_value AS stage_version',
-    'mm_quality.meta_value AS quality_score',
-    'mm_domain.meta_value AS domain_type',
-];
-
-$jobsStmt = $pdo->prepare(
-    'SELECT ' . implode(', ', $jobsSelect)
-    . ' FROM jobs j '
-    . 'LEFT JOIN media_meta mm_stage ON mm_stage.id = ('
-    . '  SELECT id FROM media_meta WHERE media_id = j.media_id AND meta_key = "ollama.stage_version" ORDER BY id DESC LIMIT 1'
-    . ') '
-    . 'LEFT JOIN media_meta mm_quality ON mm_quality.id = ('
-    . '  SELECT id FROM media_meta WHERE media_id = j.media_id AND meta_key = "ollama.quality.score" ORDER BY id DESC LIMIT 1'
-    . ') '
-    . 'LEFT JOIN media_meta mm_domain ON mm_domain.id = ('
-    . '  SELECT id FROM media_meta WHERE media_id = j.media_id AND meta_key = "ollama.domain.type" ORDER BY id DESC LIMIT 1'
-    . ') '
-    . 'LEFT JOIN media_meta mm_meta ON mm_meta.id = ('
-    . '  SELECT id FROM media_meta WHERE media_id = j.media_id AND meta_key LIKE "ollama.%" ORDER BY id DESC LIMIT 1'
-    . ') '
-    . $whereClause
-    . ' ORDER BY j.updated_at DESC, j.id DESC LIMIT ' . $limit
-);
-$jobsStmt->execute($params);
-$jobs = $jobsStmt->fetchAll(PDO::FETCH_ASSOC);
-
-$statusCounts = array_fill_keys($statusList, 0);
-$countStmt = $pdo->prepare(
-    'SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $typePlaceholders . ') GROUP BY status'
-);
-$countStmt->execute($jobTypes);
-foreach ($countStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-    $status = (string)($row['status'] ?? '');
-    if (isset($statusCounts[$status])) {
-        $statusCounts[$status] = (int)($row['cnt'] ?? 0);
-    }
-}
-
-$modeCounts = [];
-foreach ($modeList as $mode) {
-    $modeCounts[$mode] = array_fill_keys($statusList, 0);
-}
-$modeCountStmt = $pdo->prepare(
-    'SELECT type, status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $typePlaceholders . ') GROUP BY type, status'
-);
-$modeCountStmt->execute($jobTypes);
-foreach ($modeCountStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-    $jobType = (string)($row['type'] ?? '');
-    $status = (string)($row['status'] ?? '');
-    if (!in_array($status, $statusList, true)) {
-        continue;
-    }
-    try {
-        $mode = sv_ollama_mode_for_job_type($jobType);
-    } catch (Throwable $e) {
-        continue;
-    }
-    if (isset($modeCounts[$mode])) {
-        $modeCounts[$mode][$status] = (int)($row['cnt'] ?? 0);
-    }
-}
-
-$pendingMigrations = [];
-try {
-    $migrationDir = realpath(__DIR__ . '/../SCRIPTS/migrations');
-    if ($migrationDir !== false && is_dir($migrationDir)) {
-        $migrations = sv_db_load_migrations($migrationDir);
-        $applied = sv_db_load_applied_versions($pdo);
-        foreach ($migrations as $migration) {
-            if (!isset($applied[$migration['version']])) {
-                $pendingMigrations[] = $migration['version'];
-            }
-        }
-    } else {
-        if ($migrationError === null) {
-            $migrationError = 'Migrationsverzeichnis fehlt.';
-        }
-    }
-} catch (Throwable $e) {
-    if ($migrationError === null) {
-        $migrationError = 'Migrationsstatus nicht lesbar: ' . sv_sanitize_error_message($e->getMessage());
-    }
-}
-
-$logsPath = sv_logs_root($config);
-$systemErrorsPath = __DIR__ . '/../LOGS/system_errors.jsonl';
-$systemErrorsAvailable = is_file($systemErrorsPath);
-$systemErrors = [];
-if ($systemErrorsAvailable) {
-    $lines = file($systemErrorsPath, FILE_IGNORE_NEW_LINES);
-    if (is_array($lines)) {
-        $lines = array_slice($lines, -50);
-        foreach ($lines as $line) {
-            $line = trim((string)$line);
-            if ($line === '') {
-                continue;
-            }
-            $decoded = json_decode($line, true);
-            if (is_array($decoded)) {
-                $systemErrors[] = $decoded;
-            }
-        }
-    }
-}
-$statusOrder = [
-    'running' => 1,
-    'queued' => 2,
-    'pending' => 3,
-    'done' => 4,
-    'error' => 5,
-    'cancelled' => 6,
+$runtimeStatus = sv_ollama_read_runtime_global_status($config);
+$counts = [
+    'queued' => (int)($runtimeStatus['queue_queued'] ?? 0),
+    'pending' => max(0, (int)($runtimeStatus['queue_pending'] ?? 0) - (int)($runtimeStatus['queue_queued'] ?? 0)),
+    'running' => (int)($runtimeStatus['queue_running'] ?? 0),
+    'done' => 0,
+    'error' => 0,
+    'cancelled' => 0,
 ];
 
 sv_ui_header('Ollama-Dashboard', 'ollama');
@@ -329,398 +40,91 @@ sv_ui_header('Ollama-Dashboard', 'ollama');
 <div class="page-header">
     <div>
         <h1 class="page-title">Ollama-Dashboard</h1>
-        <div class="hint">Interne Kontrolle der Ollama-Warteschlange (Polling via ollama.php).</div>
-    </div>
-    <div class="header-stats">
-        <span class="pill">Jobs: <?= (int)array_sum($statusCounts) ?></span>
-        <span class="pill">Limit: <?= (int)$limit ?></span>
+        <div class="hint">Fast-Path Dashboard (Runtime-Dateien zuerst, keine DB-Queries beim Laden).</div>
     </div>
 </div>
 
+<?php if (empty($internalAccess['ok'])): ?>
+    <div class="panel">
+        <div class="action-note error">
+            Zugriff eingeschränkt: <?= htmlspecialchars((string)($internalAccess['reason_code'] ?? 'forbidden'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+        </div>
+    </div>
+<?php endif; ?>
+
 <div class="ollama-dashboard" data-ollama-dashboard data-endpoint="ollama.php" data-poll-interval="10000" data-heartbeat-stale="180">
     <div class="panel">
-        <div class="panel-header">Warteschlangen-Übersicht</div>
-        <div class="ollama-status-grid">
-            <?php foreach ($statusList as $status): ?>
-                <div class="ollama-status-card">
-                    <div class="ollama-status-label"><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-                    <div class="ollama-status-count" data-status-count="<?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?= (int)($statusCounts[$status] ?? 0) ?>
-                    </div>
-                </div>
-            <?php endforeach; ?>
-        </div>
-        <div class="hint small">
-            Worker:
-            <span class="pill">läuft <span data-ollama-running><?= (int)($statusCounts['running'] ?? 0) ?></span></span>
+        <div class="status-pills" style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
+            <span class="pill">queued <span data-status-count="queued"><?= $counts['queued'] ?></span></span>
+            <span class="pill">pending <span data-status-count="pending"><?= $counts['pending'] ?></span></span>
+            <span class="pill">running <span data-status-count="running"><?= $counts['running'] ?></span></span>
+            <span class="pill">done <span data-status-count="done">0</span></span>
+            <span class="pill">error <span data-status-count="error">0</span></span>
+            <span class="pill">cancelled <span data-status-count="cancelled">0</span></span>
+            <span class="pill">läuft <span data-ollama-running><?= (int)$counts['running'] ?></span></span>
             <span class="pill">max <span data-ollama-max-concurrency><?= (int)sv_ollama_max_concurrency($config) ?></span></span>
             <span class="pill">gesperrt <span data-ollama-runner-locked>–</span></span>
             <span class="pill">Worker aktiv <span data-ollama-worker-running>–</span></span>
             <span class="pill">Grund <span data-ollama-worker-reason>–</span></span>
         </div>
-        <?php if (empty($internalAccess['ok'])): ?>
-            <div class="action-note error">
-                Interner Zugriff blockiert (<?= htmlspecialchars((string)($internalAccess['status'] ?? 'blocked'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>/
-                <?= htmlspecialchars((string)($internalAccess['reason_code'] ?? 'unknown'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>).
-            </div>
-        <?php elseif (!empty($internalAccess['bypass'])): ?>
-            <div class="hint small">
-                Interner Zugriff: Localhost-Bypass aktiv (<?= htmlspecialchars((string)($internalAccess['reason_code'] ?? 'localhost_bypass'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>).
-            </div>
-        <?php endif; ?>
-        <div class="action-note error is-hidden" data-ollama-worker-warning></div>
-        <div class="table-wrap">
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>Modus</th>
-                        <?php foreach ($statusList as $status): ?>
-                            <th><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></th>
-                        <?php endforeach; ?>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($modeList as $mode): ?>
-                        <tr data-mode-row="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                            <td><strong><?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></strong></td>
-                            <?php foreach ($statusList as $status): ?>
-                                <td data-mode-count="<?= htmlspecialchars($mode . ':' . $status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                    <?= (int)($modeCounts[$mode][$status] ?? 0) ?>
-                                </td>
-                            <?php endforeach; ?>
-                        </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-        <div class="hint small">Logpfad: <span data-logs-path><?= htmlspecialchars($logsPath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span></div>
-        <?php if ($migrationError !== null): ?>
-            <div class="action-note error">Migration-Status: <?= htmlspecialchars($migrationError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-        <?php elseif ($pendingMigrations !== []): ?>
-            <div class="action-note error">Migrationen ausstehend: <?= htmlspecialchars(implode(', ', $pendingMigrations), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
-        <?php else: ?>
-            <div class="hint small">Migrationsstatus: OK.</div>
-        <?php endif; ?>
+        <div class="hint small">Logs: <code data-logs-path><?= htmlspecialchars(sv_logs_root($config), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></code></div>
+        <div data-ollama-worker-warning class="action-note error is-hidden"></div>
+        <div data-ollama-system-status></div>
     </div>
 
-    <div class="panel">
-        <div class="panel-header">Systemstatus</div>
-        <div data-ollama-system-status>
-            <div class="hint small">Status wird geladen…</div>
-        </div>
+    <div class="panel" data-ollama-message>
+        <div class="action-feedback-title">Status</div>
+        <div>Einreihen/Batch/Abbrechen/Löschen werden über <code>ollama.php</code> ausgelöst.</div>
     </div>
 
-    <div class="panel">
-        <div class="panel-header">Aktionen</div>
-        <div class="action-feedback" data-ollama-message>
-            <div class="action-feedback-title">Bereit</div>
-            <div>Einreihen/Batch/Abbrechen/Löschen/Neu einreihen werden über ollama.php ausgelöst.</div>
-        </div>
-        <div class="form-grid">
-            <button class="btn btn--primary" type="button" data-ollama-quick-enqueue>Alles einreihen</button>
-            <label>Batch
-                <input type="number" min="1" max="50" value="5" data-ollama-run-batch>
-            </label>
-            <label>Max Sekunden
-                <input type="number" min="1" max="120" value="20" data-ollama-run-seconds>
-            </label>
-            <button class="btn btn--secondary" type="button" data-ollama-run>Batch starten</button>
-            <button class="btn btn--ghost" type="button" data-ollama-auto-run aria-pressed="false">Auto-Lauf: Aus</button>
-        </div>
-        <form class="ollama-enqueue" data-ollama-enqueue>
-            <div class="form-grid">
-                <label>Modus
-                    <select name="mode">
-                        <option value="all">alles</option>
-                        <option value="caption">caption</option>
-                        <option value="title">title</option>
-                        <option value="prompt_eval">prompt_eval</option>
-                        <option value="tags_normalize">tags_normalize</option>
-                        <option value="quality">quality</option>
-                        <option value="nsfw_classify">nsfw_classify</option>
-                        <option value="prompt_recon">prompt_recon</option>
-                        <option value="embed">embed</option>
-                    </select>
-                </label>
-                <label>Limit
-                    <input type="number" name="limit" min="1" max="500" value="50">
-                </label>
-                <label>Seit (YYYY-MM-DD)
-                    <input type="date" name="since">
-                </label>
-                <label class="checkbox-inline"><input type="checkbox" name="missing_title" value="1"> Titel fehlt</label>
-                <label class="checkbox-inline"><input type="checkbox" name="missing_caption" value="1"> Caption fehlt</label>
-                <label class="checkbox-inline"><input type="checkbox" name="all" value="1"> alles</label>
-            </div>
-            <button class="btn btn--primary" type="submit">Einreihen starten</button>
-        </form>
+    <div class="panel" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <button class="btn btn--primary" type="button" data-ollama-quick-enqueue>Alles einreihen</button>
+        <label>Batch <input type="number" min="1" max="50" value="5" data-ollama-run-batch></label>
+        <label>Max Sekunden <input type="number" min="1" max="120" value="20" data-ollama-run-seconds></label>
+        <button class="btn btn--secondary" type="button" data-ollama-run>Batch starten</button>
+        <button class="btn btn--ghost" type="button" data-ollama-auto-run aria-pressed="false">Auto-Lauf: Aus</button>
     </div>
 
-    <div class="panel" data-jobs-prune data-endpoint="jobs_prune.php">
-        <div class="panel-header">Aufräumen / Sammellöschen</div>
-        <div class="action-feedback" data-jobs-prune-message>
-            <div class="action-feedback-title">Bereit</div>
-            <div>Ollama-Jobs gesammelt löschen.</div>
-        </div>
-        <div class="form-grid">
-            <button class="btn btn--danger" type="button" data-jobs-prune-button data-group="ollama" data-status="done,error,cancelled" data-confirm="Alle fertigen/fehlerhaften/abgebrochenen Ollama-Jobs löschen?">Fertige löschen</button>
-            <button class="btn btn--secondary" type="button" data-jobs-prune-button data-group="ollama" data-status="queued,pending" data-confirm="Alle wartenden Ollama-Jobs löschen?">Warteschlange leeren</button>
-            <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="ollama" data-status="running" data-force="1" data-confirm="Running Ollama-Jobs erzwingen (abbrechen + löschen)?">Running erzwingen</button>
-        </div>
-    </div>
-
-    <form method="get" class="filters">
-        <details open>
-            <summary>Filter</summary>
-            <div class="details-body">
-                <div class="form-grid">
-                    <label>Modus
-                        <select name="mode">
-                            <?php foreach ($allowedModes as $mode): ?>
-                                <?php $modeLabel = $mode === 'all' ? 'alles' : $mode; ?>
-                                <option value="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $modeFilter === $mode ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($modeLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Status
-                        <select name="status">
-                            <?php foreach ($allowedStatuses as $status): ?>
-                                <?php $statusLabel = $status === 'all' ? 'alle' : $status; ?>
-                                <option value="<?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $statusFilter === $status ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($statusLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Fehlercode
-                        <select name="error_code">
-                            <?php foreach ($allowedErrorCodes as $code): ?>
-                                <?php
-                                $codeLabel = match ($code) {
-                                    'all' => 'alle',
-                                    'none' => 'ohne',
-                                    default => $code,
-                                };
-                                ?>
-                                <option value="<?= htmlspecialchars($code, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $errorFilter === $code ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($codeLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Domain
-                        <select name="domain">
-                            <?php foreach ($allowedDomain as $domain): ?>
-                                <?php
-                                $domainLabel = match ($domain) {
-                                    'all' => 'alle',
-                                    'missing' => 'fehlend',
-                                    default => $domain,
-                                };
-                                ?>
-                                <option value="<?= htmlspecialchars($domain, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $domainFilter === $domain ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($domainLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Qualität
-                        <select name="quality">
-                            <?php foreach ($allowedQuality as $quality): ?>
-                                <?php
-                                $qualityLabel = match ($quality) {
-                                    'all' => 'alle',
-                                    'high' => 'hoch',
-                                    'mid' => 'mittel',
-                                    'low' => 'niedrig',
-                                    'missing' => 'fehlend',
-                                    default => $quality,
-                                };
-                                ?>
-                                <option value="<?= htmlspecialchars($quality, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $qualityFilter === $quality ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($qualityLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Hat Meta
-                        <select name="has_meta">
-                            <?php foreach ($allowedHasMeta as $hasMeta): ?>
-                                <?php
-                                $hasMetaLabel = match ($hasMeta) {
-                                    'all' => 'alle',
-                                    'with' => 'mit',
-                                    'without' => 'ohne',
-                                    default => $hasMeta,
-                                };
-                                ?>
-                                <option value="<?= htmlspecialchars($hasMeta, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" <?= $hasMetaFilter === $hasMeta ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($hasMetaLabel, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Limit
-                        <input type="number" name="limit" min="20" max="500" value="<?= (int)$limit ?>">
-                    </label>
-                </div>
-                <div class="button-stack inline">
-                    <button class="btn btn--secondary" type="submit">Filter anwenden</button>
-                    <?php if ($filtersActive): ?>
-                        <a class="btn btn--ghost" href="dashboard_ollama.php">Filter zurücksetzen</a>
-                    <?php endif; ?>
-                </div>
-            </div>
-        </details>
+    <form class="panel ollama-enqueue" data-ollama-enqueue>
+        <label>Mode
+            <select name="mode">
+                <option value="all">all</option>
+                <option value="caption">caption</option>
+                <option value="title">title</option>
+                <option value="prompt_eval">prompt_eval</option>
+                <option value="tags_normalize">tags_normalize</option>
+                <option value="quality">quality</option>
+                <option value="nsfw_classify">nsfw_classify</option>
+                <option value="prompt_recon">prompt_recon</option>
+                <option value="embed">embed</option>
+            </select>
+        </label>
+        <label>Limit <input type="number" name="limit" min="1" max="500" value="50"></label>
+        <label>Seit <input type="date" name="since"></label>
+        <label><input type="checkbox" name="missing_title" value="1"> missing_title</label>
+        <label><input type="checkbox" name="missing_caption" value="1"> missing_caption</label>
+        <label><input type="checkbox" name="all" value="1"> all</label>
+        <button class="btn btn--primary" type="submit">Einreihen</button>
     </form>
 
     <div class="panel">
-        <div class="panel-header">Jobs</div>
-        <?php if ($modeFilter === 'dupe_hints'): ?>
-            <div class="tab-hint">Dupe-Hints werden außerhalb der Job-Queue erzeugt (CLI). Ergebnisse siehe Media-Detailseite.</div>
-        <?php endif; ?>
-        <div class="table-wrap">
-            <table class="table" data-ollama-jobs>
-                <thead>
-                    <tr>
-                        <th data-sort-key="status" class="sortable">Status</th>
-                        <th>Job</th>
-                        <th>Modus</th>
-                        <th data-sort-key="progress" class="sortable">Fortschritt</th>
-                        <th data-sort-key="heartbeat" class="sortable">Heartbeat</th>
-                        <th>Fehler</th>
-                        <th>Modell</th>
-                        <th>Stufe</th>
-                        <th>Warnungen</th>
-                        <th>Aktionen</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if ($jobs === []): ?>
-                        <tr><td colspan="10" class="job-hint">Keine Jobs gefunden.</td></tr>
-                    <?php else: ?>
-                        <?php foreach ($jobs as $job): ?>
-                            <?php
-                            $jobId = (int)($job['id'] ?? 0);
-                            $mediaId = (int)($job['media_id'] ?? 0);
-                            $status = (string)($job['status'] ?? '');
-                            $progressBits = (int)($job['progress_bits'] ?? 0);
-                            $progressTotal = (int)($job['progress_bits_total'] ?? 0);
-                            $heartbeatAt = (string)($job['heartbeat_at'] ?? '');
-                            $lastError = (string)($job['last_error_code'] ?? '');
-                            $payload = [];
-                            if (isset($job['payload_json']) && is_string($job['payload_json'])) {
-                                $decoded = json_decode($job['payload_json'], true);
-                                if (is_array($decoded)) {
-                                    $payload = $decoded;
-                                }
-                            }
-                            $model = '';
-                            if (isset($payload['model']) && is_string($payload['model'])) {
-                                $model = trim($payload['model']);
-                            } elseif (isset($payload['options']['model']) && is_string($payload['options']['model'])) {
-                                $model = trim($payload['options']['model']);
-                            }
-                            try {
-                                $mode = sv_ollama_mode_for_job_type((string)($job['type'] ?? ''));
-                            } catch (Throwable $e) {
-                                $mode = 'unknown';
-                            }
-                            $stageVersion = (string)($job['stage_version'] ?? '');
-                            $statusClass = match ($status) {
-                                'running' => 'status-running',
-                                'queued', 'pending' => 'status-queued',
-                                'done' => 'status-done',
-                                'error' => 'status-error',
-                                'cancelled' => 'status-cancelled',
-                                default => 'status-queued',
-                            };
-                            $statusOrderValue = $statusOrder[$status] ?? 99;
-                            $progressRatio = $progressTotal > 0 ? ($progressBits / $progressTotal) : 0;
-                            $percent = $progressTotal > 0 ? (int)round($progressRatio * 100) : 0;
-                            $heartbeatTs = $heartbeatAt !== '' ? (int)strtotime($heartbeatAt) : 0;
-                            $canCancel = in_array($status, ['queued', 'pending', 'running'], true);
-                            ?>
-                            <tr data-job-id="<?= $jobId ?>"
-                                data-media-id="<?= $mediaId ?>"
-                                data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-                                data-status="<?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-                                data-status-order="<?= (int)$statusOrderValue ?>"
-                                data-progress="<?= htmlspecialchars((string)$progressRatio, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>"
-                                data-heartbeat="<?= (int)$heartbeatTs ?>">
-                                <td><span class="status-badge <?= htmlspecialchars($statusClass, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" data-field="status"><?= htmlspecialchars($status, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></span></td>
-                                <td>
-                                    <div class="job-meta">
-                                        <div>#<?= $jobId ?></div>
-                                        <div><a href="media_view.php?id=<?= $mediaId ?>" target="_blank" rel="noopener">Media <?= $mediaId ?></a></div>
-                                    </div>
-                                </td>
-                                <td><?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
-                                <td data-field="progress"><?= $progressBits ?>/<?= $progressTotal ?><?= $progressTotal > 0 ? ' (' . $percent . '%)' : '' ?></td>
-                                <td data-field="heartbeat"><?= $heartbeatAt !== '' ? htmlspecialchars($heartbeatAt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                <td data-field="error"><?= $lastError !== '' ? htmlspecialchars($lastError, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                <td data-field="model"><?= $model !== '' ? htmlspecialchars($model, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                <td data-field="stage"><?= $stageVersion !== '' ? htmlspecialchars($stageVersion, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                <td data-field="warnings" class="job-warnings">–</td>
-                                <td>
-                                    <div class="table-actions">
-                                        <button class="btn btn--ghost btn--sm" type="button" data-action="requeue" data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" data-media-id="<?= $mediaId ?>">Neu einreihen</button>
-                                        <button class="btn btn--secondary btn--sm" type="button" data-action="cancel" data-job-id="<?= $jobId ?>" <?= $canCancel ? '' : 'disabled' ?>>Abbrechen</button>
-                                        <button class="btn btn--danger btn--sm" type="button" data-action="delete" data-media-id="<?= $mediaId ?>" data-mode="<?= htmlspecialchars($mode, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">Ergebnisse löschen</button>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-        <div class="hint small">Sortierung: Klick auf Status/Fortschritt/Heartbeat.</div>
-    </div>
-
-    <div class="panel">
-        <div class="panel-header">System Errors (Last 50)</div>
-        <?php if (!$systemErrorsAvailable): ?>
-            <div class="hint small">No system errors logged yet.</div>
-        <?php else: ?>
-            <div class="table-wrap">
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>Timestamp (UTC)</th>
-                            <th>PID</th>
-                            <th>Type</th>
-                            <th>Message</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php if ($systemErrors === []): ?>
-                            <tr><td colspan="4" class="job-hint">Keine System-Errors gefunden.</td></tr>
-                        <?php else: ?>
-                            <?php foreach ($systemErrors as $entry): ?>
-                                <?php
-                                $ts = isset($entry['ts_utc']) ? (string)$entry['ts_utc'] : '';
-                                $pid = isset($entry['pid']) ? (string)$entry['pid'] : '';
-                                $type = isset($entry['type']) ? (string)$entry['type'] : '';
-                                $msg = isset($entry['msg']) ? (string)$entry['msg'] : '';
-                                $isForceKill = $type !== '' && strpos($type, 'force_kill') !== false;
-                                $rowStyle = $isForceKill ? ' style="color:#b00;font-weight:600;"' : '';
-                                ?>
-                                <tr<?= $rowStyle ?>>
-                                    <td><?= $ts !== '' ? htmlspecialchars($ts, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                    <td><?= $pid !== '' ? htmlspecialchars($pid, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                    <td><?= $type !== '' ? htmlspecialchars($type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                    <td><?= $msg !== '' ? htmlspecialchars($msg, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') : '–' ?></td>
-                                </tr>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
-        <?php endif; ?>
+        <div class="hint">Job-Tabelle wird nur über explizite Detail-Aktionen geladen. Default bleibt DB-frei.</div>
+        <table class="table" data-ollama-jobs>
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th class="sortable" data-sort-key="status">Status</th>
+                <th class="sortable" data-sort-key="progress">Fortschritt</th>
+                <th class="sortable" data-sort-key="heartbeat">Heartbeat</th>
+                <th>Fehler</th>
+                <th>Model</th>
+                <th>Stage</th>
+                <th>Aktionen</th>
+            </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
     </div>
 </div>
-
-<?php sv_ui_footer(); ?>
+<?php
+sv_ui_footer();
