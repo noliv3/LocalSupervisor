@@ -154,6 +154,9 @@ function sv_is_sqlite_busy(Throwable $error): bool
     if (is_string($message) && stripos($message, 'SQLITE_BUSY') !== false) {
         return true;
     }
+    if (is_string($message) && stripos($message, 'SQLITE_LOCKED') !== false) {
+        return true;
+    }
     if (is_string($message) && stripos($message, 'database is locked') !== false) {
         return true;
     }
@@ -164,6 +167,24 @@ function sv_is_sqlite_busy(Throwable $error): bool
     }
 
     return false;
+}
+
+function sv_open_pdo_web(array $config, bool $queryOnly = false, int $busyTimeoutMs = 25): PDO
+{
+    $pdo = sv_open_pdo($config);
+    try {
+        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver === 'sqlite') {
+            $timeout = max(0, min(25, $busyTimeoutMs));
+            $pdo->exec('PRAGMA busy_timeout = ' . $timeout);
+            if ($queryOnly) {
+                $pdo->exec('PRAGMA query_only = 1');
+            }
+        }
+    } catch (Throwable $e) {
+    }
+
+    return $pdo;
 }
 
 function sv_db_exec_retry(callable $fn, int $retries = 5, int $minSleepMs = 50, int $maxSleepMs = 250)

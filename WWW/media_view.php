@@ -22,10 +22,6 @@ $forgeModelStatus  = 'unavailable';
 $forgeModelSource  = 'none';
 $forgeModelAge     = null;
 
-$dsn      = $config['db']['dsn'];
-$user     = $config['db']['user']     ?? null;
-$password = $config['db']['password'] ?? null;
-$options  = $config['db']['options']  ?? [];
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 if (!in_array($method, ['GET', 'HEAD', 'POST'], true)) {
@@ -39,11 +35,13 @@ if ($method === 'POST' && !$hasInternalAccess) {
 }
 
 try {
-    $pdo = new PDO($dsn, $user, $password, $options);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    sv_apply_sqlite_pragmas($pdo, $config);
-    sv_db_ensure_runtime_indexes($pdo);
+    $pdo = sv_open_pdo_web($config);
 } catch (Throwable $e) {
+    if (sv_is_sqlite_busy($e)) {
+        http_response_code(503);
+        echo 'busy';
+        exit;
+    }
     sv_security_error(500, 'db');
 }
 
@@ -569,17 +567,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (Throwable $e) {
         $actionSuccess = false;
-        $safeError = sv_sanitize_error_message($e->getMessage());
-        $actionMessage = 'Aktion fehlgeschlagen.';
-        if ($safeError !== '') {
-            $actionMessage .= ' ' . $safeError;
+        if (sv_is_sqlite_busy($e)) {
+            $actionMessage = 'DB busy, bitte erneut versuchen.';
+        } else {
+            $safeError = sv_sanitize_error_message($e->getMessage());
+            $actionMessage = 'Aktion fehlgeschlagen.';
+            if ($safeError !== '') {
+                $actionMessage .= ' ' . $safeError;
+            }
         }
     }
 }
 
-$mediaStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
-$mediaStmt->execute([':id' => $id]);
-$media = $mediaStmt->fetch(PDO::FETCH_ASSOC);
+try {
+    $mediaStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+    $mediaStmt->execute([':id' => $id]);
+    $media = $mediaStmt->fetch(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    if (sv_is_sqlite_busy($e)) {
+        http_response_code(503);
+        echo 'busy';
+        exit;
+    }
+    throw $e;
+}
 
 if (!$media) {
     http_response_code(404);
@@ -593,20 +604,29 @@ if (!$showAdult && (int)($media['has_nsfw'] ?? 0) === 1) {
     exit;
 }
 
-$effectiveInfo = sv_resolve_effective_media($pdo, $config, $id, $forceParent);
-$effectiveId = (int)($effectiveInfo['effective_id'] ?? $id);
-$isHd = !empty($effectiveInfo['is_hd']) && $effectiveId !== $id;
-$displayMedia = $media;
-if ($effectiveId !== $id) {
-    $effStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
-    $effStmt->execute([':id' => $effectiveId]);
-    $effRow = $effStmt->fetch(PDO::FETCH_ASSOC);
-    if ($effRow) {
-        $displayMedia = $effRow;
-    } else {
-        $effectiveId = $id;
-        $isHd = false;
+try {
+    $effectiveInfo = sv_resolve_effective_media($pdo, $config, $id, $forceParent);
+    $effectiveId = (int)($effectiveInfo['effective_id'] ?? $id);
+    $isHd = !empty($effectiveInfo['is_hd']) && $effectiveId !== $id;
+    $displayMedia = $media;
+    if ($effectiveId !== $id) {
+        $effStmt = $pdo->prepare('SELECT * FROM media WHERE id = :id');
+        $effStmt->execute([':id' => $effectiveId]);
+        $effRow = $effStmt->fetch(PDO::FETCH_ASSOC);
+        if ($effRow) {
+            $displayMedia = $effRow;
+        } else {
+            $effectiveId = $id;
+            $isHd = false;
+        }
     }
+} catch (Throwable $e) {
+    if (sv_is_sqlite_busy($e)) {
+        http_response_code(503);
+        echo 'busy';
+        exit;
+    }
+    throw $e;
 }
 
 if ($hasInternalAccess && $_SERVER['REQUEST_METHOD'] === 'GET') {

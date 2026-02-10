@@ -14,10 +14,6 @@ try {
 }
 
 $configWarning = $config['_config_warning'] ?? null;
-$dsn           = $config['db']['dsn'];
-$user          = $config['db']['user']     ?? null;
-$password      = $config['db']['password'] ?? null;
-$options       = $config['db']['options']  ?? [];
 $hasInternalAccess = sv_validate_internal_access($config, 'mediadb', false);
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -32,11 +28,13 @@ if ($method === 'POST' && !$hasInternalAccess) {
 }
 
 try {
-    $pdo = new PDO($dsn, $user, $password, $options);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    sv_apply_sqlite_pragmas($pdo, $config);
-    sv_db_ensure_runtime_indexes($pdo);
+    $pdo = sv_open_pdo_web($config);
 } catch (Throwable $e) {
+    if (sv_is_sqlite_busy($e)) {
+        http_response_code(503);
+        echo 'busy';
+        exit;
+    }
     sv_security_error(500, 'db');
 }
 
@@ -110,7 +108,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     } catch (Throwable $e) {
-        $actionError = sv_sanitize_error_message($e->getMessage());
+        if (sv_is_sqlite_busy($e)) {
+            $actionError = 'DB busy, bitte erneut versuchen.';
+        } else {
+            $actionError = sv_sanitize_error_message($e->getMessage());
+        }
     }
 }
 

@@ -15,10 +15,6 @@ try {
 
 $hasInternalAccess = sv_validate_internal_access($config, 'thumb', false);
 
-$dsn      = $config['db']['dsn'];
-$user     = $config['db']['user']     ?? null;
-$password = $config['db']['password'] ?? null;
-$options  = $config['db']['options']  ?? [];
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 if (!in_array($method, ['GET', 'HEAD'], true)) {
@@ -26,10 +22,7 @@ if (!in_array($method, ['GET', 'HEAD'], true)) {
 }
 
 try {
-    $pdo = new PDO($dsn, $user, $password, $options);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    sv_apply_sqlite_pragmas($pdo, $config);
-    sv_db_ensure_runtime_indexes($pdo);
+    $pdo = sv_open_pdo_web($config, true);
 } catch (Throwable $e) {
     sv_security_error(500, 'db');
 }
@@ -83,6 +76,13 @@ function sv_emit_video_placeholder(): void
     exit;
 }
 
+function sv_emit_busy_placeholder(): void
+{
+    http_response_code(503);
+    header('Retry-After: 1');
+    sv_emit_video_placeholder();
+}
+
 $allowedJobTypes = ['forge_regen', 'forge_regen_replace', 'forge_regen_v3'];
 
 $showAdult = sv_normalize_adult_flag($_GET);
@@ -99,37 +99,48 @@ if (!$hasInternalAccess && !in_array($method, ['GET', 'HEAD'], true)) {
     sv_security_error(403, 'Forbidden.');
 }
 
-if ($jobId > 0) {
-    if (!$hasInternalAccess) {
-        sv_security_error(403, 'Forbidden.');
+try {
+    if ($jobId > 0) {
+        if (!$hasInternalAccess) {
+            sv_security_error(403, 'Forbidden.');
+        }
+        if (!in_array((string)$asset, ['preview', 'backup', 'output'], true)) {
+            http_response_code(400);
+            exit;
+        }
+        try {
+            $jobAsset = sv_resolve_job_asset($pdo, $config, $jobId, (string)$asset, $allowedJobTypes, $id > 0 ? $id : null);
+            $id = (int)$jobAsset['media_id'];
+            $usingJobAsset = true;
+        } catch (Throwable $e) {
+            if (sv_is_sqlite_busy($e)) {
+                sv_emit_busy_placeholder();
+            }
+            http_response_code(404);
+            exit;
+        }
     }
-    if (!in_array((string)$asset, ['preview', 'backup', 'output'], true)) {
+
+    if ($id <= 0) {
         http_response_code(400);
         exit;
     }
-    try {
-        $jobAsset = sv_resolve_job_asset($pdo, $config, $jobId, (string)$asset, $allowedJobTypes, $id > 0 ? $id : null);
-        $id = (int)$jobAsset['media_id'];
-        $usingJobAsset = true;
-    } catch (Throwable $e) {
-        http_response_code(404);
-        exit;
-    }
-}
 
-if ($id <= 0) {
-    http_response_code(400);
+    if (!$usingJobAsset) {
+        $effective = sv_resolve_effective_media($pdo, $config, $id, $forceParent);
+        $id = (int)$effective['effective_id'];
+    }
+
+    $stmt = $pdo->prepare('SELECT path, type, has_nsfw, width, height, duration FROM media WHERE id = :id');
+    $stmt->execute([':id' => $id]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    if (sv_is_sqlite_busy($e)) {
+        sv_emit_busy_placeholder();
+    }
+    http_response_code(503);
     exit;
 }
-
-if (!$usingJobAsset) {
-    $effective = sv_resolve_effective_media($pdo, $config, $id, $forceParent);
-    $id = (int)$effective['effective_id'];
-}
-
-$stmt = $pdo->prepare('SELECT path, type, has_nsfw, width, height, duration FROM media WHERE id = :id');
-$stmt->execute([':id' => $id]);
-$row = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if (!$row) {
     http_response_code(404);

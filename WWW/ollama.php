@@ -35,14 +35,12 @@ $isBusyException = static function (Throwable $e): bool {
     return str_contains($msg, 'SQLITE_BUSY') || str_contains($msg, 'SQLITE_LOCKED') || str_contains($msg, 'DATABASE IS LOCKED');
 };
 
-$openWebPdo = static function () use ($config): PDO {
-    $pdo = sv_open_pdo($config);
-    try {
-        $pdo->exec('PRAGMA busy_timeout = 25');
-    } catch (Throwable $e) {
-    }
+$openWebPdo = static function (bool $queryOnly = false) use ($config): PDO {
+    return sv_open_pdo_web($config, $queryOnly);
+};
 
-    return $pdo;
+$respondBusy = static function (array $extra = []) use ($respond): void {
+    $respond(200, array_merge(['ok' => false, 'status' => 'busy', 'reason_code' => 'db_busy'], $extra));
 };
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -61,6 +59,20 @@ if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
 }
 $logsPath = sv_logs_root($config);
+
+
+$migrateActions = ['enqueue', 'cancel', 'delete', 'job_status'];
+if (in_array($action, $migrateActions, true)) {
+    try {
+        $pdoMigrate = $openWebPdo();
+        sv_run_migrations_if_needed($pdoMigrate, $config);
+    } catch (Throwable $e) {
+        if (sv_is_sqlite_busy($e)) {
+            $respondBusy();
+        }
+        $respond(500, ['ok' => false, 'error' => 'Migration fehlgeschlagen: ' . $e->getMessage()]);
+    }
+}
 
 if ($action === 'status') {
     $detailsParam = $_POST['details'] ?? ($jsonBody['details'] ?? null);
@@ -97,9 +109,9 @@ if ($action === 'status') {
         $running = $counts['running'];
     }
 
-    if ($details || !$lightAvailable) {
+    if ($details) {
         try {
-            $pdo = $openWebPdo();
+            $pdo = $openWebPdo(true);
             $jobTypes = sv_ollama_job_types();
         $placeholders = implode(',', array_fill(0, count($jobTypes), '?'));
         $stmt = $pdo->prepare('SELECT status, COUNT(*) AS cnt FROM jobs WHERE type IN (' . $placeholders . ') GROUP BY status');
@@ -164,6 +176,18 @@ if ($action === 'status') {
 
     $ollamaDownActive = !empty($globalStatus['ollama_down']['active']);
     $spawnLast = sv_ollama_read_spawn_last($config);
+
+
+    if (!$details && !$lightAvailable) {
+        $counts = [
+            'queued' => 0,
+            'pending' => 0,
+            'running' => 0,
+            'done' => 0,
+            'error' => 0,
+            'cancelled' => 0,
+        ];
+    }
 
     $respond(200, [
         'ok' => true,
@@ -471,7 +495,8 @@ if ($action === 'run') {
 }
 
 if ($action === 'cancel') {
-    $pdo = $openWebPdo();
+    try {
+        $pdo = $openWebPdo();
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
@@ -502,10 +527,17 @@ if ($action === 'cancel') {
             'cancel_requested' => isset($job['cancel_requested']) ? (int)$job['cancel_requested'] : 0,
         ],
     ]);
+    } catch (Throwable $e) {
+        if (sv_is_sqlite_busy($e)) {
+            $respondBusy();
+        }
+        throw $e;
+    }
 }
 
 if ($action === 'delete') {
-    $pdo = $openWebPdo();
+    try {
+        $pdo = $openWebPdo();
     $mediaId = $_POST['media_id'] ?? ($jsonBody['media_id'] ?? null);
     $mode = $_POST['mode'] ?? ($jsonBody['mode'] ?? null);
     $force = $_POST['force'] ?? ($jsonBody['force'] ?? null);
@@ -558,10 +590,17 @@ if ($action === 'delete') {
         'job_delete' => $jobDelete,
         'result_delete' => $resultDelete,
     ]);
+    } catch (Throwable $e) {
+        if (sv_is_sqlite_busy($e)) {
+            $respondBusy();
+        }
+        throw $e;
+    }
 }
 
 if ($action === 'job_status') {
-    $pdo = $openWebPdo();
+    try {
+        $pdo = $openWebPdo(true);
     $jobId = $_POST['job_id'] ?? ($jsonBody['job_id'] ?? null);
     $jobId = $jobId !== null ? (int)$jobId : 0;
     if ($jobId <= 0) {
@@ -625,6 +664,12 @@ if ($action === 'job_status') {
         ],
         'logs_path' => $logsPath,
     ]);
+    } catch (Throwable $e) {
+        if (sv_is_sqlite_busy($e)) {
+            $respondBusy(['job' => null, 'logs_path' => $logsPath]);
+        }
+        throw $e;
+    }
 }
 
 $respond(400, ['ok' => false, 'error' => 'Unknown action.']);

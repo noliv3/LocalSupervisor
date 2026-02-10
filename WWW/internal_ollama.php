@@ -253,52 +253,28 @@ if ($action === 'job_status') {
 }
 
 if ($action === 'run_once') {
-    $limit = $_POST['limit'] ?? ($jsonBody['limit'] ?? null);
-    $limit = $limit !== null ? (int)$limit : null;
-    $logs = [];
-    $logger = static function (string $message) use (&$logs): void {
-        $logs[] = $message;
-    };
-
-    $lock = sv_ollama_acquire_aux_lock($config, 'ollama_run_once.lock', 'web:internal_ollama.php', 'run_once_lock');
-    if (empty($lock['ok'])) {
-        $respond(200, [
-            'ok' => false,
-            'status' => $lock['status'] ?? 'locked',
-            'reason' => $lock['reason'] ?? 'runner_locked',
-            'reason_code' => $lock['reason_code'] ?? ($lock['reason'] ?? 'runner_locked'),
-            'locked' => (bool)($lock['locked'] ?? false),
-            'running' => false,
-            'path' => $lock['path'] ?? null,
-        ]);
+    $batch = $_POST['batch'] ?? ($jsonBody['batch'] ?? null);
+    $batch = $batch !== null ? (int)$batch : 2;
+    if ($batch <= 0) {
+        $batch = 2;
     }
 
-    try {
-        sv_ollama_watchdog_stale_running($pdo, $config, 10, 'requeue');
-        $maxConcurrency = sv_ollama_max_concurrency($config);
-        $running = sv_ollama_running_job_count($pdo);
-        if ($running >= $maxConcurrency) {
-            $respond(200, [
-                'ok' => false,
-                'status' => 'busy',
-                'reason_code' => 'concurrency_limit',
-                'running' => $running,
-                'max_concurrency' => $maxConcurrency,
-            ]);
-        }
+    $runtimeStatus = sv_ollama_read_runtime_global_status($config);
+    $pendingJobs = max(0, (int)($runtimeStatus['queue_pending'] ?? 0));
+    $spawn = sv_ollama_spawn_background_worker_fast($config, 'internal_run_once', $pendingJobs, $batch, 0);
 
-        $summary = sv_process_ollama_job_batch($pdo, $config, $limit, $logger, null);
-        $respond(200, [
-            'ok' => true,
-            'status' => 'started',
-            'reason_code' => 'batch_complete',
-            'running' => false,
-            'summary' => $summary,
-            'logs' => $logs,
-        ]);
-    } finally {
-        sv_ollama_release_aux_lock($lock['handle']);
-    }
+    $respond(200, [
+        'ok' => !empty($spawn['spawned']),
+        'status' => $spawn['status'] ?? 'start_failed',
+        'reason_code' => $spawn['reason_code'] ?? 'start_failed',
+        'pid' => $spawn['pid'] ?? null,
+        'running' => false,
+        'locked' => $spawn['runner_locked'] ?? false,
+        'spawned' => $spawn['spawned'] ?? false,
+        'spawn_error' => $spawn['spawn_error'] ?? null,
+        'spawn_logs' => $spawn['spawn_logs'] ?? null,
+        'source' => $spawn['source'] ?? 'internal_run_once',
+    ]);
 }
 
 if ($action === 'enqueue') {
