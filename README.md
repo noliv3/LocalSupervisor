@@ -83,6 +83,10 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - UI zeigt automatisch HD-Derivate (Badge „HD“), das Original bleibt per „Original (SD)“-Toggle erreichbar.
 - Scanner-Character-Tags werden als `danbooru.character.v1` gespeichert und zusätzlich in `media_meta` (`scanner.character.tags`) dokumentiert.
 
+### Forge Runtime-Validierung
+- Forge-Aktionen (`forge_regen`, `forge_repair_start`, Modellliste) validieren die Runtime-Config mit `reason_code`, `missing_keys`, `config_path` und liefern diese Details als sichtbare Fehlermeldung statt generischem „deaktiviert“.
+- Bei Forge-Healthcheck-Fehlern werden `reason_code`, `http_code` und `target_url` im Operation-/Audit-Log persistiert, damit Auth/Endpoint-Probleme eindeutig unterscheidbar sind.
+
 ### Forge Regeneration
 - Forge-Rezepte stammen aus `SCRIPTS/forge_recipes.php` (oder `CONFIG/forge_recipes.json`).
 - Regenerations-Jobs erzeugen Job-Queue-Einträge (`jobs` / `forge_*`).
@@ -158,7 +162,9 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Runner/Spawn-Antworten liefern ein einheitliches Statusschema mit `status` (started|running|locked|busy|start_failed|open_failed|config_failed) und `reason_code` (z. B. `spawn_unverified`, `lock_busy`, `log_root_unavailable`), damit UI/CLI zwischen Lock, IO/Path und Spawn-Fehlern eindeutig unterscheiden.
 - Scan-Worker-Starts aus Web-Aktionen laufen non-blocking (`verifyWindowSeconds=0`) und liefern `status=started_unverified`, damit der PHP Built-in Server nicht durch Verifikations-Polling blockiert wird.
 - Der letzte Spawn-Status des Scan-Workers wird in `LOGS/scan_worker_spawn_last.json` persistiert (`ts_utc`, `requested_by`, `pid`, `command`, `status`, `reason_code`, `out_log`, `err_log`).
+- Scan-Worker-Spawn-Logs werden pro Start timestamped geschrieben (`scan_worker_spawn_<timestamp>.out.log/.err.log`), damit Redirect-Logs nicht überschrieben werden; die konkreten Pfade werden in `scan_worker_spawn_last.json` persistiert und in `rescan_single_job` geloggt.
 - Scanner-Konfigurationsfehler (`scanner_not_configured`, `scanner_auth_missing`) werden als harte Job-Fehler gespeichert (`jobs.error_message` + `forge_response_json`) und zusätzlich in `LOGS/scanner_ingest.jsonl` als `response_type_detected=config_error` inkl. `missing_keys`/`config_path` protokolliert.
+- Frühe Scanner-Config-Fehler erzeugen zusätzlich `scanner_persist`-Events (`response_type_detected=config_error`) und eine sichtbare Worker-Zeile mit `reason_code`, `missing_keys` und `config_path`, damit „Scanner bekommt nichts“ klar diagnostizierbar bleibt.
 - `health.php` meldet `scan_worker_running` (primär Heartbeat-Freshness, Fallback Lockfile), damit die UI den tatsächlichen Worker-Laufzustand sichtbar machen kann.
 - Worker-„running“ wird zentral über Lock/Heartbeat geprüft (`is_ollama_worker_running`): Launcher-Locks oder `web:*`-Owner zählen nicht, und Locks mit `php_server.pid` gelten als ungültig.
 

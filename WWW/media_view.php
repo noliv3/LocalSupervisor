@@ -214,17 +214,32 @@ if ($ajaxAction === 'forge_repair_start') {
             throw new RuntimeException('Media-ID stimmt nicht überein.');
         }
 
+        $forgeConfigError = sv_validate_forge_runtime_config($config, true);
+        if (is_array($forgeConfigError)) {
+            throw new RuntimeException(sv_format_runtime_config_error($forgeConfigError));
+        }
         $endpoint = sv_forge_endpoint_config($config, true);
         if ($endpoint === null) {
-            throw new RuntimeException('Forge-Dispatch ist deaktiviert oder nicht konfiguriert.');
+            throw new RuntimeException('forge_endpoint_unavailable');
         }
         $health = sv_forge_healthcheck($endpoint, $logger);
         if (!$health['ok']) {
+            $healthReason = 'forge_healthcheck_failed';
+            if (isset($health['http_code']) && is_int($health['http_code'])) {
+                if ($health['http_code'] === 401 || $health['http_code'] === 403) {
+                    $healthReason = 'forge_auth_failed';
+                } else {
+                    $healthReason = 'forge_http_' . (int)$health['http_code'];
+                }
+            }
             sv_audit_log($pdo, 'forge_health_failed', 'media', $id, [
+                'reason_code' => $healthReason,
                 'http_status' => $health['http_code'] ?? null,
                 'target_url'  => $health['target_url'] ?? null,
+                'log_payload' => $health['log_payload'] ?? null,
             ]);
-            throw new RuntimeException('Forge-Endpoint nicht erreichbar. Bitte später erneut versuchen.');
+            $logger('Forge health failed: reason_code=' . $healthReason . ', target_url=' . (string)($health['target_url'] ?? 'n/a') . ', http_code=' . (string)($health['http_code'] ?? 'n/a'));
+            throw new RuntimeException($healthReason);
         }
 
         $options = [
@@ -371,17 +386,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($action === 'forge_regen') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'forge_regen', $actionLogs, 10);
             try {
+                $forgeConfigError = sv_validate_forge_runtime_config($config, true);
+                if (is_array($forgeConfigError)) {
+                    throw new RuntimeException(sv_format_runtime_config_error($forgeConfigError));
+                }
                 $endpoint = sv_forge_endpoint_config($config, true);
                 if ($endpoint === null) {
-                    throw new RuntimeException('Forge-Dispatch ist deaktiviert oder nicht konfiguriert.');
+                    throw new RuntimeException('forge_endpoint_unavailable');
                 }
                 $health = sv_forge_healthcheck($endpoint, $logger);
                 if (!$health['ok']) {
+                    $healthReason = 'forge_healthcheck_failed';
+                    if (isset($health['http_code']) && is_int($health['http_code'])) {
+                        if ($health['http_code'] === 401 || $health['http_code'] === 403) {
+                            $healthReason = 'forge_auth_failed';
+                        } else {
+                            $healthReason = 'forge_http_' . (int)$health['http_code'];
+                        }
+                    }
                     sv_audit_log($pdo, 'forge_health_failed', 'media', $id, [
+                        'reason_code' => $healthReason,
                         'http_status' => $health['http_code'] ?? null,
                         'target_url'  => $health['target_url'] ?? null,
+                        'log_payload' => $health['log_payload'] ?? null,
                     ]);
-                    throw new RuntimeException('Forge-Endpoint nicht erreichbar. Bitte später erneut versuchen.');
+                    $logger('Forge health failed: reason_code=' . $healthReason . ', target_url=' . (string)($health['target_url'] ?? 'n/a') . ', http_code=' . (string)($health['http_code'] ?? 'n/a'));
+                    throw new RuntimeException($healthReason);
                 }
 
                 $overrides = [];
@@ -488,6 +518,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $id, $logger);
             $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $id, 0);
             $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            if (isset($worker['log_paths']) && is_array($worker['log_paths'])) {
+                $logger('Worker-Logs: stdout=' . (string)($worker['log_paths']['stdout'] ?? 'n/a') . ', stderr=' . (string)($worker['log_paths']['stderr'] ?? 'n/a'));
+            }
             $jobId   = (int)($enqueue['job_id'] ?? 0);
             $deduped = (bool)($enqueue['deduped'] ?? false);
             $actionSuccess = $jobId > 0;
@@ -501,6 +534,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $actionMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
             } elseif (!empty($worker['unknown'])) {
                 $actionMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
+            }
+            if (isset($worker['log_paths']) && is_array($worker['log_paths'])) {
+                $actionMessage .= ' Logs: out=' . htmlspecialchars((string)($worker['log_paths']['stdout'] ?? 'n/a'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+                    . ', err=' . htmlspecialchars((string)($worker['log_paths']['stderr'] ?? 'n/a'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
             }
             if ($actionSuccess) {
                 sv_audit_log($pdo, 'rescan_start', 'media', $id, [
@@ -818,7 +855,7 @@ if ($forgeModelAge !== null) {
 }
 $forgeModelStatusLabel = match ($forgeModelStatus) {
     'ok'           => 'OK',
-    'disabled'     => 'Forge deaktiviert',
+    'disabled'     => 'Forge disabled wegen fehlendem/invalidem config[forge]',
     'auth_failed'  => 'Auth fehlgeschlagen',
     'timeout'      => 'Timeout',
     'parse_error'  => 'Parse-Fehler',
