@@ -1140,6 +1140,84 @@ function sv_is_forge_dispatch_enabled(array $config): bool
     return (bool)$config['forge']['dispatch_enabled'];
 }
 
+function sv_validate_forge_runtime_config(array $config, bool $requireDispatchEnabled = false): ?array
+{
+    $configPath = isset($config['_config_path']) && is_string($config['_config_path']) && $config['_config_path'] !== ''
+        ? $config['_config_path']
+        : null;
+
+    if (!isset($config['forge']) || !is_array($config['forge'])) {
+        return [
+            'reason_code' => 'forge_config_missing',
+            'missing_keys' => ['forge'],
+            'config_path' => $configPath,
+        ];
+    }
+
+    $forge = $config['forge'];
+    $missingKeys = [];
+    if (!array_key_exists('enabled', $forge)) {
+        $missingKeys[] = 'forge.enabled';
+    }
+    if ($requireDispatchEnabled && !array_key_exists('dispatch_enabled', $forge)) {
+        $missingKeys[] = 'forge.dispatch_enabled';
+    }
+    if (!isset($forge['base_url']) || !is_string($forge['base_url']) || trim((string)$forge['base_url']) === '') {
+        $missingKeys[] = 'forge.base_url';
+    }
+
+    $authUser = isset($forge['basic_auth_user']) && is_string($forge['basic_auth_user']) ? trim((string)$forge['basic_auth_user']) : '';
+    $authPass = isset($forge['basic_auth_pass']) && is_string($forge['basic_auth_pass']) ? trim((string)$forge['basic_auth_pass']) : '';
+    if ($authUser !== '' && $authPass === '') {
+        $missingKeys[] = 'forge.basic_auth_pass';
+    }
+    if ($authPass !== '' && $authUser === '') {
+        $missingKeys[] = 'forge.basic_auth_user';
+    }
+
+    if ($missingKeys !== []) {
+        return [
+            'reason_code' => 'forge_config_incomplete',
+            'missing_keys' => $missingKeys,
+            'config_path' => $configPath,
+        ];
+    }
+
+    if (!(bool)$forge['enabled']) {
+        return [
+            'reason_code' => 'forge_disabled',
+            'missing_keys' => ['forge.enabled'],
+            'config_path' => $configPath,
+        ];
+    }
+
+    if ($requireDispatchEnabled && !(bool)$forge['dispatch_enabled']) {
+        return [
+            'reason_code' => 'forge_dispatch_disabled',
+            'missing_keys' => ['forge.dispatch_enabled'],
+            'config_path' => $configPath,
+        ];
+    }
+
+    return null;
+}
+
+function sv_format_runtime_config_error(array $error): string
+{
+    $reasonCode = isset($error['reason_code']) ? (string)$error['reason_code'] : 'config_error';
+    $missingKeys = is_array($error['missing_keys'] ?? null) ? $error['missing_keys'] : [];
+    $configPath = isset($error['config_path']) && is_string($error['config_path']) ? trim((string)$error['config_path']) : '';
+    $parts = [$reasonCode];
+    if ($missingKeys !== []) {
+        $parts[] = 'missing_keys=' . implode(',', $missingKeys);
+    }
+    if ($configPath !== '') {
+        $parts[] = 'config_path=' . $configPath;
+    }
+
+    return implode(' | ', $parts);
+}
+
 function sv_forge_timeout(array $config): int
 {
     $timeout = isset($config['forge']['timeout']) ? (int)$config['forge']['timeout'] : 15;
@@ -1160,15 +1238,8 @@ function sv_forge_fallback_model(array $config): string
 
 function sv_forge_endpoint_config(array $config, bool $requireDispatchEnabled = false): ?array
 {
-    if (!sv_is_forge_enabled($config)) {
-        return null;
-    }
-
-    if (!isset($config['forge']) || !is_array($config['forge'])) {
-        return null;
-    }
-
-    if ($requireDispatchEnabled && !sv_is_forge_dispatch_enabled($config)) {
+    $configError = sv_validate_forge_runtime_config($config, $requireDispatchEnabled);
+    if (is_array($configError)) {
         return null;
     }
 
@@ -1268,9 +1339,12 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
         'fetched_at' => time(),
     ];
 
-    if (!sv_is_forge_enabled($config)) {
-        $logger('Forge deaktiviert; Modellliste wird nicht abgefragt.');
+    $configError = sv_validate_forge_runtime_config($config, false);
+    if (is_array($configError)) {
+        $details = sv_format_runtime_config_error($configError);
+        $logger('Forge deaktiviert; Modellliste wird nicht abgefragt (' . $details . ').');
         $result['status'] = 'disabled';
+        $result['error'] = $details;
         return $result;
     }
 
@@ -3140,9 +3214,10 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         if (!isset($scannerCfg['_config_path'])) {
             $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
         }
-        $configJobError = sv_build_scanner_config_job_error($scannerCfg, $path !== '' ? $path : ('media:' . $mediaId), 'rescan_media');
+        $configJobError = sv_build_scanner_config_job_error($scannerCfg, $path !== '' ? $path : ('media:' . $mediaId), 'rescan_media', $pathsCfg);
         if (is_array($configJobError)) {
             $response = array_merge($response, $configJobError['response']);
+            $jobLogger('Rescan failed: ' . sv_format_runtime_config_error($configJobError['response']));
             sv_update_job_status(
                 $pdo,
                 $jobId,
@@ -3226,7 +3301,8 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             ];
         }
 
-        $error = $resultMeta['error'] ?? 'Rescan fehlgeschlagen';
+        $error = $resultMeta['error'] ?? ((isset($response['error']) && is_string($response['error'])) ? $response['error'] : 'Rescan fehlgeschlagen');
+        $jobLogger('Rescan failed: ' . (string)$error);
         $finishedAt = date('c');
         $response['error'] = $error;
         $response['finished_at'] = $finishedAt;
@@ -3253,6 +3329,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         ];
     } catch (Throwable $e) {
         $message = $e->getMessage();
+        $jobLogger('Rescan failed: ' . (string)$message);
         $response['error'] = $message;
         if (!isset($response['run_at']) && isset($resultMeta['run_at'])) {
             $response['run_at'] = $resultMeta['run_at'];
@@ -3602,8 +3679,9 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     }
     $spawnLockPath   = $logsRoot . '/scan_worker_spawn.lock';
     $spawnLastPath   = $logsRoot . '/scan_worker_spawn_last.json';
-    $spawnOutLog     = $logsRoot . '/scan_worker.out.log';
-    $spawnErrLog     = $logsRoot . '/scan_worker.err.log';
+    $spawnTimestamp  = gmdate('Ymd_His') . '_' . sprintf('%06d', (int)floor((microtime(true) - floor(microtime(true))) * 1000000));
+    $spawnOutLog     = $logsRoot . '/scan_worker_spawn_' . $spawnTimestamp . '.out.log';
+    $spawnErrLog     = $logsRoot . '/scan_worker_spawn_' . $spawnTimestamp . '.err.log';
     $workerLockPath  = $logsRoot . '/scan_worker.lock.json';
     $cooldownSeconds = 10;
     $logPaths        = [
@@ -4133,7 +4211,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
 }
 
 
-function sv_build_scanner_config_job_error(array $scannerCfg, string $path, string $operation): ?array
+function sv_build_scanner_config_job_error(array $scannerCfg, string $path, string $operation, ?array $pathsCfg = null): ?array
 {
     $configError = sv_scanner_validate_runtime_config($scannerCfg);
     if (!is_array($configError)) {
@@ -4145,13 +4223,35 @@ function sv_build_scanner_config_job_error(array $scannerCfg, string $path, stri
     $configPath = isset($configError['config_path']) && is_string($configError['config_path']) && $configError['config_path'] !== ''
         ? $configError['config_path']
         : null;
+    $safePath = sv_safe_path_label($path);
+
+    if ($pathsCfg === null && isset($scannerCfg['paths']) && is_array($scannerCfg['paths'])) {
+        $pathsCfg = $scannerCfg['paths'];
+    }
+    sv_scanner_log_event($pathsCfg, 'scanner_ingest', [
+        'operation' => $operation,
+        'path' => $safePath,
+        'response_type_detected' => 'config_error',
+        'reason_code' => $reasonCode,
+        'missing_keys' => $missingKeys,
+        'config_path' => $configPath,
+    ]);
+    sv_scanner_log_event($pathsCfg, 'scanner_persist', [
+        'operation' => $operation,
+        'path' => $safePath,
+        'response_type_detected' => 'config_error',
+        'reason_code' => $reasonCode,
+        'missing_keys' => $missingKeys,
+        'config_path' => $configPath,
+        'error_saved' => true,
+    ]);
 
     return [
         'reason_code' => $reasonCode,
         'error_message' => $reasonCode . ($missingKeys !== [] ? ' (missing: ' . implode(', ', $missingKeys) . ')' : ''),
         'response' => [
             'operation' => $operation,
-            'path' => sv_safe_path_label($path),
+            'path' => $safePath,
             'reason_code' => $reasonCode,
             'missing_keys' => $missingKeys,
             'config_path' => $configPath,
@@ -4204,7 +4304,7 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     if (!isset($scannerCfg['_config_path'])) {
         $scannerCfg['_config_path'] = $config['_config_path'] ?? null;
     }
-    $configJobError = sv_build_scanner_config_job_error($scannerCfg, $path, 'scan_path');
+    $configJobError = sv_build_scanner_config_job_error($scannerCfg, $path, 'scan_path', $config['paths'] ?? null);
     if (is_array($configJobError)) {
         $response = $configJobError['response'];
         sv_update_job_status(

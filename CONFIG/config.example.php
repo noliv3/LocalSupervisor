@@ -59,6 +59,15 @@ return [
         ],
         'queue_max_per_media'        => 2,
     ],
+    'forge' => [
+        'enabled' => true,
+        'dispatch_enabled' => true,
+        'base_url' => 'http://127.0.0.1:7860',
+        'timeout' => 20,
+        'basic_auth_user' => '',
+        'basic_auth_pass' => '',
+        'internal_model_fallback' => 'v1-5-pruned-emaonly.safetensors',
+    ],
     'ollama' => [
         'enabled' => true,
         'base_url' => 'http://127.0.0.1:11434',
