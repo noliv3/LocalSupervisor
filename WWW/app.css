@@ -770,6 +770,35 @@ label {
     margin-bottom: 12px;
 }
 
+.media-visual {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+}
+
+.media-visual::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: var(--media-visual-bg-image);
+    background-size: cover;
+    background-position: center;
+    filter: blur(42px) saturate(1.2);
+    transform: scale(1.08);
+    opacity: 0.35;
+    z-index: -2;
+    pointer-events: none;
+}
+
+.media-visual::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(2, 6, 23, 0.42), rgba(2, 6, 23, 0.7));
+    z-index: -1;
+    pointer-events: none;
+}
+
 .media-side {
     display: flex;
     flex-direction: column;

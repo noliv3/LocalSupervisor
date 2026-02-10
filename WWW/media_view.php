@@ -1394,7 +1394,15 @@ $adultToggleHtml = '<div class="header-toggle">'
     
     <div class="media-layout">
         <div class="media-left">
-            <div class="panel media-visual" id="visual">
+            <?php
+            $mediaVisualBgStyle = '';
+            if ($type === 'image' && $activeAssetExists) {
+                $mediaVisualBgStyle = ' style="--media-visual-bg-image:url(\''
+                    . htmlspecialchars($thumbUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+                    . '\')"';
+            }
+            ?>
+            <div class="panel media-visual" id="visual"<?= $mediaVisualBgStyle ?>>
                 <div class="media-toolbar">
                     <div class="media-controls" role="group" aria-label="Preview Controls">
                         <button class="btn btn--ghost btn--sm" type="button" data-preview-action="fit">Fit</button>

@@ -197,6 +197,7 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - **Ollama-Enqueue-Performance:** Das Enqueue fasst Job-Erstellung in eine Transaktion; bei Bedarf WAL/`synchronous=NORMAL` und `busy_timeout` in der SQLite-Config prüfen.
 - **Jobs hängen/Queue voll:** `jobs_admin.php` und `jobs_prune.php` nutzen.
 - **Scanner/Ollama/Forge nicht erreichbar:** `base_url` in der Config prüfen.
+- **Scanner empfängt keine Bilddaten auf Port 8000:** Scanner-Route prüfen. Standard ist `scanner.image_endpoint=/check`; bei abweichender API (z. B. `/predict`) die Route in `CONFIG/config.php` setzen.
 
 ## Ollama – typische Fehlerursachen (Trigger-Klassen)
 Die folgenden Trigger helfen beim schnellen Einordnen von „Jobs hängen“ oder „Queue idle“ im Ollama-Modul. Sie sind bewusst als Ursachenklassen gruppiert, damit Logs, Status und Recovery zielgerichtet geprüft werden können.

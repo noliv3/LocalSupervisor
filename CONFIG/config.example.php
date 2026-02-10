@@ -27,6 +27,8 @@ return [
     ],
     'scanner' => [
         'base_url'       => 'http://127.0.0.1:8000',
+        // Standard ist /check. Falls dein lokaler Scanner ein anderes Route-Schema nutzt (z. B. /predict), hier überschreiben.
+        'image_endpoint' => '/check',
         'timeout'        => 15,
         'nsfw_threshold' => 0.7,
     ],

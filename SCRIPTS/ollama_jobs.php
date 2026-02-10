@@ -1746,6 +1746,14 @@ function sv_ollama_mode_for_job_type(string $jobType): string
 
 function sv_ollama_payload_column(PDO $pdo): string
 {
+    $columns = sv_ollama_jobs_columns($pdo);
+    if (isset($columns['payload_json'])) {
+        return 'payload_json';
+    }
+    if (isset($columns['payload'])) {
+        return 'payload';
+    }
+
     return 'payload_json';
 }
 
@@ -1757,10 +1765,22 @@ function sv_ollama_jobs_columns(PDO $pdo): array
     }
 
     $columns = [];
-    $stmt = $pdo->query('PRAGMA table_info(jobs)');
-    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        if (isset($row['name'])) {
-            $columns[(string)$row['name']] = true;
+    $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    if ($driver === 'mysql') {
+        $stmt = $pdo->query('SHOW COLUMNS FROM jobs');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        foreach ($rows as $row) {
+            if (isset($row['Field'])) {
+                $columns[strtolower((string)$row['Field'])] = true;
+            }
+        }
+    } else {
+        $stmt = $pdo->query('PRAGMA table_info(jobs)');
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        foreach ($rows as $row) {
+            if (isset($row['name'])) {
+                $columns[strtolower((string)$row['name'])] = true;
+            }
         }
     }
 
