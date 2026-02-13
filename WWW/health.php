@@ -1,6 +1,10 @@
 <?php
 declare(strict_types=1);
 
+if (!defined('SV_WEB_CONTEXT')) {
+    define('SV_WEB_CONTEXT', true);
+}
+
 require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/logging.php';
 

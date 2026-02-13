@@ -88,3 +88,8 @@ Supervisor ist ein lokales System zum Verwalten großer Medienbibliotheken (Bild
 ## Verboten
 - Keine großflächigen Umbauten ohne explizite Phase.
 - Keine Entfernung bestehender Tools/Runner ohne Ersatz.
+
+
+## Laufzeit-Hinweise (aktuell)
+- PixAI-Scanner erwartet für `/check` und `/batch` primär `Authorization: <scanner.token>` (ohne Bearer-Präfix). `scanner.api_key` + `scanner.api_key_header` ist nur ein optionaler Alternativmodus.
+- WWW-Routen laufen im `SV_WEB_CONTEXT`: DB-Zugriffe sind fail-fast (`sv_open_pdo_web`, keine Retry-Sleeps bei `SQLITE_BUSY/LOCKED`) und OS-Prozess-Probes (`tasklist`/`ps`) sind im Web-Kontext untersagt.

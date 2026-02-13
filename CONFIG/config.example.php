@@ -27,9 +27,18 @@ return [
     ],
     'scanner' => [
         'base_url'       => 'http://127.0.0.1:8000',
+        // Primärmodus (empfohlen): Der PixAI-Scanner erwartet bei /check und /batch den Header
+        // "Authorization: <token>" ohne Bearer-Präfix.
+        'token'          => '',
+        // Optionaler Alternativmodus: Eigener API-Key Header.
+        // Nur nutzen, wenn dein Scanner explizit kein Authorization-Token erwartet.
+        'api_key'        => '',
+        'api_key_header' => '',
         // Standard ist /check. Falls dein lokaler Scanner ein anderes Route-Schema nutzt (z. B. /predict), hier überschreiben.
         'image_endpoint' => '/check',
+        'batch_endpoint' => '/batch',
         'timeout'        => 15,
+        'connect_timeout'=> 5,
         'nsfw_threshold' => 0.7,
     ],
     'security' => [

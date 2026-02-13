@@ -911,6 +911,17 @@ function sv_scanner_merge_parts(array $parts): ?array
 
 function sv_scanner_format_error_message(array $errorMeta): string
 {
+    $reasonCode = isset($errorMeta['reason_code']) ? (string)$errorMeta['reason_code'] : '';
+    $missingKeys = is_array($errorMeta['missing_keys'] ?? null) ? $errorMeta['missing_keys'] : [];
+    if ($reasonCode === 'scanner_auth_missing') {
+        if (in_array('scanner.api_key_header', $missingKeys, true)) {
+            return 'API-Key-Modus unvollständig: scanner.api_key_header fehlt';
+        }
+        if (in_array('scanner.token', $missingKeys, true)) {
+            return 'Scanner-Token fehlt in config.php: scanner.token';
+        }
+    }
+
     $message = isset($errorMeta['error']) && is_string($errorMeta['error']) && $errorMeta['error'] !== ''
         ? $errorMeta['error']
         : 'Scanner fehlgeschlagen';
@@ -934,25 +945,22 @@ function sv_scanner_validate_runtime_config(array $scannerCfg): ?array
             'reason_code' => 'scanner_not_configured',
             'missing_keys' => ['scanner.base_url'],
             'config_path' => $configPath !== '' ? $configPath : null,
+            'required_any' => [],
         ];
     }
 
     $missingAuth = [];
-    if ($token === '') {
-        if ($apiKey === '') {
-            $missingAuth[] = 'scanner.token|scanner.api_key';
-        }
-        if ($apiKey !== '' && $apiHdr === '') {
-            $missingAuth[] = 'scanner.api_key_header';
-        }
-        if ($apiKey === '' && $apiHdr !== '') {
-            $missingAuth[] = 'scanner.api_key';
-        }
+    if ($token === '' && $apiKey === '') {
+        $missingAuth[] = 'scanner.token';
+    }
+    if ($token === '' && $apiKey !== '' && $apiHdr === '') {
+        $missingAuth[] = 'scanner.api_key_header';
     }
 
     if ($missingAuth !== []) {
         return [
             'reason_code' => 'scanner_auth_missing',
+            'required_any' => ['scanner.token', 'scanner.api_key+scanner.api_key_header'],
             'missing_keys' => $missingAuth,
             'config_path' => $configPath !== '' ? $configPath : null,
         ];
@@ -976,9 +984,9 @@ function sv_scan_with_local_scanner(
 ): array
 {
     $baseUrl = (string)($scannerCfg['base_url'] ?? '');
-    $token   = (string)($scannerCfg['token']     ?? '');
-    $apiKey  = (string)($scannerCfg['api_key']   ?? '');
-    $apiHdr  = (string)($scannerCfg['api_key_header'] ?? '');
+    $token   = trim((string)($scannerCfg['token']     ?? ''));
+    $apiKey  = trim((string)($scannerCfg['api_key']   ?? ''));
+    $apiHdr  = trim((string)($scannerCfg['api_key_header'] ?? ''));
     $allowFallback = isset($options['allow_fallback']) ? (bool)$options['allow_fallback'] : true;
 
     $configError = sv_scanner_validate_runtime_config($scannerCfg);
@@ -993,6 +1001,7 @@ function sv_scan_with_local_scanner(
             'error_code'  => (string)$configError['reason_code'],
             'reason_code' => (string)$configError['reason_code'],
             'missing_keys'=> $configError['missing_keys'] ?? [],
+            'required_any'=> $configError['required_any'] ?? [],
             'config_path' => $configError['config_path'] ?? null,
             'body_snippet'=> null,
             'response_type_detected' => 'config_error',
@@ -1009,6 +1018,7 @@ function sv_scan_with_local_scanner(
             'response_type_detected' => 'config_error',
             'reason_code' => $configError['reason_code'] ?? null,
             'missing_keys' => $configError['missing_keys'] ?? [],
+            'required_any' => $configError['required_any'] ?? [],
             'config_path' => $configError['config_path'] ?? null,
             'response_snippet_sanitized' => null,
         ]);
@@ -1071,10 +1081,9 @@ function sv_scan_with_local_scanner(
     $headers = [
         'Accept: application/json',
     ];
-    if ($token !== '') {
+    if (trim($token) !== '') {
         $headers[] = 'Authorization: ' . $token;
-    }
-    if ($apiKey !== '' && $apiHdr !== '') {
+    } elseif ($apiKey !== '' && $apiHdr !== '') {
         $headers[] = $apiHdr . ': ' . $apiKey;
     }
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);

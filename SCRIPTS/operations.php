@@ -171,6 +171,10 @@ function sv_is_sqlite_busy(Throwable $error): bool
 
 function sv_open_pdo_web(array $config, bool $queryOnly = false, int $busyTimeoutMs = 25): PDO
 {
+    if (!defined('SV_WEB_CONTEXT')) {
+        define('SV_WEB_CONTEXT', true);
+    }
+
     $pdo = sv_open_pdo($config);
     try {
         $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
@@ -189,12 +193,16 @@ function sv_open_pdo_web(array $config, bool $queryOnly = false, int $busyTimeou
 
 function sv_db_exec_retry(callable $fn, int $retries = 5, int $minSleepMs = 50, int $maxSleepMs = 250)
 {
+    $isWeb = defined('SV_WEB_CONTEXT') && SV_WEB_CONTEXT;
     $attempts = 0;
     while (true) {
         try {
             return $fn();
         } catch (Throwable $e) {
-            if (!sv_is_sqlite_busy($e) || $attempts >= $retries) {
+            if (!sv_is_sqlite_busy($e)) {
+                throw $e;
+            }
+            if ($isWeb || $attempts >= $retries) {
                 throw $e;
             }
             $sleepMs = random_int($minSleepMs, $maxSleepMs);
@@ -499,6 +507,10 @@ function sv_is_pid_running(int $pid): array
 {
     if ($pid <= 0) {
         return ['running' => false, 'unknown' => false];
+    }
+
+    if (defined('SV_WEB_CONTEXT') && SV_WEB_CONTEXT) {
+        return ['running' => false, 'unknown' => true];
     }
 
     if (function_exists('posix_kill')) {
