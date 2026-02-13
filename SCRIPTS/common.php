@@ -1,6 +1,11 @@
 <?php
 declare(strict_types=1);
 
+
+if (!defined('SV_WEB_CONTEXT')) {
+    define('SV_WEB_CONTEXT', PHP_SAPI !== 'cli');
+}
+
 function sv_base_dir(): string
 {
     $baseDir = realpath(__DIR__ . '/..');

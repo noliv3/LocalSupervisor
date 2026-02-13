@@ -164,6 +164,8 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 - Der letzte Spawn-Status des Scan-Workers wird in `LOGS/scan_worker_spawn_last.json` persistiert (`ts_utc`, `requested_by`, `pid`, `command`, `status`, `reason_code`, `out_log`, `err_log`).
 - Scan-Worker-Spawn-Logs werden pro Start timestamped geschrieben (`scan_worker_spawn_<timestamp>.out.log/.err.log`), damit Redirect-Logs nicht überschrieben werden; die konkreten Pfade werden in `scan_worker_spawn_last.json` persistiert und in `rescan_single_job` geloggt.
 - Scanner-Konfigurationsfehler (`scanner_not_configured`, `scanner_auth_missing`) werden als harte Job-Fehler gespeichert (`jobs.error_message` + `forge_response_json`) und zusätzlich in `LOGS/scanner_ingest.jsonl` als `response_type_detected=config_error` inkl. `missing_keys`/`config_path` protokolliert.
+- PixAI-Scanner-Auth: Primär über `scanner.token`; bei `/check` und `/batch` wird exakt `Authorization: <token>` gesendet (ohne automatisches `Bearer`-Präfix). `scanner.api_key` + `scanner.api_key_header` bleibt ein optionaler Alternativmodus.
+- Runtime-Validation für Scanner-Auth meldet eindeutig `required_any=["scanner.token","scanner.api_key+scanner.api_key_header"]`. Fehlende Felder werden präzise als `scanner.token` oder `scanner.api_key_header` ausgewiesen.
 - Frühe Scanner-Config-Fehler erzeugen zusätzlich `scanner_persist`-Events (`response_type_detected=config_error`) und eine sichtbare Worker-Zeile mit `reason_code`, `missing_keys` und `config_path`, damit „Scanner bekommt nichts“ klar diagnostizierbar bleibt.
 - `health.php` meldet `scan_worker_running` (primär Heartbeat-Freshness, Fallback Lockfile), damit die UI den tatsächlichen Worker-Laufzustand sichtbar machen kann.
 - Worker-„running“ wird zentral über Lock/Heartbeat geprüft (`is_ollama_worker_running`): Launcher-Locks oder `web:*`-Owner zählen nicht, und Locks mit `php_server.pid` gelten als ungültig.
@@ -298,4 +300,6 @@ Zuverlässiger Start ohne Zombie-Running, valide Eingaben, konsistente Payloads,
 - `CONFIG/config.example.php`
 
 - Web-DB-Fast-Fail: WWW-Endpunkte nutzen `sv_open_pdo_web()` mit minimalem SQLite-`busy_timeout` (max. 25ms). Bei `SQLITE_BUSY/LOCKED` antworten `thumb.php`, `media_stream.php`, `mediadb.php`, `media_view.php` und `ollama.php` sofort (Busy/Placeholder statt Hänger).
+- Web-Kontext ist global über `SV_WEB_CONTEXT` markiert. In diesem Kontext sind DB-Retries deaktiviert (`sv_db_exec_retry()` fail-fast) und Prozess-Probes (`tasklist`/`ps`) werden nicht ausgeführt.
+- `internal_ollama.php` und `jobs_prune.php` nutzen ebenfalls `sv_open_pdo_web()`, damit interne WWW-Endpunkte nie mit langem SQLite-Timeout blockieren.
 - `internal_ollama.php action=run_once` führt keinen synchronen Batch mehr im Request aus, sondern stößt nur noch den Hintergrund-Spawn an und antwortet sofort.
