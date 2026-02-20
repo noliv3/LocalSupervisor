@@ -63,10 +63,11 @@ if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
 }
 $logsPath = sv_logs_root($config);
-
+$webMigrationsEnabled = (bool)($config['migrations']['web_enabled'] ?? false);
+$webSpawnEnabled = (bool)($config['workers']['web_spawn_enabled'] ?? false);
 
 $migrateActions = ['enqueue', 'cancel', 'delete', 'job_status'];
-if (in_array($action, $migrateActions, true)) {
+if ($webMigrationsEnabled && in_array($action, $migrateActions, true)) {
     try {
         $pdoMigrate = $openWebPdo();
         sv_run_migrations_if_needed($pdoMigrate, $config);
@@ -387,11 +388,8 @@ if ($action === 'enqueue') {
     };
 
     try {
-        $enqueueResult = sv_ollama_enqueue_jobs_with_autostart(
-            $pdo,
-            $config,
-            'enqueue',
-            static function () use ($modes, $selectCandidates, $pdo, $config, $logger, $allFlag): array {
+        $enqueueResult = [
+            'enqueue' => (static function () use ($modes, $selectCandidates, $pdo, $config, $logger, $allFlag): array {
             $summary = [
                 'candidates' => 0,
                 'enqueued' => 0,
@@ -448,8 +446,17 @@ if ($action === 'enqueue') {
             return [
                 'summary' => $summary,
             ];
-            }
-        );
+            })(),
+            'pending_jobs' => sv_ollama_pending_job_count($pdo),
+            'autostart' => [
+                'ok' => false,
+                'status' => 'skipped',
+                'reason_code' => $webSpawnEnabled ? 'disabled_in_web_path' : 'web_spawn_disabled',
+                'spawned' => false,
+                'skipped' => true,
+                'requested' => true,
+            ],
+        ];
     } catch (Throwable $e) {
         if ($isBusyException($e)) {
             $respond(200, ['ok' => false, 'status' => 'busy', 'reason_code' => 'db_busy', 'logs' => $logs]);
@@ -482,19 +489,17 @@ if ($action === 'run') {
 
     $runtimeStatus = sv_ollama_read_runtime_global_status($config);
     $pendingJobs = max(0, (int)($runtimeStatus['queue_pending'] ?? 0));
-    $spawn = sv_ollama_spawn_background_worker_fast($config, 'web_run', $pendingJobs, $batch, 0);
 
     $respond(200, [
-        'ok' => !empty($spawn['spawned']),
-        'status' => $spawn['status'] ?? 'start_failed',
-        'reason_code' => $spawn['reason_code'] ?? 'start_failed',
-        'pid' => $spawn['pid'] ?? null,
-        'running' => false,
-        'locked' => $spawn['runner_locked'] ?? false,
-        'spawned' => $spawn['spawned'] ?? false,
-        'spawn_error' => $spawn['spawn_error'] ?? null,
-        'spawn_logs' => $spawn['spawn_logs'] ?? null,
-        'source' => $spawn['source'] ?? 'web_run',
+        'ok' => true,
+        'status' => 'queued',
+        'reason_code' => $webSpawnEnabled ? 'disabled_in_web_path' : 'web_spawn_disabled',
+        'autostart_requested' => true,
+        'pending_jobs' => $pendingJobs,
+        'batch' => $batch,
+        'message' => 'Autostart angefordert. Worker-Start erfolgt nicht im Web-Pfad.',
+        'spawned' => false,
+        'source' => 'web_run',
     ]);
 }
 

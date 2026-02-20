@@ -68,6 +68,14 @@ return [
         ],
         'queue_max_per_media'        => 2,
     ],
+    'workers' => [
+        // Web-Pfad bleibt non-blocking: HTTP-Requests enqueuen nur Jobs und starten keine Worker.
+        'web_spawn_enabled' => false,
+    ],
+    'migrations' => [
+        // Migrationen nur über CLI/Admin-Flows ausführen, nicht im Web-Request.
+        'web_enabled' => false,
+    ],
     'forge' => [
         'enabled' => true,
         'dispatch_enabled' => true,

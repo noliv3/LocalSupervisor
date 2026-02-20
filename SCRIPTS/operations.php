@@ -2206,57 +2206,21 @@ function sv_queue_forge_repair_job(PDO $pdo, array $config, int $mediaId, array 
 
 function sv_run_forge_repair_job(PDO $pdo, array $config, int $mediaId, array $options, callable $logger): array
 {
-    $logger('Forge-Repair wird asynchron über die Job-Queue abgewickelt.');
+    $logger('Forge-Repair wird asynchron über die Job-Queue abgewickelt (kein Web-Worker-Spawn).');
 
     $queued = sv_queue_forge_repair_job($pdo, $config, $mediaId, $options, $logger);
 
-    $worker = sv_spawn_forge_worker_for_media(
-        $pdo,
-        $config,
-        $mediaId,
-        (int)($queued['job_id'] ?? 0) ?: null,
-        1,
-        $logger
-    );
-
-    if (($worker['state'] ?? null) === 'error' && !empty($queued['job_id'])) {
-        $snippet = trim((string)($worker['err_snippet'] ?? $worker['reason'] ?? 'spawn failed'));
-        $snippet = sv_sanitize_error_message($snippet, 200);
-        $snippet = sv_forge_limit_error($snippet, 200);
-        $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
-        $stmt    = $pdo->prepare(
-            'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
-            . ' ELSE error_message || "; " || :msg END WHERE id = :id'
-        );
-        $stmt->execute([
-            ':msg' => $message,
-            ':id'  => (int)$queued['job_id'],
-        ]);
-        $queued['error_message'] = isset($queued['error_message']) && (string)$queued['error_message'] !== ''
-            ? $queued['error_message'] . '; ' . $message
-            : $message;
-    }
-
-    $pidStatus = $worker['pid'] !== null ? sv_is_pid_running((int)$worker['pid']) : ['running' => false, 'unknown' => $worker['unknown']];
-    $status    = ($pidStatus['running'] ?? false) ? 'running' : ($queued['status'] ?? 'queued');
-    $spawnMessage = 'Job in Queue';
-    if (!empty($worker['skipped'])) {
-        $spawnMessage = 'Worker-Spawn übersprungen: ' . ((string)($worker['reason'] ?? 'cooldown'));
-    } elseif ($status === 'running') {
-        $spawnMessage = 'Worker läuft';
-    }
-
     return array_merge($queued, [
-        'status'               => $status,
-        'worker_pid'           => $worker['pid'],
-        'worker_started_at'    => $worker['started'],
-        'worker_status_unknown'=> (bool)($pidStatus['unknown'] ?? $worker['unknown']),
-        'worker_spawn_skipped' => (bool)($worker['skipped'] ?? false),
-        'worker_spawn_reason'  => $worker['reason'] ?? null,
-        'worker_spawn'         => $worker['state'] ?? null,
-        'worker_spawn_cmd'     => $worker['cmd'] ?? null,
-        'worker_spawn_log_paths' => $worker['log_paths'] ?? null,
-        'message'              => $spawnMessage,
+        'status'               => $queued['status'] ?? 'queued',
+        'worker_pid'           => null,
+        'worker_started_at'    => null,
+        'worker_status_unknown'=> false,
+        'worker_spawn_skipped' => true,
+        'worker_spawn_reason'  => 'web_spawn_disabled',
+        'worker_spawn'         => 'skipped',
+        'worker_spawn_cmd'     => null,
+        'worker_spawn_log_paths' => null,
+        'message'              => 'Job in Queue (Worker-Start via CLI/Service).',
     ]);
 }
 
@@ -7783,57 +7747,21 @@ function sv_fail_job_on_empty_path(PDO $pdo, int $jobId, string $name, $value): 
 
 function sv_run_forge_regen_replace(PDO $pdo, array $config, int $mediaId, callable $logger, array $overrides = []): array
 {
-    $logger('Forge-Regeneration wird in V3 asynchron über die Job-Queue abgewickelt.');
+    $logger('Forge-Regeneration wird in V3 asynchron über die Job-Queue abgewickelt (kein Web-Worker-Spawn).');
 
     $queued = sv_queue_forge_regeneration($pdo, $config, $mediaId, $logger, $overrides);
 
-    $worker = sv_spawn_forge_worker_for_media(
-        $pdo,
-        $config,
-        $mediaId,
-        (int)($queued['job_id'] ?? 0) ?: null,
-        1,
-        $logger
-    );
-
-    if (($worker['state'] ?? null) === 'error' && !empty($queued['job_id'])) {
-        $snippet = trim((string)($worker['err_snippet'] ?? $worker['reason'] ?? 'spawn failed'));
-        $snippet = sv_sanitize_error_message($snippet, 200);
-        $snippet = sv_forge_limit_error($snippet, 200);
-        $message = 'worker spawn failed: ' . ($snippet === '' ? 'unknown' : $snippet);
-        $stmt    = $pdo->prepare(
-            'UPDATE jobs SET error_message = CASE WHEN error_message IS NULL OR error_message = "" THEN :msg'
-            . ' ELSE error_message || "; " || :msg END WHERE id = :id'
-        );
-        $stmt->execute([
-            ':msg' => $message,
-            ':id'  => (int)$queued['job_id'],
-        ]);
-        $queued['error_message'] = isset($queued['error_message']) && (string)$queued['error_message'] !== ''
-            ? $queued['error_message'] . '; ' . $message
-            : $message;
-    }
-
-    $pidStatus = $worker['pid'] !== null ? sv_is_pid_running((int)$worker['pid']) : ['running' => false, 'unknown' => $worker['unknown']];
-    $status    = ($pidStatus['running'] ?? false) ? 'running' : ($queued['status'] ?? 'queued');
-    $spawnMessage = 'Job in Queue';
-    if (!empty($worker['skipped'])) {
-        $spawnMessage = 'Worker-Spawn übersprungen: ' . ((string)($worker['reason'] ?? 'cooldown'));
-    } elseif ($status === 'running') {
-        $spawnMessage = 'Worker läuft';
-    }
-
     return array_merge($queued, [
-        'status'               => $status,
-        'worker_pid'           => $worker['pid'],
-        'worker_started_at'    => $worker['started'],
-        'worker_status_unknown'=> (bool)($pidStatus['unknown'] ?? $worker['unknown']),
-        'worker_spawn_skipped' => (bool)($worker['skipped'] ?? false),
-        'worker_spawn_reason'  => $worker['reason'] ?? null,
-        'worker_spawn'         => $worker['state'] ?? null,
-        'worker_spawn_cmd'     => $worker['cmd'] ?? null,
-        'worker_spawn_log_paths' => $worker['log_paths'] ?? null,
-        'message'              => $spawnMessage,
+        'status'               => $queued['status'] ?? 'queued',
+        'worker_pid'           => null,
+        'worker_started_at'    => null,
+        'worker_status_unknown'=> false,
+        'worker_spawn_skipped' => true,
+        'worker_spawn_reason'  => 'web_spawn_disabled',
+        'worker_spawn'         => 'skipped',
+        'worker_spawn_cmd'     => null,
+        'worker_spawn_log_paths' => null,
+        'message'              => 'Job in Queue (Worker-Start via CLI/Service).',
     ]);
 }
 
