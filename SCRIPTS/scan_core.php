@@ -969,6 +969,36 @@ function sv_scanner_validate_runtime_config(array $scannerCfg): ?array
     return null;
 }
 
+function sv_scanner_build_auth_header_candidates(array $scannerCfg): array
+{
+    $token  = trim((string)($scannerCfg['token'] ?? ''));
+    $apiKey = trim((string)($scannerCfg['api_key'] ?? ''));
+    $apiHdr = trim((string)($scannerCfg['api_key_header'] ?? ''));
+
+    if ($token !== '') {
+        $variants = [];
+        $variants[] = 'Authorization: ' . $token;
+
+        $tokenHasBearer = stripos($token, 'Bearer ') === 0;
+        if ($tokenHasBearer) {
+            $rawToken = trim(substr($token, 7));
+            if ($rawToken !== '') {
+                $variants[] = 'Authorization: ' . $rawToken;
+            }
+        } else {
+            $variants[] = 'Authorization: Bearer ' . $token;
+        }
+
+        return array_values(array_unique($variants));
+    }
+
+    if ($apiKey !== '' && $apiHdr !== '') {
+        return [$apiHdr . ': ' . $apiKey];
+    }
+
+    return [];
+}
+
 /**
  * Lokalen PixAI-Scanner via HTTP /check aufrufen.
  * - Feldname: "image"
@@ -1078,20 +1108,42 @@ function sv_scan_with_local_scanner(
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $connectTimeout);
     curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
 
-    $headers = [
-        'Accept: application/json',
-    ];
-    if (trim($token) !== '') {
-        $headers[] = 'Authorization: ' . $token;
-    } elseif ($apiKey !== '' && $apiHdr !== '') {
-        $headers[] = $apiHdr . ': ' . $apiKey;
+    $authHeaders = sv_scanner_build_auth_header_candidates($scannerCfg);
+    if ($authHeaders === []) {
+        $authHeaders = [''];
     }
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
-    $resp = curl_exec($ch);
+    $resp = false;
+    $status = 0;
+    $err = '';
+    $errno = 0;
+    $attempt = 0;
+    foreach ($authHeaders as $authHeader) {
+        $attempt++;
+        $headers = ['Accept: application/json'];
+        if ($authHeader !== '') {
+            $headers[] = $authHeader;
+        }
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        $resp = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+
+        if ($resp === false) {
+            $err = curl_error($ch);
+            $errno = curl_errno($ch);
+            break;
+        }
+
+        if ($status !== 401 && $status !== 403) {
+            break;
+        }
+
+        if ($logger && count($authHeaders) > 1 && $attempt < count($authHeaders)) {
+            $logger('Scanner Auth-Variante abgelehnt (HTTP ' . $status . '), versuche nächste Header-Variante.');
+        }
+    }
+
     if ($resp === false) {
-        $err = curl_error($ch);
-        $errno = curl_errno($ch);
         $timeoutCode = defined('CURLE_OPERATION_TIMEDOUT') ? CURLE_OPERATION_TIMEDOUT : 28;
         $isTimeout = $errno === $timeoutCode || (is_string($err) && stripos($err, 'timed out') !== false);
         curl_close($ch);
@@ -1130,7 +1182,6 @@ function sv_scan_with_local_scanner(
         ];
     }
 
-    $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
 
     $data = json_decode($resp, true);
