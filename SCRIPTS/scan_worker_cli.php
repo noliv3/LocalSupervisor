@@ -69,7 +69,7 @@ if (is_file($lockPath)) {
             $lockQuarantine('broken_lock_quarantined');
         } else {
             $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
-            if ($heartbeat !== false && (time() - $heartbeat) <= 30) {
+            if ($heartbeat !== false && (time() - $heartbeat) <= 300) {
                 $writeErrLog('Scan-Worker bereits aktiv (Lock Heartbeat), neuer Start abgebrochen.');
                 exit(0);
             }
@@ -108,7 +108,7 @@ foreach (array_slice($argv, 1) as $arg) {
 $lastHeartbeat = 0;
 $updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockPath, $config, $writeErrLog): void {
     $now = time();
-    if (!$force && ($now - $lastHeartbeat) < 10) {
+    if (!$force && ($now - $lastHeartbeat) < 5) {
         return;
     }
     $lastHeartbeat = $now;

@@ -411,7 +411,7 @@ function sv_ollama_spawn_worker(
         $deadline = microtime(true) + $verifyWindowSeconds;
         do {
             $verifyAttempts++;
-            $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+            $workerState = sv_ollama_worker_running_state($config, $currentPid, 180);
             $lockSnapshot = $workerState['lock'] ?? null;
             $runnerLocked = !empty($lockSnapshot['active']);
             if ($pid !== null) {
@@ -502,7 +502,7 @@ function sv_ollama_spawn_background_worker_fast(
     }
 
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
-    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 180);
     if (!empty($workerState['running'])) {
         return [
             'ok' => false,
@@ -607,7 +607,7 @@ function sv_ollama_spawn_background_worker(
     }
 
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
-    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 180);
     if (!empty($workerState['running'])) {
         return [
             'ok' => false,
@@ -1389,7 +1389,7 @@ function sv_ollama_validate_worker_lock_payload(?array $payload, ?int $currentPi
     ];
 }
 
-function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, int $maxAgeSeconds = 30): array
+function sv_ollama_worker_running_state(array $config, ?int $currentPid = null, int $maxAgeSeconds = 180): array
 {
     $currentPid = $currentPid ?? (function_exists('getmypid') ? (int)getmypid() : null);
     $phpServerPid = sv_ollama_php_server_pid($config);
@@ -1549,7 +1549,7 @@ function sv_ollama_worker_lock_snapshot(array $config, ?int $currentPid = null, 
 
     $heartbeat = is_string($lockPayload['heartbeat_at'] ?? null) ? $lockPayload['heartbeat_at'] : '';
     $heartbeatTs = $heartbeat !== '' ? strtotime($heartbeat) : false;
-    $lockActive = $heartbeatTs !== false && (time() - (int)$heartbeatTs) <= 30;
+    $lockActive = $heartbeatTs !== false && (time() - (int)$heartbeatTs) <= 300;
     $pidAlive = null;
     if ($allowProcessProbe && sv_ollama_allow_process_probe()) {
         $pidInfo = sv_is_pid_running((int)$validation['pid']);

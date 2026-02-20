@@ -24,6 +24,8 @@ if ($logsRoot === null) {
     exit(1);
 }
 
+$heartbeatIntervalSeconds = 5;
+
 $serviceName = 'scan_service';
 $heartbeatPath = $logsRoot . '/scan_service.heartbeat.json';
 $limit = 11;
@@ -78,13 +80,25 @@ while ($running) {
             $writeHeartbeat('running', ['processed' => $processed]);
         } else {
             $writeHeartbeat('idle', ['processed' => 0]);
-            usleep($sleepMs * 1000);
+            $remainingMs = max(0, $sleepMs);
+            while ($running && $remainingMs > 0) {
+                $sliceMs = min($remainingMs, $heartbeatIntervalSeconds * 1000);
+                usleep($sliceMs * 1000);
+                $remainingMs -= $sliceMs;
+                $writeHeartbeat('idle', ['processed' => 0]);
+            }
         }
     } catch (Throwable $e) {
         sv_log_system_error($config, 'scan_service_batch_failed', ['error' => $e->getMessage()]);
         fwrite(STDERR, '[' . date('c') . '] Batch-Fehler: ' . $e->getMessage() . PHP_EOL);
         $writeHeartbeat('error', ['error' => $e->getMessage()]);
-        usleep($sleepMs * 1000);
+        $remainingMs = max(0, $sleepMs);
+            while ($running && $remainingMs > 0) {
+                $sliceMs = min($remainingMs, $heartbeatIntervalSeconds * 1000);
+                usleep($sliceMs * 1000);
+                $remainingMs -= $sliceMs;
+                $writeHeartbeat('idle', ['processed' => 0]);
+            }
     }
 }
 

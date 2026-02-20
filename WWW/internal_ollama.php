@@ -121,7 +121,7 @@ if ($action === 'status') {
     }
 
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
-    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 180);
 
     $respond(200, [
         'ok' => true,

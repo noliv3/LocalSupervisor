@@ -21,21 +21,27 @@ if (is_file($statusPath)) {
     }
 }
 
-
 $scanWorkerRunning = false;
 $scanWorkerState = 'stopped';
+$scanWorkerStatus = 'stopped';
 $logsRoot = sv_logs_root($config);
 $heartbeatPath = $logsRoot . '/scan_worker_heartbeat.json';
 $lockPath = $logsRoot . '/scan_worker.lock.json';
+$freshnessSeconds = 180;
+$lockFreshnessSeconds = 300;
 
 if (is_file($heartbeatPath)) {
     $hbRaw = file_get_contents($heartbeatPath);
     $hb = $hbRaw !== false ? json_decode($hbRaw, true) : null;
     if (is_array($hb)) {
         $ts = isset($hb['ts_utc']) ? strtotime((string)$hb['ts_utc']) : false;
-        if ($ts !== false && (time() - $ts) <= 30) {
+        if ($ts !== false && (time() - $ts) <= $freshnessSeconds) {
             $scanWorkerRunning = true;
             $scanWorkerState = (string)($hb['state'] ?? 'running');
+            $scanWorkerStatus = $scanWorkerState === 'running' ? 'busy' : 'alive';
+        } elseif ($ts !== false) {
+            $scanWorkerState = (string)($hb['state'] ?? 'stale');
+            $scanWorkerStatus = 'stale';
         }
     }
 }
@@ -44,9 +50,10 @@ if (!$scanWorkerRunning && is_file($lockPath)) {
     $lock = $lockRaw !== false ? json_decode($lockRaw, true) : null;
     if (is_array($lock)) {
         $ts = isset($lock['heartbeat_at']) ? strtotime((string)$lock['heartbeat_at']) : false;
-        if ($ts !== false && (time() - $ts) <= 30) {
+        if ($ts !== false && (time() - $ts) <= $lockFreshnessSeconds) {
             $scanWorkerRunning = true;
             $scanWorkerState = 'lock_fallback';
+            $scanWorkerStatus = 'busy';
         }
     }
 }
@@ -54,9 +61,11 @@ if (!$scanWorkerRunning && is_file($lockPath)) {
 header('Content-Type: application/json; charset=utf-8');
 http_response_code(200);
 echo json_encode([
-    'ok'      => true,
-    'ts'      => date('c'),
+    'ok' => true,
+    'ts' => date('c'),
     'version' => $version,
     'scan_worker_running' => $scanWorkerRunning,
     'scan_worker_state' => $scanWorkerState,
+    'scan_worker_status' => $scanWorkerStatus,
+    'scan_worker_freshness_seconds' => $freshnessSeconds,
 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

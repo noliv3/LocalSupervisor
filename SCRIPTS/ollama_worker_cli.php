@@ -66,12 +66,9 @@ foreach (array_slice($argv, 1) as $arg) {
     }
 }
 
-$logger = function (string $msg): void {
-    fwrite(STDOUT, $msg . PHP_EOL);
-};
 
 $workerPid = function_exists('getmypid') ? (int)getmypid() : null;
-$heartbeatIntervalSeconds = 2;
+$heartbeatIntervalSeconds = 5;
 $globalStatusIntervalSeconds = 4;
 $updateWorkerStatus = static function (bool $active, string $message, array $details = []) use ($config, $workerPid): void {
     $baseDetails = [
@@ -143,7 +140,7 @@ $lockPayload = $lock['payload'] ?? [
 $lastHeartbeat = 0;
 $updateLockHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockHandle, $config, $writeErrLog): void {
     $now = time();
-    if (!$force && ($now - $lastHeartbeat) < 10) {
+    if (!$force && ($now - $lastHeartbeat) < 5) {
         return;
     }
     $lastHeartbeat = $now;
@@ -168,6 +165,13 @@ $updateLockHeartbeat = static function (bool $force = false) use (&$lockPayload,
         throw new RuntimeException('ollama_worker_heartbeat_write_failed');
     }
     fflush($lockHandle);
+};
+
+
+$logger = static function (string $msg) use ($updateLockHeartbeat, $writeGlobalStatus): void {
+    $updateLockHeartbeat();
+    $writeGlobalStatus(false);
+    fwrite(STDOUT, $msg . PHP_EOL);
 };
 
 $batchCount = 0;
@@ -256,10 +260,19 @@ try {
 
         if ($total === 0) {
             if ($sleepMs > 0) {
-                usleep($sleepMs * 1000);
+                $remainingMs = $sleepMs;
+                while ($remainingMs > 0) {
+                    $sliceMs = min($remainingMs, $heartbeatIntervalSeconds * 1000);
+                    usleep($sliceMs * 1000);
+                    $remainingMs -= $sliceMs;
+                    $updateLockHeartbeat();
+                    $writeWorkerHeartbeat('idle', null, $lastBatchTs ?? null);
+                    $writeGlobalStatus(false, $lastBatchTs ?? null);
+                }
+            } else {
+                $writeWorkerHeartbeat('idle', null, $lastBatchTs ?? null);
+                $writeGlobalStatus(false, $lastBatchTs ?? null);
             }
-            $writeWorkerHeartbeat('idle', null, $lastBatchTs ?? null);
-            $writeGlobalStatus(false, $lastBatchTs ?? null);
             if ($emptyStreak >= $minEmptyChecks) {
                 break;
             }
