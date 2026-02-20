@@ -7409,15 +7409,31 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
     }
 
     sv_db_exec_retry(static function () use ($pdo, $status, $responseJson, $error, $now, $jobId): void {
+        $isRunning = $status === 'running';
         $stmt = $pdo->prepare(
-            'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at WHERE id = :id'
+            'UPDATE jobs SET status = :status, forge_response_json = COALESCE(:response, forge_response_json), error_message = :error, updated_at = :updated_at, heartbeat_at = CASE WHEN :is_running = 1 THEN :heartbeat_at ELSE heartbeat_at END WHERE id = :id'
         );
         $stmt->execute([
-            ':status'     => $status,
-            ':response'   => $responseJson,
-            ':error'      => $error,
+            ':status' => $status,
+            ':response' => $responseJson,
+            ':error' => $error,
             ':updated_at' => $now,
-            ':id'         => $jobId,
+            ':is_running' => $isRunning ? 1 : 0,
+            ':heartbeat_at' => $now,
+            ':id' => $jobId,
+        ]);
+    });
+}
+
+function sv_touch_job_heartbeat(PDO $pdo, int $jobId, ?string $heartbeatAt = null): void
+{
+    $heartbeatAt = $heartbeatAt ?? date('c');
+    sv_db_exec_retry(static function () use ($pdo, $jobId, $heartbeatAt): void {
+        $stmt = $pdo->prepare('UPDATE jobs SET heartbeat_at = :heartbeat_at, updated_at = :updated_at WHERE id = :id AND status = "running"');
+        $stmt->execute([
+            ':heartbeat_at' => $heartbeatAt,
+            ':updated_at' => $heartbeatAt,
+            ':id' => $jobId,
         ]);
     });
 }
@@ -7456,10 +7472,10 @@ function sv_claim_job_running(PDO $pdo, int $jobId, array $allowedStatuses, ?arr
     $placeholders = implode(',', array_fill(0, count($allowedStatuses), '?'));
     $updated = sv_db_exec_retry(static function () use ($pdo, $responseJson, $now, $jobId, $allowedStatuses, $placeholders): int {
         $stmt = $pdo->prepare(
-            'UPDATE jobs SET status = "running", forge_response_json = COALESCE(?, forge_response_json), error_message = NULL, updated_at = ?'
+            'UPDATE jobs SET status = "running", forge_response_json = COALESCE(?, forge_response_json), error_message = NULL, updated_at = ?, heartbeat_at = ?'
             . ' WHERE id = ? AND status IN (' . $placeholders . ')'
         );
-        $stmt->execute(array_merge([$responseJson, $now, $jobId], $allowedStatuses));
+        $stmt->execute(array_merge([$responseJson, $now, $now, $jobId], $allowedStatuses));
         return $stmt->rowCount();
     });
 
@@ -7520,12 +7536,12 @@ function sv_extract_job_timestamps(array $row, array $response): array
     if (is_string($heartbeatAt) && $heartbeatAt !== '') {
         $ageBase = $heartbeatAt;
         $ageSource = 'heartbeat_at';
-    } elseif (is_string($startedAt) && $startedAt !== '') {
-        $ageBase = $startedAt;
-        $ageSource = 'started_at';
     } elseif (is_string($updatedAt) && $updatedAt !== '') {
         $ageBase = $updatedAt;
         $ageSource = 'updated_at';
+    } elseif (is_string($startedAt) && $startedAt !== '') {
+        $ageBase = $startedAt;
+        $ageSource = 'started_at';
     }
 
     $ageSeconds = null;

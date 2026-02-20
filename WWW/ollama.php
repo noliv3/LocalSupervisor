@@ -97,7 +97,7 @@ if ($action === 'status') {
     $maxConcurrency = sv_ollama_max_concurrency($config);
     $running = 0;
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
-    $workerState = sv_ollama_worker_running_state($config, $currentPid, 30);
+    $workerState = sv_ollama_worker_running_state($config, $currentPid, 180);
     $lockSnapshot = $workerState['lock'] ?? null;
     $runnerLocked = !empty($lockSnapshot['active']);
 
