@@ -84,9 +84,12 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 ```
 
 - `start_workers.ps1` startet alle Worker-Services detached via `Start-Process`.
-- Pro Service werden Rolling-Logs geführt:
+- Pro Service werden Rolling-Logs geführt (Rotation mit Backups):
   - `LOGS/<service>.out.log`
   - `LOGS/<service>.err.log`
+- Bei Batch-Fehlern bleibt der Heartbeat während des Backoff-Sleeps auf `error`, damit Healthchecks den Fehlzustand klar sehen.
+- Worker-Events werden als JSONL in `LOGS/worker_events.jsonl` geschrieben (z. B. `batch_exception`).
+- `LOGS/system_errors.jsonl` bleibt als zentrales Fehlerlog erhalten, wird aber pro `(worker_type,error_code)` zeitlich gedrosselt.
 - Pro Service wird eine State-Datei geschrieben:
   - `LOGS/<service>.state.json` mit `pid`, `started_at`, `log_paths`.
 
@@ -99,6 +102,7 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
   - `workers.web_spawn_enabled = false`
   - `migrations.web_enabled = false`
 - Migrationen und Worker-Starts bleiben für CLI/Admin-Flows vorgesehen (`SCRIPTS/migrate.php`, Worker-CLI/Services).
+- Spawn-Logs für Worker sind auf feste Dateien konsolidiert (`scan_worker_spawn.out/err.log`, `forge_worker_spawn.out/err.log`) statt timestamp-basierter Einzelfiles.
 
 ## Betriebsprinzip in einem Satz
 

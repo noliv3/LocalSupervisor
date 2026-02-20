@@ -47,6 +47,18 @@ function sv_log_system_error(array $config, string $message, array $context = []
         }
     }
 
+    $workerType = isset($context['worker_type']) && is_string($context['worker_type'])
+        ? (string)$context['worker_type']
+        : sv_error_worker_type_from_code($message);
+    $errorCode = isset($context['error_code']) && is_string($context['error_code'])
+        ? (string)$context['error_code']
+        : $message;
+    $windowSeconds = 30;
+    $maxEventsPerWindow = 1;
+    if (!sv_log_rate_limiter_allow($root, $workerType, $errorCode, $windowSeconds, $maxEventsPerWindow)) {
+        return;
+    }
+
     $payload = [
         'ts' => date('c'),
         'message' => $message,
@@ -63,6 +75,88 @@ function sv_log_system_error(array $config, string $message, array $context = []
     if ($result === false) {
         error_log('[sv_log_system_error] ' . $message . ' | write_failed');
     }
+}
+
+function sv_error_worker_type_from_code(string $message): string
+{
+    if (preg_match('/^([a-z0-9]+_(?:service|worker))_/', $message, $m) === 1) {
+        return (string)$m[1];
+    }
+
+    return 'system';
+}
+
+function sv_log_rate_limiter_allow(string $logsRoot, string $workerType, string $errorCode, int $windowSeconds, int $maxEvents): bool
+{
+    $statePath = $logsRoot . DIRECTORY_SEPARATOR . 'system_errors.rate_limit.json';
+    $handle = fopen($statePath, 'c+');
+    if ($handle === false) {
+        return true;
+    }
+
+    $allowed = true;
+    if (flock($handle, LOCK_EX)) {
+        $raw = stream_get_contents($handle);
+        $state = [];
+        if (is_string($raw) && trim($raw) !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $state = $decoded;
+            }
+        }
+
+        $now = time();
+        $bucket = $workerType . '|' . $errorCode;
+        $entry = $state[$bucket] ?? ['window_start' => $now, 'count' => 0];
+        $windowStart = (int)($entry['window_start'] ?? $now);
+        $count = (int)($entry['count'] ?? 0);
+
+        if (($now - $windowStart) >= $windowSeconds) {
+            $windowStart = $now;
+            $count = 0;
+        }
+
+        if ($count >= $maxEvents) {
+            $allowed = false;
+        } else {
+            $count++;
+            $state[$bucket] = [
+                'window_start' => $windowStart,
+                'count' => $count,
+            ];
+        }
+
+        foreach ($state as $key => $value) {
+            $bucketStart = (int)($value['window_start'] ?? 0);
+            if ($bucketStart > 0 && ($now - $bucketStart) > ($windowSeconds * 4)) {
+                unset($state[$key]);
+            }
+        }
+
+        ftruncate($handle, 0);
+        rewind($handle);
+        $encoded = json_encode($state, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($encoded !== false) {
+            fwrite($handle, $encoded);
+        }
+
+        flock($handle, LOCK_UN);
+    }
+    fclose($handle);
+
+    return $allowed;
+}
+
+function sv_log_worker_event(array $config, string $workerType, string $event, string $state, array $context = []): void
+{
+    $payload = [
+        'ts' => date('c'),
+        'worker_type' => $workerType,
+        'event' => $event,
+        'state' => $state,
+        'context' => $context,
+    ];
+    sv_write_jsonl_log($config, 'worker_events.jsonl', $payload, 30);
 }
 
 function sv_rotate_channel_logs(string $dir, string $prefix, int $retention): void
@@ -89,6 +183,7 @@ function sv_rotate_logs(array $config): void
     $targets = [
         $logsRoot . DIRECTORY_SEPARATOR . 'ollama_jobs.jsonl',
         $logsRoot . DIRECTORY_SEPARATOR . 'system_errors.jsonl',
+        $logsRoot . DIRECTORY_SEPARATOR . 'worker_events.jsonl',
     ];
     $maxBytes = 10 * 1024 * 1024;
     $maxLines = 1000;

@@ -90,16 +90,17 @@ while ($running) {
             }
         }
     } catch (Throwable $e) {
-        sv_log_system_error($config, 'forge_service_batch_failed', ['error' => $e->getMessage()]);
+        sv_log_worker_event($config, $serviceName, 'batch_exception', 'error', ['error_code' => 'batch_failed', 'error' => $e->getMessage()]);
+        sv_log_system_error($config, 'forge_service_batch_failed', ['worker_type' => $serviceName, 'error_code' => 'batch_failed', 'error' => $e->getMessage()]);
         fwrite(STDERR, '[' . date('c') . '] Batch-Fehler: ' . $e->getMessage() . PHP_EOL);
         $writeHeartbeat('error', ['error' => $e->getMessage()]);
         $remainingMs = max(0, $sleepMs);
-            while ($running && $remainingMs > 0) {
-                $sliceMs = min($remainingMs, $heartbeatIntervalSeconds * 1000);
-                usleep($sliceMs * 1000);
-                $remainingMs -= $sliceMs;
-                $writeHeartbeat('idle', ['processed' => 0]);
-            }
+        while ($running && $remainingMs > 0) {
+            $sliceMs = min($remainingMs, $heartbeatIntervalSeconds * 1000);
+            usleep($sliceMs * 1000);
+            $remainingMs -= $sliceMs;
+            $writeHeartbeat('error', ['error' => $e->getMessage()]);
+        }
     }
 }
 
