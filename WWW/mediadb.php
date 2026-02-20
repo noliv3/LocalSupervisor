@@ -90,17 +90,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $logLines = [];
             $logger = sv_operation_logger(null, $logLines);
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $mediaId, $logger);
-            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $mediaId, 0);
-            $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
             $jobId   = (int)($enqueue['job_id'] ?? 0);
             $deduped = (bool)($enqueue['deduped'] ?? false);
             if ($jobId <= 0) {
                 throw new RuntimeException('Rescan-Job konnte nicht angelegt werden.');
             }
             sv_audit_log($pdo, 'rescan_start', 'media', $mediaId, [
-                'job_id'     => $jobId,
-                'worker_pid' => $worker['pid'] ?? null,
-                'deduped'    => $deduped,
+                'job_id'      => $jobId,
+                'worker_note' => 'web_spawn_disabled',
+                'deduped'     => $deduped,
             ]);
             if ($deduped) {
                 $actionMessage = 'Tag-Rescan-Job #' . $jobId . ' existiert bereits (queued/running).';

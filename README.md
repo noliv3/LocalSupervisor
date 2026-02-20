@@ -90,6 +90,16 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 - Pro Service wird eine State-Datei geschrieben:
   - `LOGS/<service>.state.json` mit `pid`, `started_at`, `log_paths`.
 
+
+## Web-Requests sind non-blocking (Phase 2)
+
+- Web-Endpunkte (`WWW/index.php`, `WWW/mediadb.php`, `WWW/media_view.php`, `WWW/ollama.php`) führen im Request-Pfad **keine Worker-Spawns** aus.
+- HTTP-Aktionen sind auf **enqueue / cancel / status-read** ausgelegt; die Abarbeitung erfolgt über bestehende CLI-Worker/Services.
+- Default-Konfiguration:
+  - `workers.web_spawn_enabled = false`
+  - `migrations.web_enabled = false`
+- Migrationen und Worker-Starts bleiben für CLI/Admin-Flows vorgesehen (`SCRIPTS/migrate.php`, Worker-CLI/Services).
+
 ## Betriebsprinzip in einem Satz
 
 Supervisor trennt **UI**, **Queue**, **Worker** und **Datenhaltung**, damit große Bestände stabil verarbeitet werden können, ohne dass ein einzelnes Modul (z. B. Ollama) das Gesamtsystem dominiert.

@@ -520,11 +520,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'rescan_job') {
             [$actionLogFile, $logger] = sv_create_operation_log($config, 'rescan_single_job', $actionLogs, 10);
             $enqueue = sv_enqueue_rescan_media_job($pdo, $config, $id, $logger);
-            $worker  = sv_spawn_scan_worker($config, null, 1, $logger, $id, 0);
-            $logger('Worker-Spawn: ' . json_encode($worker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-            if (isset($worker['log_paths']) && is_array($worker['log_paths'])) {
-                $logger('Worker-Logs: stdout=' . (string)($worker['log_paths']['stdout'] ?? 'n/a') . ', stderr=' . (string)($worker['log_paths']['stderr'] ?? 'n/a'));
-            }
             $jobId   = (int)($enqueue['job_id'] ?? 0);
             $deduped = (bool)($enqueue['deduped'] ?? false);
             $actionSuccess = $jobId > 0;
@@ -534,20 +529,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($deduped) {
                 $actionMessage = 'Rescan-Job #' . $jobId . ' existiert bereits (queued/running).';
             }
-            if (!empty($worker['pid'])) {
-                $actionMessage .= ' Worker PID: ' . (int)$worker['pid'] . '.';
-            } elseif (!empty($worker['unknown'])) {
-                $actionMessage .= ' Worker-Status unbekannt (Hintergrundstart).';
-            }
-            if (isset($worker['log_paths']) && is_array($worker['log_paths'])) {
-                $actionMessage .= ' Logs: out=' . htmlspecialchars((string)($worker['log_paths']['stdout'] ?? 'n/a'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
-                    . ', err=' . htmlspecialchars((string)($worker['log_paths']['stderr'] ?? 'n/a'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.';
-            }
             if ($actionSuccess) {
                 sv_audit_log($pdo, 'rescan_start', 'media', $id, [
-                    'job_id'     => $jobId,
-                    'worker_pid' => $worker['pid'] ?? null,
-                    'deduped'    => $deduped,
+                    'job_id'      => $jobId,
+                    'worker_note' => 'web_spawn_disabled',
+                    'deduped'     => $deduped,
                 ]);
             }
             } elseif ($action === 'checked_toggle') {

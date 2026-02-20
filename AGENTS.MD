@@ -35,6 +35,7 @@ Wichtig: **Ollama und Forge sind optionale Module**. Der Kern bleibt ein vollst√
 - Stuck-Job-Recovery vor Batches.
 - Lock + Heartbeat pro Worker.
 - Interne Endpunkte nur intern abgesichert betreiben.
+- Web-Pfad bleibt non-blocking: keine Worker-Spawns und keine Migrationen im laufenden HTTP-Request.
 
 ## 3) Verbindliche Invarianten
 
