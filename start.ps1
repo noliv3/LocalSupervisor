@@ -523,6 +523,34 @@ function Restart-PhpServer {
     return $true
 }
 
+
+function Start-WorkerServices {
+    param([string]$Reason)
+
+    $workersScript = Join-Path $base 'start_workers.ps1'
+    if (-not (Test-Path -Path $workersScript)) {
+        Write-StartLog "Worker-Start übersprungen ($Reason): start_workers.ps1 fehlt."
+        return $false
+    }
+
+    Write-StartLog "Starte Worker-Services ($Reason)."
+    $workerOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $workersScript -Action start 2>&1
+    $workerOutputText = Get-CommandOutput $workerOutput
+    if ($LASTEXITCODE -ne 0) {
+        $msg = Sanitize-Message $workerOutputText
+        if ([string]::IsNullOrWhiteSpace($msg)) {
+            $msg = 'Unbekannter Fehler.'
+        }
+        Write-StartLog "Worker-Start fehlgeschlagen: $msg"
+        return $false
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($workerOutputText)) {
+        Write-StartLog "Worker-Start Ausgabe: $(Sanitize-Message $workerOutputText)"
+    }
+    return $true
+}
+
 function Should-AutoUpdate {
     param([hashtable]$Status)
 
@@ -678,6 +706,16 @@ function Invoke-UpdateFlow {
             return $result
         }
 
+        $workersOk = Start-WorkerServices -Reason 'update'
+        if ($workersOk) {
+            $steps['workers'] = 'ok'
+        } else {
+            $steps['workers'] = 'failed'
+            $result['short_error'] = 'Worker-Start fehlgeschlagen.'
+            $result['steps'] = $steps
+            return $result
+        }
+
         $afterStatus = Update-GitStatus
         $result['after'] = [ordered]@{
             commit = $afterStatus['head']
@@ -816,6 +854,12 @@ try {
     $serverOk = Restart-PhpServer -Reason 'startup'
     if (-not $serverOk) {
         Write-StartLog 'PHP-Server konnte nicht gestartet werden.'
+        exit 1
+    }
+
+    $workersOk = Start-WorkerServices -Reason 'startup'
+    if (-not $workersOk) {
+        Write-StartLog 'Worker-Services konnten nicht gestartet werden.'
         exit 1
     }
 

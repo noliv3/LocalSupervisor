@@ -35,7 +35,7 @@ Sie bündelt **Import, Katalogisierung, Analyse, Ableitungen und Betrieb** in ei
 - Media-Worker (`media_worker_cli.php`, z. B. Integrity/Hash/Derivate)
 - Forge-Worker (`forge_worker_cli.php`)
 - Ollama-Service/Worker (`ollama_service_cli.php`, `ollama_worker_cli.php`)
-- Persistente Worker-Services (`scan_service_cli.php`, `media_service_cli.php`, `forge_service_cli.php`, `library_rename_service_cli.php`)
+- Persistente Worker-Services (`scan_service_cli.php`, `media_service_cli.php`, `forge_service_cli.php`, `library_rename_service_cli.php`, `ollama_service_cli.php`)
 - Betriebs-CLI für Jobs/DB/Konsistenz (`jobs_admin.php`, `db_status.php`, `consistency_check.php`, ...)
 
 ### 3) Daten & Konfiguration
@@ -71,8 +71,8 @@ php SCRIPTS/media_worker_cli.php --limit=50
 
 ## Persistente Worker-Services (Phase 1)
 
-- Die Services `scan_service_cli.php`, `forge_service_cli.php`, `media_service_cli.php` und `library_rename_service_cli.php`
-  laufen als dauerhafte Hintergrundprozesse.
+- Die Services `scan_service_cli.php`, `forge_service_cli.php`, `media_service_cli.php`,
+  `library_rename_service_cli.php` und `ollama_service_cli.php` laufen als dauerhafte Hintergrundprozesse.
 - Jeder Service arbeitet in kurzen Batches und geht bei `0` verarbeiteten Jobs in einen Idle-Sleep (`--sleep-ms` oder Config-Fallback).
 - Jeder Service schreibt einen eigenen Heartbeat nach `LOGS/<service>.heartbeat.json` mit minimalen Feldern (`ts`, `pid`, `state`).
 - SIGTERM/SIGINT wird sauber behandelt; der Service beendet den Loop kontrolliert.
@@ -83,7 +83,8 @@ php SCRIPTS/media_worker_cli.php --limit=50
 powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 ```
 
-- `start_workers.ps1` startet alle Worker-Services detached via `Start-Process`.
+- `start_workers.ps1` startet alle Worker-Services detached via `Start-Process` (inkl. `ollama_service`).
+- `start.ps1` startet nach erfolgreichem Web-Server-Start ebenfalls die Worker-Services über `start_workers.ps1`.
 - Pro Service werden Rolling-Logs geführt (Rotation mit Backups):
   - `LOGS/<service>.out.log`
   - `LOGS/<service>.err.log`

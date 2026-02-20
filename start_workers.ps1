@@ -75,6 +75,26 @@ function Start-WorkerService {
     $stderrLog = Join-Path $LogsDir ($Service.name + '.err.log')
     $statePath = Join-Path $LogsDir ($Service.name + '.state.json')
 
+    if (Test-Path -Path $statePath) {
+        try {
+            $stateRaw = Get-Content -Path $statePath -Raw -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrWhiteSpace($stateRaw)) {
+                $stateData = $stateRaw | ConvertFrom-Json
+                if ($null -ne $stateData -and $null -ne $stateData.pid) {
+                    $existingPid = [int]$stateData.pid
+                    if ($existingPid -gt 0) {
+                        $existingProc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+                        if ($null -ne $existingProc -and -not $existingProc.HasExited) {
+                            Write-Host "Service bereits aktiv: $($Service.name) (PID $existingPid)"
+                            return
+                        }
+                    }
+                }
+            }
+        } catch {
+        }
+    }
+
     Rotate-LogFile -Path $stdoutLog -Keep 10
     Rotate-LogFile -Path $stderrLog -Keep 10
 
@@ -115,7 +135,8 @@ $services = @(
     @{ name = 'scan_service'; script = 'SCRIPTS\scan_service_cli.php'; args = @() },
     @{ name = 'forge_service'; script = 'SCRIPTS\forge_service_cli.php'; args = @() },
     @{ name = 'media_service'; script = 'SCRIPTS\media_service_cli.php'; args = @() },
-    @{ name = 'library_rename_service'; script = 'SCRIPTS\library_rename_service_cli.php'; args = @() }
+    @{ name = 'library_rename_service'; script = 'SCRIPTS\library_rename_service_cli.php'; args = @() },
+    @{ name = 'ollama_service'; script = 'SCRIPTS\ollama_service_cli.php'; args = @() }
 )
 
 foreach ($svc in $services) {
