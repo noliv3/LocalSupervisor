@@ -115,6 +115,39 @@ Supervisor trennt **UI**, **Queue**, **Worker** und **Datenhaltung**, damit gro�
 - Schemaänderungen nur über Migrationen.
 - Worker arbeiten mit Locking, Heartbeat und Recovery für hängende Jobs.
 
+## Harte Voraussetzungen & bekannte Stopper
+
+Die folgenden Punkte sind **harte Betriebsbedingungen**. Wenn einer davon nicht erfüllt ist,
+kommt es zu sofortigen Fehlern oder zu einem nicht funktionsfähigen Teilsystem.
+
+1. **CLI-Skripte nur per CLI starten**
+   - Skripte in `SCRIPTS/` (z. B. `selftest_cli.php`) sind für `PHP_SAPI === 'cli'` ausgelegt.
+   - Ein Aufruf über den Browser (HTTP/Web-SAPI) führt bewusst zu einem sofortigen Abbruch.
+
+2. **Beispielkonfiguration reicht nicht für den Betrieb**
+   - Nach der Installation muss mindestens `CONFIG/config.example.php` in `CONFIG/config.php` übernommen und angepasst werden.
+   - Ohne produktive Konfigurationsdateien bleibt das System nicht betriebsfähig.
+
+3. **Systemabhängigkeiten für Medienverarbeitung müssen installiert sein**
+   - Das Doctor-Setup (`src/setup/doctor.js`) meldet fehlende Tools wie `ffmpeg`, `ffprobe` oder `magick` als kritisch.
+   - Ohne diese Programme funktionieren zentrale Medien- und Thumbnail-Prozesse nicht vollständig.
+
+4. **Pfadkonfiguration muss auf existierende, beschreibbare Verzeichnisse zeigen**
+   - `LIBRARY_PATH` und `THUMB_PATH` müssen vorhanden und für den Prozessbenutzer schreibbar sein.
+   - Ungültige oder nicht beschreibbare Zielpfade stoppen den Betrieb.
+
+5. **Datenbankstruktur muss initialisiert und konsistent sein**
+   - `init_db.php` und `migrate.php` sind Pflichtschritte vor produktivem Betrieb.
+   - Bei fehlendem/inkonsistentem Schema schlagen DB-Operationen fehl (u. a. sichtbar in `selftest_cli.php` als `FAILED`).
+
+6. **Ollama nur mit laufendem Dienst und verfügbaren Modellen**
+   - Ollama-Funktionen (Analyse, Tagging, Vision-Workflows) benötigen einen erreichbaren lokalen Ollama-Service.
+   - Zusätzlich müssen die benötigten Modelle tatsächlich vorhanden/geladen sein.
+
+7. **Schreibrechte auf Log- und DB-Pfade sind zwingend**
+   - Ohne Schreibrechte auf `LOG_PATH` oder das DB-Verzeichnis (z. B. SQLite-Datei) sind Logging und Persistenz nicht möglich.
+   - Das führt zu Betriebsfehlern trotz ansonsten korrekter Konfiguration.
+
 ## Für wen ist Supervisor gedacht?
 
 - Lokale Medienarchive und Content-Pipelines.
