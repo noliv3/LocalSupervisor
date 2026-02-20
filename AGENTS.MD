@@ -14,6 +14,13 @@ Supervisor ist ein lokales System zum Verwalten großer Medienbibliotheken (Bild
 - Kurzes Feedback, keine kompletten Dateien im Chat.
 - Keine Tests ausführen.
 
+## Funktionscheck – Fokus Worker-Stabilität
+- Job-Übergabe läuft zentral über `jobs` und atomare Statuswechsel (`queued/pending` → `running`) pro Worker.
+- Vor Batch-Start müssen stuck `running`-Jobs je Worker-Typ bereinigt/markiert werden (`sv_recover_stuck_jobs` bzw. `sv_mark_stuck_jobs`).
+- Jeder Worker nutzt eigenes Lock + Heartbeat; stale/beschädigte Locks werden quarantänisiert/entfernt, um Doppelstarts zu verhindern.
+- Scan-Priorität bleibt: `scan_backfill_tags` → `rescan_media` → `scan_path`.
+- Ollama startet nur nach Preflight + Healthcheck; bei Ausfall werden Jobs kontrolliert blockiert statt instabil verarbeitet.
+
 ## Modul-Karte
 
 ### Scan/Scanner
