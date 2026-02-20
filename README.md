@@ -47,6 +47,19 @@ Supervisor ist ein lokales System zum Erfassen, Verwalten und Auswerten großer 
 
 ## Workflows
 
+### Funktionscheck: Worker-Übergabe & stabile Ausführung
+- **Einheitliches Claiming:** Alle Queue-Worker ziehen Jobs aus `jobs` und setzen den Status atomar auf `running` (entweder über `sv_claim_job_running` oder via Ollama-Claim-Funktion), damit keine Doppelverarbeitung entsteht.
+- **Stuck-Recovery vor jeder Batch:** Scan-, Forge-, Media-, Library-Rename- und Ollama-Worker markieren/überführen alte `running`-Jobs über `sv_recover_stuck_jobs` bzw. `sv_mark_stuck_jobs` in einen definierten Fehlerzustand.
+- **Lock + Heartbeat pro Worker:** Jeder Worker schreibt ein eigenes Lockfile inkl. `heartbeat_at` und quarantänisiert stale/beschädigte Locks; dadurch werden Parallelstarts abgefangen und Crash-Reste bereinigt.
+- **Abarbeitungsreihenfolge Scan:** Scan-Batches laufen priorisiert in der Reihenfolge `scan_backfill_tags` → `rescan_media` → `scan_path`, damit Metadaten-/Rescan-Korrekturen zuerst stabilisiert werden.
+- **Ollama-Preflight & Health-Gate:** Vor Verarbeitung prüft Ollama Prompt-/Runtime-Voraussetzungen und Health; bei Down-Status werden Jobs als `blocked_by_ollama` markiert statt unkontrolliert fehlzuschlagen.
+- **Definierte Übergabe je Worker:**
+  - `scan_path_cli.php` enqueued `scan_path`-Jobs, `scan_worker_cli.php` übernimmt und schreibt nach `media`, `scan_results`, `import_log`.
+  - Forge-Enqueue aus UI/CLI schreibt `forge_*`-Jobs, `forge_worker_cli.php` verarbeitet und persistiert Request/Response + Audit.
+  - Media-Additivjobs (`integrity_check`, `hash_compute`, `upscale`) werden von `media_worker_cli.php` übernommen und in `media_meta`/Derivaten hinterlegt.
+  - Rename-Queue (`library_rename`) wird von `library_rename_worker_cli.php` transaktional (Datei + DB + Meta) abgearbeitet.
+  - `ollama_enqueue_cli.php` erzeugt Stage-Jobs, `ollama_service_cli.php` startet den Loop und `ollama_worker_cli.php` verarbeitet in Child-Prozessen mit Timeout/Kill-Pfaden.
+
 ### Import/Scan eines Ordners
 - Ordner in den Library-Pfaden vorbereiten (CONFIG → `paths`).
 - Scan-Job anlegen:
