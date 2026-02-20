@@ -57,6 +57,7 @@ Wichtig: **Ollama und Forge sind optionale Module**. Der Kern bleibt ein vollst�
 - Worker-Recovery weiter vereinheitlichen.
 - Lock-/Heartbeat-Transparenz im Monitoring verbessern.
 - Fehlercodes zwischen Modulen konsistent halten.
+- Persistente Worker-Services (Scan/Media/Forge/Library-Rename) als getrennte Hintergrundprozesse ausbauen.
 
 ### Produkt & UX
 - UI-Übersichten für Queue- und Modulstatus vereinfachen.
