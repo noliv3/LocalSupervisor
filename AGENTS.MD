@@ -85,8 +85,10 @@ Keine Dokumentation darf den Eindruck erwecken, das Projekt bestünde nur aus ei
 
 - CLI-Skripte aus `SCRIPTS/` sind ausschließlich für `PHP_SAPI === "cli"` gedacht; Browser/Web-SAPI-Aufrufe brechen absichtlich sofort ab.
 - Nach Installation müssen Beispielkonfigurationen (mind. `CONFIG/config.example.php`) als produktive Dateien (`CONFIG/config.php`) vorhanden und angepasst sein.
-- Fehlende Systemtools (`ffmpeg`, `ffprobe`, `magick`) sind kritische Blocker für Medienverarbeitung/Thumbnails (siehe Doctor).
+- Fehlende Systemtools (`ffmpeg`, `ffprobe`, `magick`) sind kritische Blocker für Medienverarbeitung/Thumbnails (siehe Doctor); bei fehlendem `ffmpeg`/`ffprobe` endet Doctor mit Exit-Code `20`.
+- Fehlende PHP-GD-Erweiterung (`imagecreatetruecolor`) ist ein harter Blocker für `selftest_cli.php` (`GD nicht verfügbar`).
+- Fehlende Vidax-Konfigurationen oder Asset-Manifests sind kritische Doctor-Fehler und führen ebenfalls zu Exit-Code `20`.
 - Konfigurationspfade wie `LIBRARY_PATH` und `THUMB_PATH` müssen existieren und schreibbar sein.
 - DB-Initialisierung/Migration ist Pflicht; inkonsistente oder nicht initialisierte Schemata führen zu Fehlbetrieb.
-- Ollama-Funktionen benötigen erreichbaren lokalen Dienst plus geladene, passende Modelle (z. B. Vision/Llava).
+- Ollama-Funktionen benötigen erreichbaren lokalen Dienst plus geladene, passende Modelle (z. B. `llava`, `llama3`, `nomic-embed-text`).
 - Schreibrechte auf `LOG_PATH` und DB-Verzeichnis (insb. SQLite) sind zwingend für Logging/Persistenz.
