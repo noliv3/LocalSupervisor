@@ -1,102 +1,80 @@
-# AGENTS – Supervisor (Repo: LocalSupervisor)
+# AGENTS – Supervisor (LocalSupervisor)
 
-Supervisor ist ein lokales System zum Verwalten großer Medienbibliotheken (Bilder/Videos). Es kombiniert eine Medien-DB, Scanner-Import, Job-Queue/Worker und eine Web-UI für Listing/Detailansichten. Das Repository heißt „LocalSupervisor“, der Produktname ist „Supervisor“. Ollama und Forge sind optionale Module innerhalb des Systems.
+Dieses Dokument erklärt, **wie Supervisor als Gesamtsystem genutzt wird** und welche **Entwicklungs- und Betriebspläne** gelten.
 
-## Invarianten (verbindlich)
-- Schemaänderungen nur über Migrationen; Schema-Checks in `SCRIPTS/db_helpers.php` mitpflegen.
-- README/AGENTS dürfen nie auf ein einzelnes Modul reduziert werden (Ollama ist nur ein Teilmodul).
-- Keine Secrets/Keys oder Base64-Medien in Logs oder DB schreiben.
-- Interne Web-Endpoints nur mit `internal_api_key` und Loopback/Whitelist absichern.
-- Jede Feature-Änderung erfordert ein README-Update im selben Change.
+## 1) Systembild (Portfolio statt Einzelmodul)
 
-## Arbeitsstil
-- Kleine Changesets.
-- Kurzes Feedback, keine kompletten Dateien im Chat.
-- Keine Tests ausführen.
+Supervisor ist eine lokale Medienplattform mit folgenden Bausteinen:
 
-## Funktionscheck – Fokus Worker-Stabilität
-- Job-Übergabe läuft zentral über `jobs` und atomare Statuswechsel (`queued/pending` → `running`) pro Worker.
-- Vor Batch-Start müssen stuck `running`-Jobs je Worker-Typ bereinigt/markiert werden (`sv_recover_stuck_jobs` bzw. `sv_mark_stuck_jobs`).
-- Jeder Worker nutzt eigenes Lock + Heartbeat; stale/beschädigte Locks werden quarantänisiert/entfernt, um Doppelstarts zu verhindern.
-- Scan-Priorität bleibt: `scan_backfill_tags` → `rescan_media` → `scan_path`.
-- Ollama startet nur nach Preflight + Healthcheck; bei Ausfall werden Jobs kontrolliert blockiert statt instabil verarbeitet.
+- **Web-UI** (Sichtung, Detail, Betrieb)
+- **Zentrale Job-Queue** (planbare Hintergrundverarbeitung)
+- **Worker-Module** (Scan, Media, Forge, Ollama)
+- **Datenbank + Migrationen** (konsistente Datenhaltung)
+- **Betriebs-/Admin-Skripte** (Diagnose, Cleanup, Konsistenz)
 
-## Modul-Karte
+Wichtig: **Ollama und Forge sind optionale Module**. Der Kern bleibt ein vollständiges Medien- und Job-System.
 
-### Scan/Scanner
-- Scanner-Import läuft über `scan_path_cli.php` → `scan_worker_cli.php`.
-- Ergebnisse landen in `scan_results`, Medien in `media`.
-- Pfad-Grenzen kommen aus `CONFIG/config.php` (`paths`).
-- Import-Logs schreiben nach `import_log`.
+## 2) Wie Supervisor genutzt wird
 
-### Jobs/Worker
-- Zentrale Queue ist `jobs` (Status, Fortschritt, Fehlercodes).
-- Worker pro Modul: Scan, Forge, Ollama.
-- Verwaltung über `jobs_admin.php` und `jobs_prune.php`.
-- Queue-Limits kommen aus `config.php` (`jobs`).
+### Betriebsablauf (empfohlen)
+1. Konfiguration anlegen und Pfade prüfen (`CONFIG/config.php`).
+2. DB initialisieren/migrieren (`init_db.php`, `migrate.php`).
+3. Web-UI starten (`WWW/`).
+4. Jobs über CLI/UI einreihen.
+5. Worker modular starten (Scan/Media/Forge/Ollama je nach Bedarf).
+6. Health, Logs und Queue-Zustände regelmäßig prüfen.
 
-### Web UI
-- `mediadb.php` (Listing/Filter), `media_view.php` (Detail).
-- `dashboard_ollama.php` ist loopback-intern.
-- `internal_ollama.php` ist interner API-Endpunkt.
-- Healthcheck über `health.php`.
+### Modulnutzung in der Praxis
+- **Scan**: Dateien erfassen und in den Katalog überführen.
+- **Media**: Integritäts-, Hash- und Derivat-Jobs ausführen.
+- **Forge**: Rezeptbasierte Verarbeitung orchestrieren.
+- **Ollama**: Metadatenanreicherung über Stages (Caption bis Dupe-Hints/Embeddings/NSFW).
 
-### Forge
-- Forge-Jobs erzeugen `jobs`-Einträge (Typen `forge_*`).
-- Rezepte kommen aus `SCRIPTS/forge_recipes.php` bzw. `CONFIG/forge_recipes.json`.
-- Worker läuft über `forge_worker_cli.php`.
-- Ergebnisse und Audit in `forge_request_json`/`forge_response_json` + `audit_log`.
+### Leitprinzipien im Betrieb
+- Queue-Claiming atomar, keine Doppelverarbeitung.
+- Stuck-Job-Recovery vor Batches.
+- Lock + Heartbeat pro Worker.
+- Interne Endpunkte nur intern abgesichert betreiben.
 
-### Ollama Pipeline
-- Prompt-Templates liegen in `PROMPTS/ollama/*.txt`.
-- Verarbeitung läuft über `ollama_enqueue_cli.php` + `ollama_service_cli.php`.
-- Ergebnisse in `ollama_results` und `media_meta`.
+## 3) Verbindliche Invarianten
 
-#### Stages + media_meta-Keys
-**Stage 1 – Caption/Title**
-- `ollama.caption`, `ollama.caption.meta`
-- `ollama.title`, `ollama.title.meta`
+- Schemaänderungen nur über Migrationen; DB-Helfer synchron halten.
+- README/AGENTS immer systemweit formulieren, nicht auf ein Teilmodul verengen.
+- Keine Secrets/Keys/Base64-Mediendaten in Logs oder DB.
+- Interne APIs nur mit `internal_api_key` + Loopback/Whitelist.
+- Jede Feature-Änderung braucht ein README-Update im selben Change.
 
-**Stage 2 – Prompt Eval**
-- `ollama.prompt_eval.score`, `ollama.prompt_eval.meta`
+## 4) Dokumentationsstil (für Agenten)
 
-**Stage 3 – Tags Normalize**
-- `ollama.tags_raw`, `ollama.tags_normalized`, `ollama.tags_map`, `ollama.tags_normalize.meta`
+- Änderungen klein und nachvollziehbar halten.
+- README und AGENTS bei inhaltlichen Änderungen immer mitdenken.
+- Keine Tests ausführen, sofern nichts anderes angeordnet ist.
+- Keine großflächigen Umbauten ohne klaren Phasenplan.
 
-**Stage 4 – Quality/Domain**
-- `ollama.quality.score`, `ollama.quality.flags`
-- `ollama.domain.type`, `ollama.domain.confidence`
-- `ollama.quality.meta`
+## 5) Kurzfristiger Plan (Roadmap)
 
-**Stage 4b – NSFW Classify**
-- `ollama.nsfw.score`, `ollama.nsfw.flags`, `ollama.nsfw.category`
-- `ollama.nsfw.meta`
+### Stabilität & Betrieb
+- Worker-Recovery weiter vereinheitlichen.
+- Lock-/Heartbeat-Transparenz im Monitoring verbessern.
+- Fehlercodes zwischen Modulen konsistent halten.
 
-**Stage 5 – Prompt Recon**
-- `ollama.prompt_recon.prompt`, `ollama.prompt_recon.negative`
-- `ollama.prompt_recon.confidence`, `ollama.prompt_recon.style_tokens`, `ollama.prompt_recon.subject_tokens`
-- `ollama.prompt_recon.meta`
+### Produkt & UX
+- UI-Übersichten für Queue- und Modulstatus vereinfachen.
+- Dokumentation für typische Betriebsmodi (nur Scan, Scan+Forge, Vollbetrieb) schärfen.
 
-**Stage 6 – Embeddings**
-- `ollama.embed.text.model`, `ollama.embed.text.dims`, `ollama.embed.text.hash`, `ollama.embed.text.vector_id`
-- `ollama.embed.meta`
+### Daten & Qualität
+- Konsistenzprüfungen weiter ausbauen.
+- Auditierbarkeit von Jobketten verbessern.
+- Metadatenfelder modular versionierbar halten.
 
-**Stage 7 – Dupe Hints**
-- `ollama.dupe_hints.top`, `ollama.dupe_hints.threshold`, `ollama.dupe_hints.meta`
+## 6) Mittelfristiger Plan
 
-**Global (alle Stages)**
-- `ollama.last_run_at`, `ollama.stage_version`
+- Bessere Presets für unterschiedliche Größenordnungen (klein/mittel/groß).
+- Einheitliche Betriebsprofile für lokale Einzelinstanzen vs. Team-Setups.
+- Klarere Trennung von optionalen Integrationen und Kernfunktionen in UI/Docs.
 
-### DB/Consistency/Audit
-- Zentrales Schema: `DB/schema.sql` + Migrationen.
-- Konsistenzprüfungen: `consistency_check.php`, Logs in `consistency_log`.
-- Audit-Events in `audit_log`.
+## 7) Scope-Hinweis
 
-## Verboten
-- Keine großflächigen Umbauten ohne explizite Phase.
-- Keine Entfernung bestehender Tools/Runner ohne Ersatz.
-
-
-## Laufzeit-Hinweise (aktuell)
-- PixAI-Scanner erwartet für `/check` und `/batch` primär `Authorization: <scanner.token>` (ohne Bearer-Präfix). `scanner.api_key` + `scanner.api_key_header` ist nur ein optionaler Alternativmodus.
-- WWW-Routen laufen im `SV_WEB_CONTEXT`: DB-Zugriffe sind fail-fast (`sv_open_pdo_web`, keine Retry-Sleeps bei `SQLITE_BUSY/LOCKED`) und OS-Prozess-Probes (`tasklist`/`ps`) sind im Web-Kontext untersagt.
+Supervisor ist als **vollständiges Portfolio** zu kommunizieren:
+Medienverwaltung, Queueing, Worker-Orchestrierung, Web-Betrieb, Datenqualität und optionale KI/Forge-Integrationen.
+Keine Dokumentation darf den Eindruck erwecken, das Projekt bestünde nur aus einem Einzelmodul.
