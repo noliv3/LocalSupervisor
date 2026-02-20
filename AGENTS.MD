@@ -80,3 +80,13 @@ Wichtig: **Ollama und Forge sind optionale Module**. Der Kern bleibt ein vollst�
 Supervisor ist als **vollständiges Portfolio** zu kommunizieren:
 Medienverwaltung, Queueing, Worker-Orchestrierung, Web-Betrieb, Datenqualität und optionale KI/Forge-Integrationen.
 Keine Dokumentation darf den Eindruck erwecken, das Projekt bestünde nur aus einem Einzelmodul.
+
+## 8) Harte Betriebsbedingungen (nicht optional)
+
+- CLI-Skripte aus `SCRIPTS/` sind ausschließlich für `PHP_SAPI === "cli"` gedacht; Browser/Web-SAPI-Aufrufe brechen absichtlich sofort ab.
+- Nach Installation müssen Beispielkonfigurationen (mind. `CONFIG/config.example.php`) als produktive Dateien (`CONFIG/config.php`) vorhanden und angepasst sein.
+- Fehlende Systemtools (`ffmpeg`, `ffprobe`, `magick`) sind kritische Blocker für Medienverarbeitung/Thumbnails (siehe Doctor).
+- Konfigurationspfade wie `LIBRARY_PATH` und `THUMB_PATH` müssen existieren und schreibbar sein.
+- DB-Initialisierung/Migration ist Pflicht; inkonsistente oder nicht initialisierte Schemata führen zu Fehlbetrieb.
+- Ollama-Funktionen benötigen erreichbaren lokalen Dienst plus geladene, passende Modelle (z. B. Vision/Llava).
+- Schreibrechte auf `LOG_PATH` und DB-Verzeichnis (insb. SQLite) sind zwingend für Logging/Persistenz.
