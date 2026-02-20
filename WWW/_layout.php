@@ -1,6 +1,10 @@
 <?php
 declare(strict_types=1);
 
+if (!defined('SV_WEB_CONTEXT')) {
+    define('SV_WEB_CONTEXT', true);
+}
+
 function sv_ui_header(string $title, string $activeNav, ?string $headerActionsHtml = null): void
 {
     $safeTitle = htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');

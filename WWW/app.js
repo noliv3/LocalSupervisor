@@ -1117,7 +1117,12 @@
             const delay = Math.max(1000, Math.floor(nextMs));
             pollTimer = window.setTimeout(() => {
                 pollStatus()
-                    .then(() => pollJobs())
+                    .then((statusResult) => {
+                        if (statusResult && statusResult.busy) {
+                            return null;
+                        }
+                        return pollJobs();
+                    })
                     .finally(() => {
                         const dynamicInterval = computePollIntervalMs();
                         const backoff = Math.min(60000, dynamicInterval * Math.max(1, Math.pow(2, pollFailures)));
@@ -1407,16 +1412,18 @@
                         if (autoRunEnabled) {
                             triggerAutoRun();
                         }
-                        return;
+                        return { busy: false };
                     }
                     if (data && data.status === 'busy') {
                         pollFailures = Math.max(1, pollFailures + 1);
-                        return;
+                        return { busy: true };
                     }
                     pollFailures++;
+                    return { busy: false };
                 })
                 .catch(() => {
                     pollFailures++;
+                    return { busy: false };
                 });
         }
 
@@ -1652,9 +1659,14 @@
             });
         }
 
-        pollStatus();
-        pollJobs();
-        schedulePoll(computePollIntervalMs());
+        pollStatus().then((statusResult) => {
+            if (statusResult && statusResult.busy) {
+                return null;
+            }
+            return pollJobs();
+        }).finally(() => {
+            schedulePoll(computePollIntervalMs());
+        });
     }
 
     function initOllamaMediaAnalyze() {

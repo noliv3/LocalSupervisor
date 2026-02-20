@@ -1,6 +1,10 @@
 <?php
 declare(strict_types=1);
 
+if (!defined('SV_WEB_CONTEXT')) {
+    define('SV_WEB_CONTEXT', true);
+}
+
 require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
@@ -26,7 +30,7 @@ try {
             'reason_code' => $access['reason_code'] ?? 'forbidden',
         ]);
     }
-    $pdo = sv_open_pdo($config);
+    $pdo = sv_open_pdo_web($config);
 } catch (Throwable $e) {
     $respond(500, ['ok' => false, 'error' => $e->getMessage()]);
 }
