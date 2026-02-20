@@ -131,22 +131,31 @@ kommt es zu sofortigen Fehlern oder zu einem nicht funktionsfähigen Teilsystem.
 3. **Systemabhängigkeiten für Medienverarbeitung müssen installiert sein**
    - Das Doctor-Setup (`src/setup/doctor.js`) meldet fehlende Tools wie `ffmpeg`, `ffprobe` oder `magick` als kritisch.
    - Ohne diese Programme funktionieren zentrale Medien- und Thumbnail-Prozesse nicht vollständig.
+   - Fehlen `ffmpeg` oder `ffprobe`, endet der Doctor-Lauf mit Exit-Code `20`.
 
-4. **Pfadkonfiguration muss auf existierende, beschreibbare Verzeichnisse zeigen**
+4. **PHP-GD ist für den Selbsttest verpflichtend**
+   - Der Selbsttest verwendet Bildoperationen (`imagecreatetruecolor`) zur Verifikation.
+   - Ist die GD-Erweiterung nicht geladen, bricht `selftest_cli.php` sofort mit `GD nicht verfügbar` ab.
+
+5. **Vidax-Konfiguration und Asset-Manifests müssen vorhanden sein**
+   - Fehlende Vidax-Config (`config/vidax*.json`) oder fehlende Asset-Manifests werden vom Doctor als kritischer Fehler gewertet.
+   - Auch in diesem Fall endet der Doctor-Lauf mit Exit-Code `20`.
+
+6. **Pfadkonfiguration muss auf existierende, beschreibbare Verzeichnisse zeigen**
    - `LIBRARY_PATH` und `THUMB_PATH` müssen vorhanden und für den Prozessbenutzer schreibbar sein.
-   - Ungültige oder nicht beschreibbare Zielpfade stoppen den Betrieb.
+   - Zusätzlich müssen `LOG_PATH` und das DB-Verzeichnis beschreibbar sein; sonst schlagen Logging, Persistenz und Importe fehl.
 
-5. **Datenbankstruktur muss initialisiert und konsistent sein**
+7. **Datenbankstruktur muss initialisiert und konsistent sein**
    - `init_db.php` und `migrate.php` sind Pflichtschritte vor produktivem Betrieb.
    - Bei fehlendem/inkonsistentem Schema schlagen DB-Operationen fehl (u. a. sichtbar in `selftest_cli.php` als `FAILED`).
 
-6. **Ollama nur mit laufendem Dienst und verfügbaren Modellen**
+8. **Ollama nur mit laufendem Dienst und verfügbaren Modellen**
    - Ollama-Funktionen (Analyse, Tagging, Vision-Workflows) benötigen einen erreichbaren lokalen Ollama-Service.
-   - Zusätzlich müssen die benötigten Modelle tatsächlich vorhanden/geladen sein.
+   - Zusätzlich müssen die benötigten Modelle tatsächlich vorhanden/geladen sein (z. B. `llava`, `llama3`, `nomic-embed-text`).
 
-7. **Schreibrechte auf Log- und DB-Pfade sind zwingend**
-   - Ohne Schreibrechte auf `LOG_PATH` oder das DB-Verzeichnis (z. B. SQLite-Datei) sind Logging und Persistenz nicht möglich.
-   - Das führt zu Betriebsfehlern trotz ansonsten korrekter Konfiguration.
+9. **Web-Pfad bleibt non-blocking für Worker und Migrationen**
+   - Worker-Starts und Migrationen werden im HTTP-Request-Pfad nicht ausgeführt.
+   - Direkte Web-Aktionen für diese Schritte sind standardmäßig deaktiviert und als CLI/Admin-Flow vorgesehen.
 
 ## Für wen ist Supervisor gedacht?
 
