@@ -75,8 +75,8 @@ function Start-WorkerService {
     $stderrLog = Join-Path $LogsDir ($Service.name + '.err.log')
     $statePath = Join-Path $LogsDir ($Service.name + '.state.json')
 
-    Rotate-LogFile -Path $stdoutLog -Keep 5
-    Rotate-LogFile -Path $stderrLog -Keep 5
+    Rotate-LogFile -Path $stdoutLog -Keep 10
+    Rotate-LogFile -Path $stderrLog -Keep 10
 
     $args = @()
     if ($phpArgs.Count -gt 0) {
