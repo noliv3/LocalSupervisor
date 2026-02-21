@@ -1840,7 +1840,7 @@ $adultToggleHtml = '<div class="header-toggle">'
                         <?php if ($canOllamaActions): ?>
                             <button class="btn btn--primary btn--sm" type="button"
                                     data-ollama-analyze
-                                    data-endpoint="ollama.php"
+                                    data-endpoint="internal_ollama.php"
                                     data-media-id="<?= (int)$id ?>"
                                     data-run-batch="2"
                                     data-run-seconds="10">Analyze this Media</button>

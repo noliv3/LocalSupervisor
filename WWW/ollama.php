@@ -491,13 +491,13 @@ if ($action === 'run') {
     $pendingJobs = max(0, (int)($runtimeStatus['queue_pending'] ?? 0));
 
     $respond(200, [
-        'ok' => true,
-        'status' => 'queued',
-        'reason_code' => $webSpawnEnabled ? 'disabled_in_web_path' : 'web_spawn_disabled',
+        'ok' => false,
+        'status' => 'blocked',
+        'reason_code' => 'disabled_in_web_path',
         'autostart_requested' => true,
         'pending_jobs' => $pendingJobs,
         'batch' => $batch,
-        'message' => 'Autostart angefordert. Worker-Start erfolgt nicht im Web-Pfad.',
+        'message' => 'Direkter Worker-Start ist im öffentlichen Web-Endpoint deaktiviert.',
         'spawned' => false,
         'source' => 'web_run',
     ]);

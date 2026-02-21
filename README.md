@@ -98,6 +98,9 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 ## Web-Requests sind non-blocking (Phase 2)
 
 - Web-Endpunkte (`WWW/index.php`, `WWW/mediadb.php`, `WWW/media_view.php`, `WWW/ollama.php`) führen im Request-Pfad **keine Worker-Spawns** aus.
+- Öffentlicher Ollama-Endpoint (`WWW/ollama.php`, `action=run`) antwortet explizit mit `status=blocked` und `reason_code=disabled_in_web_path` statt Start-Success.
+- Lokale Admin-Flows (Dashboard + Media-Analyze) nutzen `WWW/internal_ollama.php`; dort ist `action=run` als Alias zu `run_once` aktiv und startet non-blocking mit Spawn-Statusfeldern (`status`, `reason_code`, `spawned`, `pid`, `runner_locked`).
+- Migrationen im HTTP-Request-Pfad von `internal_ollama.php` laufen nur bei explizitem `run_migrations=1` und erlaubter Config (`migrations.internal_web_enabled=true`), sonst klarer Block mit `reason_code=migrations_disabled_in_http_path`.
 - HTTP-Aktionen sind auf **enqueue / cancel / status-read** ausgelegt; die Abarbeitung erfolgt über bestehende CLI-Worker/Services.
 - Default-Konfiguration:
   - `workers.web_spawn_enabled = false`

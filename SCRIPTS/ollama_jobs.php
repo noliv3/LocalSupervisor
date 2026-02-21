@@ -437,7 +437,7 @@ function sv_ollama_spawn_worker(
     $writeSpawnLast($spawnLastPayload);
 
     return [
-        'ok' => $verified,
+        'ok' => $spawned,
         'status' => $finalStatus,
         'reason_code' => $finalReasonCode,
         'pid' => $pid,
