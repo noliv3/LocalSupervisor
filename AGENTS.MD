@@ -92,3 +92,11 @@ Keine Dokumentation darf den Eindruck erwecken, das Projekt bestünde nur aus ei
 - DB-Initialisierung/Migration ist Pflicht; inkonsistente oder nicht initialisierte Schemata führen zu Fehlbetrieb.
 - Ollama-Funktionen benötigen erreichbaren lokalen Dienst plus geladene, passende Modelle (z. B. `llava`, `llama3`, `nomic-embed-text`).
 - Schreibrechte auf `LOG_PATH` und DB-Verzeichnis (insb. SQLite) sind zwingend für Logging/Persistenz.
+
+## 9) Dashboard-Loganalyse (V1)
+
+- Dashboard enthält eine Incident-orientierte Loganalyse (Top-10 priorisiert) statt Rohloganzeige.
+- API dafür: `WWW/api/logs/incidents.php` mit internem Zugriffsschutz.
+- Analyse läuft batch-orientiert pro Tag, ohne LLM-Aufrufe im Request-Path.
+- Heuristik: Jobs ohne valides Ergebnis gelten als `completed_no_result` und nicht als success.
+- Rohlogs bleiben unverändert erhalten; UI nutzt nur aggregierte Gruppen + Beispielzeilen.

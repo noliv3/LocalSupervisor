@@ -105,6 +105,17 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 - Migrationen und Worker-Starts bleiben für CLI/Admin-Flows vorgesehen (`SCRIPTS/migrate.php`, Worker-CLI/Services).
 - Spawn-Logs für Worker sind auf feste Dateien konsolidiert (`scan_worker_spawn.out/err.log`, `forge_worker_spawn.out/err.log`) statt timestamp-basierter Einzelfiles.
 
+
+## Dashboard-Loganalyse (V1)
+
+- Neues Dashboard-Modul **„Log-Analyse (Top 10)“** auf `WWW/index.php` mit Tagesfilter.
+- Aggregiert Fehler aus Logquellen (u. a. `*.jsonl`, `*.log`, `*.out.log`, `*.err.log`) zu Incident-Gruppen statt Rohlog-Spam.
+- Priorisierte Top-10-Liste mit Severity, Impact, Statusmix und Beispielzeile.
+- Readonly **GPT-Textbox** mit Copy-Button für kompakten Tagesreport.
+- API-Endpunkt: `GET /api/logs/incidents.php?date=YYYY-MM-DD` (interner Zugriffsschutz wie Dashboard).
+- Im Request-Path werden **keine LLM-Aufrufe** ausgeführt.
+- Jobs ohne valides Ergebnis werden in der V1-Heuristik als `completed_no_result` gewertet und nicht als success gezählt.
+
 ## Betriebsprinzip in einem Satz
 
 Supervisor trennt **UI**, **Queue**, **Worker** und **Datenhaltung**, damit große Bestände stabil verarbeitet werden können, ohne dass ein einzelnes Modul (z. B. Ollama) das Gesamtsystem dominiert.
