@@ -41,6 +41,10 @@ function sv_log_incidents_analyze_day(array $config, string $date, array $option
                 $stats['lines_skipped']++;
                 continue;
             }
+            if (!sv_log_incidents_event_matches_day((string)($event['ts'] ?? ''), $day)) {
+                $stats['lines_skipped']++;
+                continue;
+            }
 
             $normalized = sv_log_incidents_normalize_event($event);
             if ($normalized === null) {
@@ -235,6 +239,16 @@ function sv_log_incidents_parse_line(string $line, string $sourceFile, int $line
         'source_file' => $sourceBase,
         'line_no' => $lineNo,
     ];
+}
+
+
+function sv_log_incidents_event_matches_day(string $ts, string $day): bool
+{
+    if ($ts === '' || $day === '') {
+        return false;
+    }
+
+    return str_starts_with($ts, $day . 'T');
 }
 
 function sv_log_incidents_iso_utc(string $value): ?string
