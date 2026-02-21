@@ -1536,7 +1536,10 @@
                         } else if (data.status === 'busy') {
                             text = `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
                         } else if (data.status === 'blocked') {
-                            text = `Start blockiert (${data.reason || 'preflight'}).`;
+                            text = `Start blockiert (${data.reason_code || data.reason || 'preflight'}).`;
+                            if (data.reason_code === 'disabled_in_web_path') {
+                                text = 'Start blockiert: öffentlicher Endpoint darf keinen Worker starten.';
+                            }
                         } else if (data.status === 'start_failed') {
                             text = 'Worker-Start nicht verifiziert (kein Lock/Heartbeat).';
                             type = 'error';
@@ -1720,6 +1723,19 @@
                     if (!data || !data.ok) {
                         throw new Error(formatApiError(data, 'Einreihen fehlgeschlagen.'));
                     }
+                    const autostart = data.autostart || {};
+                    if (autostart.spawned) {
+                        const pidLabel = autostart.pid ? ` (PID ${autostart.pid})` : '';
+                        setMessage('success', `Einreihen OK, Worker gestartet${pidLabel}.`);
+                        return null;
+                    }
+                    if (autostart.status === 'busy' || autostart.status === 'locked') {
+                        const text = autostart.status === 'locked'
+                            ? 'Einreihen OK, Worker gesperrt (ein anderer Lauf aktiv).'
+                            : `Einreihen OK, Ollama beschäftigt (laufend ${autostart.running ?? 0} / max ${autostart.max_concurrency ?? 0}).`;
+                        setMessage('success', text);
+                        return null;
+                    }
                     setMessage('success', 'Einreihen OK, starte Batch...');
                     return postAction({
                         action: 'run',
@@ -1728,17 +1744,25 @@
                     });
                 })
                 .then((data) => {
-                    if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy')) {
+                    if (data === null || data === undefined) {
+                        return;
+                    }
+                    if (data && data.ok === false && (data.status === 'locked' || data.status === 'busy' || data.status === 'blocked' || data.status === 'start_failed')) {
                         const text = data.status === 'locked'
                             ? 'Worker gesperrt (ein anderer Lauf aktiv).'
-                            : `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`;
-                        setMessage('success', text);
+                            : data.status === 'busy'
+                                ? `Ollama beschäftigt (laufend ${data.running ?? 0} / max ${data.max_concurrency ?? 0}).`
+                                : data.status === 'blocked'
+                                    ? `Start blockiert (${data.reason_code || data.reason || 'preflight'}).`
+                                    : 'Worker-Start fehlgeschlagen.';
+                        setMessage(data.status === 'start_failed' ? 'error' : 'success', text);
                         return;
                     }
                     if (!data || !data.ok) {
                         throw new Error(formatApiError(data, 'Batch fehlgeschlagen.'));
                     }
-                    setMessage('success', `Batch OK (verarbeitet: ${data.processed || 0}).`);
+                    const pidLabel = data.pid ? ` (PID ${data.pid})` : '';
+                    setMessage('success', `Batch gestartet${pidLabel}.`);
                 })
                 .catch((err) => {
                     setMessage('error', err.message);

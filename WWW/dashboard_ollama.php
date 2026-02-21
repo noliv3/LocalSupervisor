@@ -56,7 +56,7 @@ sv_ui_header('Ollama-Dashboard', 'ollama');
     </div>
 <?php endif; ?>
 
-<div class="ollama-dashboard" data-ollama-dashboard data-endpoint="ollama.php" data-poll-interval="10000" data-heartbeat-stale="180">
+<div class="ollama-dashboard" data-ollama-dashboard data-endpoint="internal_ollama.php" data-poll-interval="10000" data-heartbeat-stale="180">
     <div class="panel">
         <div class="status-pills" style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
             <span class="pill">queued <span data-status-count="queued"><?= $counts['queued'] ?></span></span>
@@ -78,7 +78,7 @@ sv_ui_header('Ollama-Dashboard', 'ollama');
 
     <div class="panel" data-ollama-message>
         <div class="action-feedback-title">Status</div>
-        <div>Einreihen/Batch/Abbrechen/Löschen werden über <code>ollama.php</code> ausgelöst.</div>
+        <div>Einreihen/Batch/Abbrechen/Löschen werden über <code>internal_ollama.php</code> ausgelöst.</div>
     </div>
 
     <div class="panel" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">

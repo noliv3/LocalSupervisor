@@ -36,6 +36,8 @@ Wichtig: **Ollama und Forge sind optionale Module**. Der Kern bleibt ein vollst�
 - Lock + Heartbeat pro Worker.
 - Interne Endpunkte nur intern abgesichert betreiben.
 - Web-Pfad bleibt non-blocking: keine Worker-Spawns und keine Migrationen im laufenden HTTP-Request.
+- Öffentlicher Ollama-Webpfad (`WWW/ollama.php`) darf für `action=run` kein Success signalisieren; stattdessen `blocked/disabled_in_web_path`.
+- Admin-UI-Flows für Ollama (Dashboard/Media-Analyze) sollen den internen Endpoint (`WWW/internal_ollama.php`) nutzen; `action=run` ist dort Alias für `run_once` mit Spawn-Metadaten.
 
 ## 3) Verbindliche Invarianten
 

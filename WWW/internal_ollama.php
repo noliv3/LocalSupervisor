@@ -51,8 +51,19 @@ if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
 }
 
-$migrateActions = ['enqueue', 'run_once', 'cancel', 'delete', 'job_status', 'status'];
-if (in_array($action, $migrateActions, true)) {
+$internalWebMigrationsEnabled = (bool)($config['migrations']['internal_web_enabled'] ?? false);
+$migrateActions = ['enqueue', 'run_once', 'run', 'cancel', 'delete', 'job_status', 'status'];
+$runMigrations = $_POST['run_migrations'] ?? ($jsonBody['run_migrations'] ?? null);
+$runMigrations = (int)$runMigrations === 1;
+if ($runMigrations && in_array($action, $migrateActions, true)) {
+    if (!$internalWebMigrationsEnabled) {
+        $respond(200, [
+            'ok' => false,
+            'status' => 'blocked',
+            'reason_code' => 'migrations_disabled_in_http_path',
+            'message' => 'Migrationen im HTTP-Request-Pfad sind deaktiviert.',
+        ]);
+    }
     try {
         sv_run_migrations_if_needed($pdo, $config);
     } catch (Throwable $e) {
@@ -256,7 +267,7 @@ if ($action === 'job_status') {
     ]);
 }
 
-if ($action === 'run_once') {
+if ($action === 'run_once' || $action === 'run') {
     $batch = $_POST['batch'] ?? ($jsonBody['batch'] ?? null);
     $batch = $batch !== null ? (int)$batch : 2;
     if ($batch <= 0) {
@@ -265,7 +276,8 @@ if ($action === 'run_once') {
 
     $runtimeStatus = sv_ollama_read_runtime_global_status($config);
     $pendingJobs = max(0, (int)($runtimeStatus['queue_pending'] ?? 0));
-    $spawn = sv_ollama_spawn_background_worker_fast($config, 'internal_run_once', $pendingJobs, $batch, 0);
+    $source = $action === 'run' ? 'internal_run' : 'internal_run_once';
+    $spawn = sv_ollama_spawn_background_worker_fast($config, $source, $pendingJobs, $batch, 0);
 
     $respond(200, [
         'ok' => !empty($spawn['spawned']),
@@ -273,6 +285,7 @@ if ($action === 'run_once') {
         'reason_code' => $spawn['reason_code'] ?? 'start_failed',
         'pid' => $spawn['pid'] ?? null,
         'running' => false,
+        'runner_locked' => $spawn['runner_locked'] ?? false,
         'locked' => $spawn['runner_locked'] ?? false,
         'spawned' => $spawn['spawned'] ?? false,
         'spawn_error' => $spawn['spawn_error'] ?? null,
