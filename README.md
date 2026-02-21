@@ -83,8 +83,18 @@ php SCRIPTS/media_worker_cli.php --limit=50
 powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 ```
 
+Stop/Reconcile:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start_workers.ps1 -Action stop
+powershell -ExecutionPolicy Bypass -File .\start_workers.ps1 -Action restart
+```
+
 - `start_workers.ps1` startet alle Worker-Services detached via `Start-Process` (inkl. `ollama_service`).
+- `start_workers.ps1` unterstützt `-Action start|stop|restart` und räumt inkonsistente `*.state.json`/PID-Zuordnungen vor einem Neustart auf.
 - `start.ps1` startet nach erfolgreichem Web-Server-Start ebenfalls die Worker-Services über `start_workers.ps1`.
+- `start.ps1` führt beim Start zunächst ein Worker-Reconcile (`stop`) aus und stoppt Worker auch beim Exit/CTRL+C.
+- Alle persistenten Services bekommen standardmäßig einen Web-Liveness-Guard (`--require-web=http://127.0.0.1:8080/health.php`, `--require-web-miss=3`) und beenden sich, wenn der lokale Webserver mehrfach nicht erreichbar ist.
 - Pro Service werden Rolling-Logs geführt (Rotation mit Backups):
   - `LOGS/<service>.out.log`
   - `LOGS/<service>.err.log`

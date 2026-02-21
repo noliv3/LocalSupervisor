@@ -551,6 +551,33 @@ function Start-WorkerServices {
     return $true
 }
 
+function Stop-WorkerServices {
+    param([string]$Reason)
+
+    $workersScript = Join-Path $base 'start_workers.ps1'
+    if (-not (Test-Path -Path $workersScript)) {
+        Write-StartLog "Worker-Stop übersprungen ($Reason): start_workers.ps1 fehlt."
+        return $false
+    }
+
+    Write-StartLog "Stoppe Worker-Services ($Reason)."
+    $workerOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $workersScript -Action stop 2>&1
+    $workerOutputText = Get-CommandOutput $workerOutput
+    if ($LASTEXITCODE -ne 0) {
+        $msg = Sanitize-Message $workerOutputText
+        if ([string]::IsNullOrWhiteSpace($msg)) {
+            $msg = 'Unbekannter Fehler.'
+        }
+        Write-StartLog "Worker-Stop fehlgeschlagen: $msg"
+        return $false
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($workerOutputText)) {
+        Write-StartLog "Worker-Stop Ausgabe: $(Sanitize-Message $workerOutputText)"
+    }
+    return $true
+}
+
 function Should-AutoUpdate {
     param([hashtable]$Status)
 
@@ -781,6 +808,14 @@ try {
                     try { Remove-Item -Path $pidPath -Force -ErrorAction SilentlyContinue } catch {}
                 }
             }
+
+            try {
+                $workersScript = Join-Path $base 'start_workers.ps1'
+                if (Test-Path -Path $workersScript) {
+                    & powershell -NoProfile -ExecutionPolicy Bypass -File $workersScript -Action stop 2>$null | Out-Null
+                }
+            } catch {
+            }
         } catch {
         }
     } | Out-Null
@@ -843,6 +878,8 @@ if ($action -ne '') {
 
 try {
     Write-StartLog 'Starte SuperVisOr (DB-Init + PHP-Server)...'
+
+    Stop-WorkerServices -Reason 'startup_reconcile' | Out-Null
 
     $initOutput = & $phpExe @phpArgs "SCRIPTS\init_db.php" 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -929,6 +966,11 @@ try {
         Start-Sleep -Seconds 5
     }
 } finally {
+    try {
+        Stop-WorkerServices -Reason 'supervisor_exit'
+    } catch {
+    }
+
     try {
         Stop-PhpServer -Reason 'supervisor_exit'
     } catch {

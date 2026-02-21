@@ -65,6 +65,121 @@ function Rotate-LogFile {
     }
 }
 
+function Get-ServiceState {
+    param([string]$StatePath)
+
+    if (-not (Test-Path -Path $StatePath)) {
+        return $null
+    }
+    try {
+        $raw = Get-Content -Path $StatePath -Raw -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return $null
+        }
+        return ($raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+function Remove-ServiceState {
+    param([string]$StatePath)
+    try {
+        if (Test-Path -Path $StatePath) {
+            Remove-Item -Path $StatePath -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+}
+
+function Get-ProcessCommandLine {
+    param([int]$Pid)
+
+    try {
+        $procInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction Stop
+        if ($null -ne $procInfo -and -not [string]::IsNullOrWhiteSpace($procInfo.CommandLine)) {
+            return [string]$procInfo.CommandLine
+        }
+    } catch {
+    }
+    return ''
+}
+
+function Test-WorkerProcessMatches {
+    param(
+        [int]$Pid,
+        [string]$ExpectedScript
+    )
+
+    if ($Pid -le 0) {
+        return $false
+    }
+
+    $proc = Get-Process -Id $Pid -ErrorAction SilentlyContinue
+    if ($null -eq $proc -or $proc.HasExited) {
+        return $false
+    }
+
+    if ($proc.ProcessName -notin @('php', 'php.exe')) {
+        return $false
+    }
+
+    $cmdLine = Get-ProcessCommandLine -Pid $Pid
+    if ([string]::IsNullOrWhiteSpace($cmdLine)) {
+        return $true
+    }
+
+    $expectedLeaf = [System.IO.Path]::GetFileName($ExpectedScript)
+    if ([string]::IsNullOrWhiteSpace($expectedLeaf)) {
+        return $true
+    }
+
+    return $cmdLine -like "*$expectedLeaf*"
+}
+
+function Stop-WorkerService {
+    param(
+        [hashtable]$Service,
+        [string]$LogsDir
+    )
+
+    $statePath = Join-Path $LogsDir ($Service.name + '.state.json')
+    $stateData = Get-ServiceState -StatePath $statePath
+    if ($null -eq $stateData -or $null -eq $stateData.pid) {
+        Remove-ServiceState -StatePath $statePath
+        Write-Host "Service nicht aktiv: $($Service.name)"
+        return
+    }
+
+    $pid = [int]$stateData.pid
+    if ($pid -le 0) {
+        Remove-ServiceState -StatePath $statePath
+        Write-Host "Service nicht aktiv: $($Service.name)"
+        return
+    }
+
+    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($null -eq $proc -or $proc.HasExited) {
+        Remove-ServiceState -StatePath $statePath
+        Write-Host "Service bereits beendet: $($Service.name)"
+        return
+    }
+
+    try {
+        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    } catch {
+    }
+
+    Start-Sleep -Milliseconds 150
+    $stillAlive = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($null -ne $stillAlive -and -not $stillAlive.HasExited) {
+        Write-Host "Service konnte nicht beendet werden: $($Service.name) (PID $pid)"
+    } else {
+        Write-Host "Service gestoppt: $($Service.name) (PID $pid)"
+    }
+    Remove-ServiceState -StatePath $statePath
+}
+
 function Start-WorkerService {
     param(
         [hashtable]$Service,
@@ -75,24 +190,22 @@ function Start-WorkerService {
     $stderrLog = Join-Path $LogsDir ($Service.name + '.err.log')
     $statePath = Join-Path $LogsDir ($Service.name + '.state.json')
 
-    if (Test-Path -Path $statePath) {
-        try {
-            $stateRaw = Get-Content -Path $statePath -Raw -ErrorAction SilentlyContinue
-            if (-not [string]::IsNullOrWhiteSpace($stateRaw)) {
-                $stateData = $stateRaw | ConvertFrom-Json
-                if ($null -ne $stateData -and $null -ne $stateData.pid) {
-                    $existingPid = [int]$stateData.pid
-                    if ($existingPid -gt 0) {
-                        $existingProc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
-                        if ($null -ne $existingProc -and -not $existingProc.HasExited) {
-                            Write-Host "Service bereits aktiv: $($Service.name) (PID $existingPid)"
-                            return
-                        }
-                    }
-                }
+    $stateData = Get-ServiceState -StatePath $statePath
+    if ($null -ne $stateData -and $null -ne $stateData.pid) {
+        $existingPid = [int]$stateData.pid
+        if ($existingPid -gt 0) {
+            if (Test-WorkerProcessMatches -Pid $existingPid -ExpectedScript $Service.script) {
+                Write-Host "Service bereits aktiv: $($Service.name) (PID $existingPid)"
+                return
             }
-        } catch {
+
+            $strayProc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+            if ($null -ne $strayProc -and -not $strayProc.HasExited) {
+                Write-Host "Service-State inkonsistent, stoppe Prozess: $($Service.name) (PID $existingPid)"
+                try { Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue } catch {}
+            }
         }
+        Remove-ServiceState -StatePath $statePath
     }
 
     Rotate-LogFile -Path $stdoutLog -Keep 10
@@ -125,20 +238,36 @@ function Start-WorkerService {
     Write-Host "Service gestartet: $($Service.name) (PID $($proc.Id))"
 }
 
-if ($Action -ne 'start') {
-    Write-Host "Unbekannte Action: $Action (unterstützt: start)"
-    exit 1
-}
-
 $logsDir = Get-LogsDir
 $services = @(
-    @{ name = 'scan_service'; script = 'SCRIPTS\scan_service_cli.php'; args = @() },
-    @{ name = 'forge_service'; script = 'SCRIPTS\forge_service_cli.php'; args = @() },
-    @{ name = 'media_service'; script = 'SCRIPTS\media_service_cli.php'; args = @() },
-    @{ name = 'library_rename_service'; script = 'SCRIPTS\library_rename_service_cli.php'; args = @() },
-    @{ name = 'ollama_service'; script = 'SCRIPTS\ollama_service_cli.php'; args = @() }
+    @{ name = 'scan_service'; script = 'SCRIPTS\scan_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
+    @{ name = 'forge_service'; script = 'SCRIPTS\forge_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
+    @{ name = 'media_service'; script = 'SCRIPTS\media_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
+    @{ name = 'library_rename_service'; script = 'SCRIPTS\library_rename_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
+    @{ name = 'ollama_service'; script = 'SCRIPTS\ollama_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') }
 )
 
-foreach ($svc in $services) {
-    Start-WorkerService -Service $svc -LogsDir $logsDir
+switch ($Action) {
+    'start' {
+        foreach ($svc in $services) {
+            Start-WorkerService -Service $svc -LogsDir $logsDir
+        }
+    }
+    'stop' {
+        foreach ($svc in $services) {
+            Stop-WorkerService -Service $svc -LogsDir $logsDir
+        }
+    }
+    'restart' {
+        foreach ($svc in $services) {
+            Stop-WorkerService -Service $svc -LogsDir $logsDir
+        }
+        foreach ($svc in $services) {
+            Start-WorkerService -Service $svc -LogsDir $logsDir
+        }
+    }
+    default {
+        Write-Host "Unbekannte Action: $Action (unterstützt: start|stop|restart)"
+        exit 1
+    }
 }
