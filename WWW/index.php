@@ -9,6 +9,7 @@ require_once __DIR__ . '/../SCRIPTS/common.php';
 require_once __DIR__ . '/../SCRIPTS/db_helpers.php';
 require_once __DIR__ . '/../SCRIPTS/security.php';
 require_once __DIR__ . '/../SCRIPTS/operations.php';
+require_once __DIR__ . '/../SCRIPTS/log_incidents.php';
 require_once __DIR__ . '/_layout.php';
 
 try {
@@ -422,6 +423,7 @@ function sv_badge_class(string $status): string
                 <a href="#job-center-recent">Letzte Fehler</a>
                 <a href="#job-center">Job-Center</a>
                 <a href="#health-snapshot">Health</a>
+                <a href="#log-analysis">Log-Analyse</a>
                 <a href="#event-log">Ereignisse</a>
             </div>
         </div>
@@ -819,6 +821,51 @@ function sv_badge_class(string $status): string
             </div>
         </section>
 
+        <section id="log-analysis" class="card" data-log-analysis data-endpoint="api/logs/incidents.php">
+            <h2 class="section-title">Log-Analyse (Top 10)</h2>
+            <div class="muted">Batch-Auswertung ohne LLM im Request-Path. Analyse basiert auf aggregierten Incident-Gruppen.</div>
+            <div class="form-grid" style="margin-top:12px;">
+                <label>
+                    <span class="muted">Datum (UTC)</span>
+                    <input type="date" data-log-date value="<?= htmlspecialchars(gmdate('Y-m-d'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+                </label>
+                <div class="controls-actions" style="display:flex;align-items:flex-end;gap:8px;">
+                    <button type="button" class="btn btn--secondary" data-log-refresh>Neu laden</button>
+                </div>
+            </div>
+
+            <div class="log-analysis-summary" data-log-summary></div>
+
+            <div class="table-wrap" style="margin-top:10px;overflow-x:auto;">
+                <table class="table" data-log-top10>
+                    <thead>
+                    <tr>
+                        <th>Rank</th>
+                        <th>Severity</th>
+                        <th>Error Code</th>
+                        <th>Count</th>
+                        <th>Impact (Jobs/Media)</th>
+                        <th>Zeitraum</th>
+                        <th>Statusmix</th>
+                        <th>Beispiel</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <tr><td colspan="8" class="muted">Noch keine Daten geladen.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="margin-top:12px;">
+                <label class="subheader" for="log-analysis-gpt">GPT-Textbox (aggregiert, kopierbar)</label>
+                <textarea id="log-analysis-gpt" class="prompt-input" readonly data-log-gpt></textarea>
+                <div style="margin-top:8px;display:flex;gap:8px;">
+                    <button type="button" class="btn btn--ghost" data-log-copy>Copy</button>
+                    <span class="muted" data-log-copy-status></span>
+                </div>
+            </div>
+        </section>
+
         <section id="event-log" class="card">
             <h2 class="section-title">Ereignisverlauf</h2>
             <?php if ($events === []): ?>
@@ -838,4 +885,99 @@ function sv_badge_class(string $status): string
                 </ul>
             <?php endif; ?>
         </section>
+        <script>
+            (function () {
+                const root = document.querySelector('[data-log-analysis]');
+                if (!root) {
+                    return;
+                }
+
+                const endpoint = root.getAttribute('data-endpoint') || 'api/logs/incidents.php';
+                const dateInput = root.querySelector('[data-log-date]');
+                const refreshBtn = root.querySelector('[data-log-refresh]');
+                const summaryEl = root.querySelector('[data-log-summary]');
+                const topTableBody = root.querySelector('[data-log-top10] tbody');
+                const gptArea = root.querySelector('[data-log-gpt]');
+                const copyBtn = root.querySelector('[data-log-copy]');
+                const copyStatus = root.querySelector('[data-log-copy-status]');
+                const internalKey = <?= json_encode($internalKey, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+
+                const escapeHtml = (value) => String(value ?? '')
+                    .replaceAll('&', '&amp;')
+                    .replaceAll('<', '&lt;')
+                    .replaceAll('>', '&gt;');
+
+                const renderSummary = (summary = {}, debugStats = {}) => {
+                    summaryEl.innerHTML = `
+                        <div class="health-grid" style="margin-top:10px;">
+                            <div class="health-row"><strong>Eingelesene Logzeilen</strong><div>${escapeHtml(debugStats.lines_read ?? 0)}</div></div>
+                            <div class="health-row"><strong>Fehler-Events</strong><div>${escapeHtml(summary.error_events ?? 0)}</div></div>
+                            <div class="health-row"><strong>Incident-Gruppen</strong><div>${escapeHtml(summary.incident_groups ?? 0)}</div></div>
+                            <div class="health-row"><strong>failed_fatal</strong><div>${escapeHtml(summary.failed_fatal ?? 0)}</div></div>
+                            <div class="health-row"><strong>completed_no_result</strong><div>${escapeHtml(summary.completed_no_result ?? 0)}</div></div>
+                            <div class="health-row"><strong>retry_recovered</strong><div>${escapeHtml(summary.retry_recovered ?? 0)}</div></div>
+                        </div>`;
+                };
+
+                const renderTop10 = (incidents = []) => {
+                    if (!incidents.length) {
+                        topTableBody.innerHTML = '<tr><td colspan="8" class="muted">Keine priorisierten Incidents für dieses Datum.</td></tr>';
+                        return;
+                    }
+
+                    topTableBody.innerHTML = incidents.map((incident, idx) => {
+                        const sample = (incident.sample_lines && incident.sample_lines[0]) ? incident.sample_lines[0] : '—';
+                        return `<tr>
+                            <td>${idx + 1}</td>
+                            <td>${escapeHtml(incident.severity)}</td>
+                            <td>${escapeHtml(incident.error_code)}</td>
+                            <td>${escapeHtml(incident.count)}</td>
+                            <td>${escapeHtml(incident.affected_jobs_count)}/${escapeHtml(incident.affected_media_count)}</td>
+                            <td>${escapeHtml(incident.first_seen)} → ${escapeHtml(incident.last_seen)}</td>
+                            <td>rec:${escapeHtml(incident.recovered_count)} / final:${escapeHtml(incident.final_failed_count)}</td>
+                            <td title="${escapeHtml(sample)}">${escapeHtml(sample).slice(0, 140)}</td>
+                        </tr>`;
+                    }).join('');
+                };
+
+                const loadReport = async () => {
+                    const date = dateInput.value || new Date().toISOString().slice(0, 10);
+                    const url = new URL(endpoint, window.location.href);
+                    url.searchParams.set('date', date);
+                    if (internalKey) {
+                        url.searchParams.set('internal_key', internalKey);
+                    }
+
+                    topTableBody.innerHTML = '<tr><td colspan="8" class="muted">Lade Analyse …</td></tr>';
+                    copyStatus.textContent = '';
+                    try {
+                        const response = await fetch(url.toString(), {credentials: 'same-origin'});
+                        const data = await response.json();
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || 'Analyse fehlgeschlagen');
+                        }
+
+                        renderSummary(data.summary || {}, data.debug_stats || {});
+                        renderTop10(data.top_incidents || []);
+                        gptArea.value = data.gpt_textbox_text || '';
+                    } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Unbekannter Fehler';
+                        topTableBody.innerHTML = `<tr><td colspan="8" class="muted">Fehler beim Laden: ${escapeHtml(msg)}</td></tr>`;
+                    }
+                };
+
+                refreshBtn?.addEventListener('click', loadReport);
+                dateInput?.addEventListener('change', loadReport);
+                copyBtn?.addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(gptArea.value || '');
+                        copyStatus.textContent = 'Kopiert.';
+                    } catch (e) {
+                        copyStatus.textContent = 'Kopieren fehlgeschlagen.';
+                    }
+                });
+
+                loadReport();
+            })();
+        </script>
 <?php sv_ui_footer(); ?>
