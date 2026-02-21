@@ -26,6 +26,10 @@ if ($logsRoot === null) {
 
 $heartbeatIntervalSeconds = 5;
 
+$requireWebUrl = null;
+$requireWebMissThreshold = 3;
+$webMissingCount = 0;
+
 $serviceName = 'library_rename_service';
 $heartbeatPath = $logsRoot . '/library_rename_service.heartbeat.json';
 $limit = 50;
@@ -39,6 +43,10 @@ foreach (array_slice($argv, 1) as $arg) {
         $limit = max(1, (int)substr($arg, 8));
     } elseif (strpos($arg, '--sleep-ms=') === 0) {
         $sleepMs = max(100, (int)substr($arg, 11));
+    } elseif (strpos($arg, '--require-web=') === 0) {
+        $requireWebUrl = trim((string)substr($arg, 14));
+    } elseif (strpos($arg, '--require-web-miss=') === 0) {
+        $requireWebMissThreshold = max(1, (int)substr($arg, 19));
     }
 }
 
@@ -72,6 +80,33 @@ $writeHeartbeat('starting', ['limit' => $limit, 'sleep_ms' => $sleepMs]);
 $logger($serviceName . ' started pid=' . (int)getmypid() . ' limit=' . $limit . ' sleep_ms=' . $sleepMs);
 
 while ($running) {
+    if ($requireWebUrl !== null && $requireWebUrl !== '') {
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 3,
+                'ignore_errors' => true,
+            ],
+        ]);
+        $probeResult = @file_get_contents($requireWebUrl, false, $context);
+        $statusCode = null;
+        if (isset($http_response_header) && is_array($http_response_header) && isset($http_response_header[0])) {
+            if (preg_match('/\s(\d{3})\b/', (string)$http_response_header[0], $matches)) {
+                $statusCode = (int)$matches[1];
+            }
+        }
+
+        if ($probeResult !== false && $statusCode !== null && $statusCode >= 200 && $statusCode < 300) {
+            $webMissingCount = 0;
+        } else {
+            $webMissingCount++;
+            $logger($serviceName . ' web endpoint nicht erreichbar (' . $webMissingCount . '/' . $requireWebMissThreshold . ') url=' . $requireWebUrl . ' status=' . ($statusCode === null ? 'none' : (string)$statusCode));
+            if ($webMissingCount >= $requireWebMissThreshold) {
+                $running = false;
+                break;
+            }
+        }
+    }
     try {
         sv_recover_stuck_jobs($pdo, [SV_JOB_TYPE_LIBRARY_RENAME], SV_JOB_STUCK_MINUTES, $logger);
         $summary = sv_process_library_rename_jobs($pdo, $config, $limit, $logger);
