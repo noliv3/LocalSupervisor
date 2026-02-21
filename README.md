@@ -113,6 +113,7 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1
 - Priorisierte Top-10-Liste mit Severity, Impact, Statusmix und Beispielzeile.
 - Readonly **GPT-Textbox** mit Copy-Button für kompakten Tagesreport.
 - API-Endpunkt: `GET /api/logs/incidents.php?date=YYYY-MM-DD` (interner Zugriffsschutz wie Dashboard).
+- Tagesansicht filtert strikt auf den gewählten UTC-Tag (Zeilen außerhalb des Tages werden verworfen).
 - Im Request-Path werden **keine LLM-Aufrufe** ausgeführt.
 - Jobs ohne valides Ergebnis werden in der V1-Heuristik als `completed_no_result` gewertet und nicht als success gezählt.
 
