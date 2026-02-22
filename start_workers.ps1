@@ -129,12 +129,15 @@ function Test-WorkerProcessMatches {
         return $true
     }
 
-    $expectedLeaf = [System.IO.Path]::GetFileName($ExpectedScript)
-    if ([string]::IsNullOrWhiteSpace($expectedLeaf)) {
-        return $true
+    $normalizedCmd = $cmdLine.ToLowerInvariant()
+    $expectedFull = (Join-Path $base $ExpectedScript).ToLowerInvariant().Replace('/', '\\')
+    $expectedLeaf = [System.IO.Path]::GetFileName($ExpectedScript).ToLowerInvariant()
+
+    if ($normalizedCmd -notmatch '(^|\s|")php(\.exe)?(\s|$)') {
+        return $false
     }
 
-    return $cmdLine -like "*$expectedLeaf*"
+    return ($normalizedCmd -like "*$expectedFull*") -or ($normalizedCmd -like "*$expectedLeaf*")
 }
 
 function Stop-WorkerService {
@@ -165,19 +168,40 @@ function Stop-WorkerService {
         return
     }
 
+    if (-not (Test-WorkerProcessMatches -Pid $pid -ExpectedScript $Service.script)) {
+        Write-Host "Service-Stop übersprungen (Commandline-Mismatch): $($Service.name) (PID $pid)"
+        return
+    }
+
     try {
-        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $pid -ErrorAction SilentlyContinue
     } catch {
     }
 
-    Start-Sleep -Milliseconds 150
+    $graceMs = 2500
+    $slept = 0
+    while ($slept -lt $graceMs) {
+        Start-Sleep -Milliseconds 250
+        $slept += 250
+        $probe = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if ($null -eq $probe -or $probe.HasExited) {
+            break
+        }
+    }
+
     $stillAlive = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($null -ne $stillAlive -and -not $stillAlive.HasExited) {
+        try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
+        Start-Sleep -Milliseconds 150
+        $stillAlive = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    }
+
     if ($null -ne $stillAlive -and -not $stillAlive.HasExited) {
         Write-Host "Service konnte nicht beendet werden: $($Service.name) (PID $pid)"
     } else {
         Write-Host "Service gestoppt: $($Service.name) (PID $pid)"
+        Remove-ServiceState -StatePath $statePath
     }
-    Remove-ServiceState -StatePath $statePath
 }
 
 function Start-WorkerService {
@@ -240,11 +264,11 @@ function Start-WorkerService {
 
 $logsDir = Get-LogsDir
 $services = @(
-    @{ name = 'scan_service'; script = 'SCRIPTS\scan_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
-    @{ name = 'forge_service'; script = 'SCRIPTS\forge_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
-    @{ name = 'media_service'; script = 'SCRIPTS\media_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
-    @{ name = 'library_rename_service'; script = 'SCRIPTS\library_rename_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') },
-    @{ name = 'ollama_service'; script = 'SCRIPTS\ollama_service_cli.php'; args = @('--require-web=http://127.0.0.1:8080/health.php', '--require-web-miss=3') }
+    @{ name = 'scan_service'; script = 'SCRIPTS\scan_service_cli.php'; args = @() },
+    @{ name = 'forge_service'; script = 'SCRIPTS\forge_service_cli.php'; args = @() },
+    @{ name = 'media_service'; script = 'SCRIPTS\media_service_cli.php'; args = @() },
+    @{ name = 'library_rename_service'; script = 'SCRIPTS\library_rename_service_cli.php'; args = @() },
+    @{ name = 'ollama_service'; script = 'SCRIPTS\ollama_service_cli.php'; args = @() }
 )
 
 switch ($Action) {

@@ -26,10 +26,6 @@ if ($logsRoot === null) {
 
 $heartbeatIntervalSeconds = 5;
 
-$requireWebUrl = null;
-$requireWebMissThreshold = 3;
-$webMissingCount = 0;
-
 $serviceName = 'scan_service';
 $heartbeatPath = $logsRoot . '/scan_service.heartbeat.json';
 $limit = 11;
@@ -43,10 +39,6 @@ foreach (array_slice($argv, 1) as $arg) {
         $limit = max(1, (int)substr($arg, 8));
     } elseif (strpos($arg, '--sleep-ms=') === 0) {
         $sleepMs = max(100, (int)substr($arg, 11));
-    } elseif (strpos($arg, '--require-web=') === 0) {
-        $requireWebUrl = trim((string)substr($arg, 14));
-    } elseif (strpos($arg, '--require-web-miss=') === 0) {
-        $requireWebMissThreshold = max(1, (int)substr($arg, 19));
     }
 }
 
@@ -60,16 +52,8 @@ if (function_exists('pcntl_async_signals') && function_exists('pcntl_signal')) {
     pcntl_signal(SIGINT, $handler);
 }
 
-$writeHeartbeat = static function (string $state, array $extra = []) use ($heartbeatPath): void {
-    $payload = array_merge([
-        'ts' => gmdate('c'),
-        'pid' => (int)getmypid(),
-        'state' => $state,
-    ], $extra);
-    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    if ($json !== false) {
-        @file_put_contents($heartbeatPath, $json, LOCK_EX);
-    }
+$writeHeartbeat = static function (string $state, array $extra = []) use ($heartbeatPath, $serviceName): void {
+    sv_write_worker_heartbeat($heartbeatPath, $serviceName, (int)getmypid(), $state, $extra);
 };
 
 $logger = static function (string $msg): void {
@@ -80,33 +64,6 @@ $writeHeartbeat('starting', ['limit' => $limit, 'sleep_ms' => $sleepMs]);
 $logger($serviceName . ' started pid=' . (int)getmypid() . ' limit=' . $limit . ' sleep_ms=' . $sleepMs);
 
 while ($running) {
-    if ($requireWebUrl !== null && $requireWebUrl !== '') {
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'GET',
-                'timeout' => 3,
-                'ignore_errors' => true,
-            ],
-        ]);
-        $probeResult = @file_get_contents($requireWebUrl, false, $context);
-        $statusCode = null;
-        if (isset($http_response_header) && is_array($http_response_header) && isset($http_response_header[0])) {
-            if (preg_match('/\s(\d{3})\b/', (string)$http_response_header[0], $matches)) {
-                $statusCode = (int)$matches[1];
-            }
-        }
-
-        if ($probeResult !== false && $statusCode !== null && $statusCode >= 200 && $statusCode < 300) {
-            $webMissingCount = 0;
-        } else {
-            $webMissingCount++;
-            $logger($serviceName . ' web endpoint nicht erreichbar (' . $webMissingCount . '/' . $requireWebMissThreshold . ') url=' . $requireWebUrl . ' status=' . ($statusCode === null ? 'none' : (string)$statusCode));
-            if ($webMissingCount >= $requireWebMissThreshold) {
-                $running = false;
-                break;
-            }
-        }
-    }
     try {
         $summary = sv_process_scan_job_batch($pdo, $config, $limit, $logger);
         $processed = (int)($summary['total'] ?? 0);

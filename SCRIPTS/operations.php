@@ -567,6 +567,112 @@ function sv_is_pid_running(int $pid): array
     ];
 }
 
+function sv_command_hash(array $argv): string
+{
+    $parts = [];
+    foreach ($argv as $arg) {
+        $parts[] = (string)$arg;
+    }
+
+    return hash('sha256', implode("\0", $parts));
+}
+
+function sv_lock_payload(int $pid, string $startedAtUtc, string $lastHeartbeatUtc, string $commandHash): array
+{
+    return [
+        'pid' => $pid,
+        'started_at_utc' => $startedAtUtc,
+        'last_heartbeat_utc' => $lastHeartbeatUtc,
+        'command_hash' => $commandHash,
+    ];
+}
+
+function sv_try_acquire_worker_lock(string $lockPath, array $payload, ?string &$reason = null)
+{
+    $reason = null;
+    $handle = fopen($lockPath, 'c+');
+    if ($handle === false) {
+        $reason = 'lock_open_failed';
+        return false;
+    }
+
+    if (!flock($handle, LOCK_EX | LOCK_NB)) {
+        fclose($handle);
+        $reason = 'lock_busy';
+        return false;
+    }
+
+    $currentRaw = stream_get_contents($handle);
+    $current = is_string($currentRaw) && trim($currentRaw) !== '' ? json_decode($currentRaw, true) : null;
+    if (is_array($current)) {
+        $currentPid = isset($current['pid']) ? (int)$current['pid'] : 0;
+        $currentHash = (string)($current['command_hash'] ?? '');
+        $pidInfo = sv_is_pid_running($currentPid);
+        if (!($pidInfo['unknown'] ?? false) && !empty($pidInfo['running']) && $currentPid > 0 && $currentHash !== '') {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            $reason = 'already_running';
+            return false;
+        }
+    }
+
+    if (!sv_write_worker_lock($handle, $payload)) {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+        $reason = 'lock_write_failed';
+        return false;
+    }
+
+    return $handle;
+}
+
+function sv_write_worker_lock($handle, array $payload): bool
+{
+    if (!is_resource($handle)) {
+        return false;
+    }
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($json)) {
+        return false;
+    }
+    rewind($handle);
+    if (!ftruncate($handle, 0)) {
+        return false;
+    }
+    $written = fwrite($handle, $json);
+    fflush($handle);
+
+    return $written !== false;
+}
+
+function sv_release_worker_lock($handle): void
+{
+    if (!is_resource($handle)) {
+        return;
+    }
+    flock($handle, LOCK_UN);
+    fclose($handle);
+}
+
+function sv_write_worker_heartbeat(string $heartbeatPath, string $service, int $pid, string $state, array $extra = []): bool
+{
+    $ts = gmdate('c');
+    $payload = array_merge([
+        'schema' => 'sv.worker.heartbeat.v2',
+        'service' => $service,
+        'pid' => $pid,
+        'state' => $state,
+        'ts_utc' => $ts,
+        'last_heartbeat_utc' => $ts,
+    ], $extra);
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($json)) {
+        return false;
+    }
+
+    return file_put_contents($heartbeatPath, $json, LOCK_EX) !== false;
+}
+
 function sv_collect_media_roots(array $pathsCfg): array
 {
     $keys = ['images_sfw', 'videos_sfw', 'images_nsfw', 'videos_nsfw'];
@@ -2628,7 +2734,7 @@ function sv_spawn_forge_worker_for_media(
         if (!is_array($data)) {
             return ['ok' => false, 'reason' => 'lock_json_invalid'];
         }
-        $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+        $heartbeat = isset($data['last_heartbeat_utc']) ? strtotime((string)$data['last_heartbeat_utc']) : false;
         if ($heartbeat === false) {
             return ['ok' => false, 'reason' => 'lock_heartbeat_invalid'];
         }
@@ -3655,6 +3761,8 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'unknown' => false,
             'skipped' => true,
             'spawned' => false,
+            'ok' => false,
+            'verified' => false,
         ];
     }
     $spawnLockPath   = $logsRoot . '/scan_worker_spawn.lock';
@@ -3684,6 +3792,8 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'unknown' => false,
             'skipped' => true,
             'spawned' => false,
+            'ok' => false,
+            'verified' => false,
         ];
     }
     $hasLock = flock($lockHandle, LOCK_EX | LOCK_NB);
@@ -3721,6 +3831,8 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'unknown' => false,
             'skipped' => true,
             'spawned' => false,
+            'ok' => false,
+            'verified' => false,
         ];
     }
 
@@ -3849,6 +3961,9 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
     }
 
     $verifyWindowSeconds = max(0, (int)$verifyWindowSeconds);
+    if (defined('SV_WEB_CONTEXT') && SV_WEB_CONTEXT) {
+        $verifyWindowSeconds = 0;
+    }
     $lockVerified = false;
     $pidVerified = false;
     $lockReason = null;
@@ -3864,7 +3979,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         if (!is_array($data)) {
             return ['ok' => false, 'reason' => 'lock_json_invalid'];
         }
-        $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
+        $heartbeat = isset($data['last_heartbeat_utc']) ? strtotime((string)$data['last_heartbeat_utc']) : false;
         if ($heartbeat === false) {
             return ['ok' => false, 'reason' => 'lock_heartbeat_invalid'];
         }
@@ -3904,6 +4019,8 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'out_log' => $spawnOutLog,
             'err_log' => $spawnErrLog,
             'last_spawn_at' => $now,
+            'ok' => $spawned,
+            'verified' => false,
         ];
         $spawnStatusJson = json_encode($spawnStatusPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         if ($spawnStatusJson === false || file_put_contents($spawnLastPath, $spawnStatusJson) === false) {
@@ -3931,6 +4048,8 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
             'out_log' => $spawnOutLog,
             'err_log' => $spawnErrLog,
             'last_spawn_at' => $now,
+            'ok' => $spawned,
+            'verified' => false,
         ];
     }
 
@@ -3975,6 +4094,8 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         'log_paths' => $logPaths,
         'status' => $status,
         'locked' => false,
+        'ok' => $spawned,
+        'verified' => $verified,
     ];
 }
 
