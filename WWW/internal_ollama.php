@@ -20,7 +20,7 @@ $respond = static function (int $code, array $payload): void {
 
 try {
     $config = sv_load_config();
-    $access = sv_internal_access_result($config, 'ollama_internal', ['allow_loopback_bypass' => true]);
+    $access = sv_internal_access_result($config, 'ollama_internal', ['allow_loopback_bypass' => false]);
     if (empty($access['ok'])) {
         $status = $access['status'] ?? 'forbidden';
         $httpCode = $status === 'config_failed' ? 500 : 403;
@@ -39,6 +39,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     $respond(405, ['ok' => false, 'error' => 'POST required.']);
 }
 
+sv_require_csrf_token_json($respond);
+
 $rawBody = file_get_contents('php://input');
 $jsonBody = null;
 if (is_string($rawBody) && trim($rawBody) !== '') {
@@ -49,26 +51,6 @@ $action = $_POST['action'] ?? ($jsonBody['action'] ?? null);
 $action = is_string($action) ? trim($action) : '';
 if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
-}
-
-$internalWebMigrationsEnabled = (bool)($config['migrations']['internal_web_enabled'] ?? false);
-$migrateActions = ['enqueue', 'run_once', 'run', 'cancel', 'delete', 'job_status', 'status'];
-$runMigrations = $_POST['run_migrations'] ?? ($jsonBody['run_migrations'] ?? null);
-$runMigrations = (int)$runMigrations === 1;
-if ($runMigrations && in_array($action, $migrateActions, true)) {
-    if (!$internalWebMigrationsEnabled) {
-        $respond(200, [
-            'ok' => false,
-            'status' => 'blocked',
-            'reason_code' => 'migrations_disabled_in_http_path',
-            'message' => 'Migrationen im HTTP-Request-Pfad sind deaktiviert.',
-        ]);
-    }
-    try {
-        sv_run_migrations_if_needed($pdo, $config);
-    } catch (Throwable $e) {
-        $respond(500, ['ok' => false, 'error' => 'Migration fehlgeschlagen: ' . $e->getMessage()]);
-    }
 }
 
 $logsPath = sv_logs_root($config);

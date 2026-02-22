@@ -21,7 +21,7 @@ try {
 }
 
 $configWarning = $config['_config_warning'] ?? null;
-$internalKey   = isset($_GET['internal_key']) && is_string($_GET['internal_key']) ? trim($_GET['internal_key']) : '';
+$csrfToken = sv_csrf_token();
 
 $isLoopback = sv_is_loopback_remote_addr();
 if (!$isLoopback) {
@@ -81,7 +81,7 @@ if (is_string($_GET['ajax'] ?? null) && trim((string)$_GET['ajax']) !== '') {
             $jobs = sv_fetch_scan_related_jobs($pdo, $limit);
             echo json_encode([
                 'ok'          => true,
-                'server_time' => date('c'),
+                'server_time' => gmdate('c'),
                 'jobs'        => $jobs,
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             exit;
@@ -143,6 +143,7 @@ if (is_string($_GET['ajax'] ?? null) && trim((string)$_GET['ajax']) !== '') {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    sv_require_csrf_token();
     if (!$pdo instanceof PDO) {
         $actionError = 'Keine DB-Verbindung: ' . ($dbError ?? 'unbekannt');
     } else {
@@ -529,11 +530,9 @@ function sv_badge_class(string $status): string
                     </div>
                 </div>
                 <form method="post" class="inline-fields">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                     <input type="hidden" name="action" value="update_center">
                     <input type="hidden" name="update_action" value="update_ff_restart">
-                    <?php if ($internalKey !== ''): ?>
-                        <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                    <?php endif; ?>
                     <button type="submit" class="btn btn--primary" onclick="return confirm('Update jetzt starten?');">Update (FF + DB + Restart)</button>
                 </form>
                 <div class="muted">FF-only Standard; Merge nur über separaten Action-Parameter.</div>
@@ -620,13 +619,11 @@ function sv_badge_class(string $status): string
                 <div class="operator-card">
                     <h3>Scan-Path Batch</h3>
                     <form method="post">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="scan_path">
                         <div class="inline-fields">
                             <textarea name="scan_path" rows="6" placeholder="Pfad 1&#10;Pfad 2"></textarea>
                         <input type="number" name="scan_limit" min="1" step="1" placeholder="Limit">
-                        <?php if ($internalKey !== ''): ?>
-                            <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?php endif; ?>
                         <button type="submit" class="btn btn--primary btn--sm">Scan starten</button>
                     </div>
                 </form>
@@ -637,13 +634,11 @@ function sv_badge_class(string $status): string
                 <div class="operator-card">
                     <h3>Rescan (unscanned)</h3>
                     <form method="post">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="rescan_db">
                         <div class="inline-fields">
                             <input type="number" name="rescan_limit" min="1" step="1" placeholder="Limit">
                         <input type="number" name="rescan_offset" min="0" step="1" placeholder="Offset">
-                        <?php if ($internalKey !== ''): ?>
-                            <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?php endif; ?>
                         <button type="submit" class="btn btn--primary btn--sm">Rescan starten</button>
                     </div>
                 </form>
@@ -654,13 +649,11 @@ function sv_badge_class(string $status): string
                 <div class="operator-card">
                     <h3>Backfill Tags (ohne Tags)</h3>
                     <form method="post">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="backfill_no_tags">
                         <div class="inline-fields">
                             <input type="number" name="backfill_chunk" min="1" step="1" placeholder="Chunk" value="200">
                         <input type="number" name="backfill_max" min="1" step="1" placeholder="Max">
-                        <?php if ($internalKey !== ''): ?>
-                            <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                        <?php endif; ?>
                         <button type="submit" class="btn btn--primary btn--sm">Backfill starten</button>
                     </div>
                 </form>
@@ -714,7 +707,7 @@ function sv_badge_class(string $status): string
                     <button class="btn btn--ghost" type="button" data-jobs-prune-button data-group="scan" data-status="running" data-force="1" data-confirm="Running Scan-Jobs forcieren (cancel + delete)?">Force clear running</button>
                 </div>
             </div>
-            <div class="muted">Cancel/Delete nur für scanbezogene Jobs, Delete/Prune nur in done/error/canceled.</div>
+            <div class="muted">Cancel/Delete nur für scanbezogene Jobs, Delete/Prune nur in done/error/cancelled.</div>
         </section>
 
         <section id="importscan-jobs" class="card" data-jobs-prune data-endpoint="jobs_prune.php">
@@ -787,23 +780,19 @@ function sv_badge_class(string $status): string
                                         <div class="job-error">Fehler: <?= htmlspecialchars((string)$job['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
                                     <?php endif; ?>
                                     <div class="job-actions">
-                                        <?php if (in_array($job['status'], ['error', 'done', SV_JOB_STATUS_CANCELED], true)): ?>
+                                        <?php if (in_array($job['status'], ['error', 'done', SV_JOB_STATUS_CANCELLED], true)): ?>
                                             <form method="post">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <input type="hidden" name="action" value="job_requeue">
                                                 <input type="hidden" name="job_id" value="<?= (int)$job['id'] ?>">
-                                                <?php if ($internalKey !== ''): ?>
-                                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                                <?php endif; ?>
                                                 <button type="submit" class="btn btn--xs btn--secondary">Requeue</button>
                                             </form>
                                         <?php endif; ?>
                                         <?php if (in_array($job['status'], ['queued', 'running'], true)): ?>
                                             <form method="post" onsubmit="return confirm('Job wirklich abbrechen?');">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <input type="hidden" name="action" value="job_cancel">
                                                 <input type="hidden" name="job_id" value="<?= (int)$job['id'] ?>">
-                                                <?php if ($internalKey !== ''): ?>
-                                                    <input type="hidden" name="internal_key" value="<?= htmlspecialchars($internalKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-                                                <?php endif; ?>
                                                 <button type="submit" class="btn btn--xs btn--ghost">Cancel</button>
                                             </form>
                                         <?php endif; ?>
@@ -900,8 +889,6 @@ function sv_badge_class(string $status): string
                 const gptArea = root.querySelector('[data-log-gpt]');
                 const copyBtn = root.querySelector('[data-log-copy]');
                 const copyStatus = root.querySelector('[data-log-copy-status]');
-                const internalKey = <?= json_encode($internalKey, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
-
                 const escapeHtml = (value) => String(value ?? '')
                     .replaceAll('&', '&amp;')
                     .replaceAll('<', '&lt;')
@@ -944,10 +931,6 @@ function sv_badge_class(string $status): string
                     const date = dateInput.value || new Date().toISOString().slice(0, 10);
                     const url = new URL(endpoint, window.location.href);
                     url.searchParams.set('date', date);
-                    if (internalKey) {
-                        url.searchParams.set('internal_key', internalKey);
-                    }
-
                     topTableBody.innerHTML = '<tr><td colspan="8" class="muted">Lade Analyse …</td></tr>';
                     copyStatus.textContent = '';
                     try {

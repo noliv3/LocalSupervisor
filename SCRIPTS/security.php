@@ -24,6 +24,54 @@ function sv_is_cli(): bool
     return PHP_SAPI === 'cli';
 }
 
+
+function sv_csrf_token(): string
+{
+    sv_ensure_session_started();
+    $token = $_SESSION['sv_csrf_token'] ?? '';
+    if (!is_string($token) || $token === '') {
+        $token = bin2hex(random_bytes(32));
+        $_SESSION['sv_csrf_token'] = $token;
+    }
+
+    return $token;
+}
+
+function sv_csrf_validate(?string $provided): bool
+{
+    sv_ensure_session_started();
+    $expected = $_SESSION['sv_csrf_token'] ?? '';
+    if (!is_string($expected) || $expected === '' || !is_string($provided)) {
+        return false;
+    }
+
+    return hash_equals($expected, trim($provided));
+}
+
+function sv_require_csrf_token(): void
+{
+    if (sv_is_cli()) {
+        return;
+    }
+
+    $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($_POST['csrf_token'] ?? '');
+    if (!sv_csrf_validate(is_string($token) ? $token : null)) {
+        sv_security_error(403, 'Forbidden: invalid CSRF token.');
+    }
+}
+
+function sv_require_csrf_token_json(callable $respond): void
+{
+    if (sv_is_cli()) {
+        return;
+    }
+
+    $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($_POST['csrf_token'] ?? '');
+    if (!sv_csrf_validate(is_string($token) ? $token : null)) {
+        $respond(403, ['ok' => false, 'status' => 'forbidden', 'reason_code' => 'invalid_csrf_token']);
+    }
+}
+
 function sv_is_loopback_remote_addr(): bool
 {
     if (sv_is_cli()) {
@@ -153,15 +201,11 @@ function sv_internal_access_result(array $config, string $action, array $options
 
     $candidates = [
         'header'  => $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '',
-        'get'     => $_GET['internal_key']          ?? '',
-        'post'    => $_POST['internal_key']         ?? '',
-        'session' => $_SESSION['sv_internal_key']   ?? '',
-        'cookie'  => $_COOKIE['internal_key']       ?? '',
     ];
 
     $providedKey    = '';
     $providedSource = '';
-    foreach (['header', 'get', 'post', 'session', 'cookie'] as $src) {
+    foreach (['header'] as $src) {
         $value = $candidates[$src] ?? '';
         if (is_string($value)) {
             $value = trim($value);
@@ -205,7 +249,7 @@ function sv_internal_access_result(array $config, string $action, array $options
         ];
     }
 
-    if (in_array($providedSource, ['header', 'get', 'post'], true) && sv_is_loopback_remote_addr()) {
+    if ($providedSource === 'header' && sv_is_loopback_remote_addr()) {
         $security = $config['security'] ?? [];
         $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
         $allowInsecure = !empty($security['allow_insecure_internal_cookie']);
@@ -417,7 +461,7 @@ function sv_audit_log(PDO $pdo, string $action, ?string $entityType, ?int $entit
             ':details_json' => $detailsJson,
             ':actor_ip'     => sv_get_client_ip(),
             ':actor_key'    => $actorKey,
-            ':created_at'   => date('c'),
+            ':created_at'   => gmdate('c'),
         ]);
     } catch (Throwable $e) {
         error_log('Audit log failed: ' . $e->getMessage());
