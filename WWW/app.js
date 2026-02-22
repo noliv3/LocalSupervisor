@@ -39,8 +39,36 @@
         return fallback;
     }
 
+    function getCsrfToken() {
+        if (window.SuperVisor && typeof window.SuperVisor.csrfToken === 'string') {
+            return window.SuperVisor.csrfToken;
+        }
+        const metaInput = document.querySelector('input[name="csrf_token"]');
+        return metaInput ? String(metaInput.value || '') : '';
+    }
+
+    function withSecurityHeaders(options = {}) {
+        const normalized = { ...options };
+        const method = String(normalized.method || 'GET').toUpperCase();
+        if (method !== 'POST') {
+            return normalized;
+        }
+        const headers = new Headers(normalized.headers || {});
+        if (!headers.has('X_CSRF_TOKEN')) {
+            const token = getCsrfToken();
+            if (token) {
+                headers.set('X_CSRF_TOKEN', token);
+            }
+        }
+        normalized.headers = headers;
+        if (!normalized.credentials) {
+            normalized.credentials = 'same-origin';
+        }
+        return normalized;
+    }
+
     function fetchJson(endpoint, options = {}) {
-        return fetch(endpoint, options).then(async (resp) => {
+        return fetch(endpoint, withSecurityHeaders(options)).then(async (resp) => {
             const contentType = resp.headers.get('Content-Type') || '';
             const textBody = await resp.text();
             if (contentType.includes('application/json')) {

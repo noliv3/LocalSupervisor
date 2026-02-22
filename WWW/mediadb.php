@@ -19,6 +19,7 @@ try {
 
 $configWarning = $config['_config_warning'] ?? null;
 $csrfToken = sv_csrf_token();
+sv_bootstrap_internal_ui_session($config, 'mediadb_ui');
 $hasInternalAccess = sv_validate_internal_access($config, 'mediadb', false);
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';

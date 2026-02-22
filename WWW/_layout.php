@@ -5,6 +5,8 @@ if (!defined('SV_WEB_CONTEXT')) {
     define('SV_WEB_CONTEXT', true);
 }
 
+require_once __DIR__ . '/../SCRIPTS/security.php';
+
 function sv_ui_header(string $title, string $activeNav, ?string $headerActionsHtml = null): void
 {
     $safeTitle = htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -45,8 +47,13 @@ function sv_ui_header(string $title, string $activeNav, ?string $headerActionsHt
 
 function sv_ui_footer(): void
 {
+    $csrfToken = sv_csrf_token();
     ?>
     </main>
+    <script>
+        window.SuperVisor = window.SuperVisor || {};
+        window.SuperVisor.csrfToken = <?= json_encode($csrfToken, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    </script>
     <script src="app.js"></script>
     </body>
     </html>

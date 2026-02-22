@@ -23,9 +23,8 @@ try {
 $configWarning = $config['_config_warning'] ?? null;
 $csrfToken = sv_csrf_token();
 
-$isLoopback = sv_is_loopback_remote_addr();
-if (!$isLoopback) {
-    if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+if (!sv_bootstrap_internal_ui_session($config, 'dashboard_ui')) {
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
         header('Location: mediadb.php');
         exit;
     }

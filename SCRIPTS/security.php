@@ -90,11 +90,25 @@ function sv_get_client_ip(): string
         return 'cli';
     }
 
-    $candidates = [
-        $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '',
-        $_SERVER['HTTP_CLIENT_IP'] ?? '',
-        $_SERVER['REMOTE_ADDR'] ?? '',
-    ];
+    $remoteAddr = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    $trustedProxies = [];
+
+    $args = func_get_args();
+    if (isset($args[0]) && is_array($args[0])) {
+        $security = $args[0]['security'] ?? [];
+        $trustedProxies = is_array($security['trusted_proxies'] ?? null)
+            ? $security['trusted_proxies']
+            : [];
+    }
+
+    $isTrustedProxy = $remoteAddr !== '' && in_array($remoteAddr, $trustedProxies, true);
+
+    $candidates = [];
+    if ($isTrustedProxy) {
+        $candidates[] = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
+        $candidates[] = $_SERVER['HTTP_CLIENT_IP'] ?? '';
+    }
+    $candidates[] = $remoteAddr;
 
     foreach ($candidates as $candidate) {
         if (!is_string($candidate) || $candidate === '') {
@@ -113,6 +127,58 @@ function sv_get_client_ip(): string
     return '';
 }
 
+function sv_bootstrap_internal_ui_session(array $config, string $action = 'internal_ui'): bool
+{
+    if (sv_is_cli()) {
+        return true;
+    }
+
+    if (!sv_is_loopback_remote_addr()) {
+        sv_security_log($config, 'Internal UI session blocked: non-loopback', [
+            'action' => $action,
+            'ip' => (string)($_SERVER['REMOTE_ADDR'] ?? ''),
+        ]);
+        return false;
+    }
+
+    if (!sv_is_client_local($config)) {
+        sv_security_log($config, 'Internal UI session blocked: IP not whitelisted', [
+            'action' => $action,
+            'ip' => sv_get_client_ip($config),
+        ]);
+        return false;
+    }
+
+    sv_ensure_session_started();
+    $_SESSION['sv_internal_admin'] = [
+        'granted_at' => time(),
+        'remote_addr' => (string)($_SERVER['REMOTE_ADDR'] ?? ''),
+    ];
+
+    return true;
+}
+
+function sv_has_internal_admin_session(): bool
+{
+    if (sv_is_cli()) {
+        return true;
+    }
+
+    sv_ensure_session_started();
+    $sessionData = $_SESSION['sv_internal_admin'] ?? null;
+    if (!is_array($sessionData)) {
+        return false;
+    }
+
+    $sessionIp = (string)($sessionData['remote_addr'] ?? '');
+    $remoteAddr = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    if ($sessionIp === '' || $remoteAddr === '' || $sessionIp !== $remoteAddr) {
+        return false;
+    }
+
+    return true;
+}
+
 function sv_is_client_local(array $config): bool
 {
     if (sv_is_cli()) {
@@ -121,7 +187,7 @@ function sv_is_client_local(array $config): bool
 
     $security  = $config['security'] ?? [];
     $whitelist = $security['ip_whitelist'] ?? [];
-    $clientIp  = sv_get_client_ip();
+    $clientIp  = sv_get_client_ip($config);
 
     if (!is_array($whitelist) || $whitelist === []) {
         return true;
@@ -133,7 +199,7 @@ function sv_is_client_local(array $config): bool
 function sv_internal_access_result(array $config, string $action, array $options = []): array
 {
     $GLOBALS['sv_last_internal_key_valid'] = false;
-    $allowLoopbackBypass = !empty($options['allow_loopback_bypass']);
+    $allowSessionAuth = !array_key_exists('allow_session', $options) || !empty($options['allow_session']);
 
     if (sv_is_cli()) {
         $GLOBALS['sv_last_internal_key_valid'] = true;
@@ -145,39 +211,35 @@ function sv_internal_access_result(array $config, string $action, array $options
         ];
     }
 
-    $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
-    if (!sv_is_loopback_remote_addr()) {
-        sv_security_log($config, 'Internal access blocked: non-loopback', [
-            'action' => $action,
-            'ip'     => $remoteAddr,
-        ]);
+    $security    = $config['security'] ?? [];
+    $expectedKey = trim((string)($security['internal_api_key'] ?? ''));
+    $clientIp    = sv_get_client_ip($config);
+    $whitelist   = $security['ip_whitelist'] ?? [];
+
+    if (is_array($whitelist) && $whitelist !== [] && !in_array($clientIp, $whitelist, true)) {
+        sv_security_log($config, 'IP not whitelisted', ['action' => $action, 'ip' => $clientIp]);
         return [
             'ok' => false,
             'status' => 'forbidden',
-            'reason_code' => 'non_loopback',
+            'reason_code' => 'ip_not_whitelisted',
         ];
     }
 
-    $security    = $config['security'] ?? [];
-    $expectedKey = trim((string)($security['internal_api_key'] ?? ''));
-    $clientIp    = sv_get_client_ip();
-    $whitelist   = $security['ip_whitelist'] ?? [];
+    if ($allowSessionAuth && sv_has_internal_admin_session()) {
+        sv_security_log($config, 'Internal access allowed: admin session', [
+            'action' => $action,
+            'ip' => $clientIp,
+        ]);
+        return [
+            'ok' => true,
+            'status' => 'ok',
+            'reason_code' => 'admin_session_valid',
+            'bypass' => false,
+            'source' => 'session',
+        ];
+    }
 
     if ($expectedKey === '') {
-        if ($allowLoopbackBypass) {
-            sv_security_log($config, 'Internal access allowed: localhost bypass (missing key)', [
-                'action' => $action,
-                'ip' => $clientIp,
-            ]);
-            $GLOBALS['sv_last_internal_key_valid'] = true;
-            return [
-                'ok' => true,
-                'status' => 'ok',
-                'reason_code' => 'localhost_bypass_missing_key',
-                'bypass' => true,
-            ];
-        }
-
         sv_security_log($config, 'Security misconfigured: internal key missing', ['action' => $action, 'ip' => $clientIp]);
         return [
             'ok' => false,
@@ -186,101 +248,27 @@ function sv_internal_access_result(array $config, string $action, array $options
         ];
     }
 
-    if (is_array($whitelist) && $whitelist !== []) {
-        if (!in_array($clientIp, $whitelist, true)) {
-            sv_security_log($config, 'IP not whitelisted', ['action' => $action, 'ip' => $clientIp]);
-            return [
-                'ok' => false,
-                'status' => 'forbidden',
-                'reason_code' => 'ip_not_whitelisted',
-            ];
-        }
-    }
-
-    sv_ensure_session_started();
-
-    $candidates = [
-        'header'  => $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '',
-    ];
-
-    $providedKey    = '';
-    $providedSource = '';
-    foreach (['header'] as $src) {
-        $value = $candidates[$src] ?? '';
-        if (is_string($value)) {
-            $value = trim($value);
-        }
-        if ($value !== '') {
-            $providedKey    = (string)$value;
-            $providedSource = $src;
-            break;
-        }
-    }
-
+    $providedKey = trim((string)($_SERVER['HTTP_X_INTERNAL_KEY'] ?? ''));
     if ($providedKey === '') {
-        if ($allowLoopbackBypass) {
-            sv_security_log($config, 'Internal access allowed: localhost bypass (no key)', [
-                'action' => $action,
-                'ip' => $clientIp,
-            ]);
-            $GLOBALS['sv_last_internal_key_valid'] = true;
-            return [
-                'ok' => true,
-                'status' => 'ok',
-                'reason_code' => 'localhost_bypass_no_key',
-                'bypass' => true,
-            ];
-        }
-
-        sv_security_log($config, 'Missing internal key', ['action' => $action, 'ip' => $clientIp]);
+        sv_security_log($config, 'Internal access blocked: missing auth', [
+            'action' => $action,
+            'ip' => $clientIp,
+            'session_allowed' => $allowSessionAuth,
+        ]);
         return [
             'ok' => false,
             'status' => 'forbidden',
-            'reason_code' => 'internal_key_required',
+            'reason_code' => 'internal_auth_required',
         ];
     }
 
     if (!hash_equals($expectedKey, $providedKey)) {
-        sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp, 'source' => $providedSource]);
+        sv_security_log($config, 'Invalid internal key', ['action' => $action, 'ip' => $clientIp, 'source' => 'header']);
         return [
             'ok' => false,
             'status' => 'forbidden',
             'reason_code' => 'internal_key_invalid',
         ];
-    }
-
-    if ($providedSource === 'header' && sv_is_loopback_remote_addr()) {
-        $security = $config['security'] ?? [];
-        $secureCookie = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
-        $allowInsecure = !empty($security['allow_insecure_internal_cookie']);
-        $allowCookiePersist = $secureCookie || $allowInsecure;
-        $allowSessionPersist = $allowCookiePersist || sv_is_loopback_remote_addr();
-
-        if ($allowSessionPersist) {
-            $_SESSION['sv_internal_key'] = $expectedKey;
-            if ($allowCookiePersist && !headers_sent()) {
-                setcookie('internal_key', $expectedKey, [
-                    'expires'  => time() + 7 * 24 * 60 * 60,
-                    'path'     => '/',
-                    'samesite' => 'Lax',
-                    'secure'   => $secureCookie,
-                    'httponly' => true,
-                ]);
-            }
-            sv_security_log($config, 'Internal key stored for session', [
-                'action' => $action,
-                'ip'     => $clientIp,
-                'source' => $providedSource,
-                'secure' => $secureCookie,
-                'cookie' => $allowCookiePersist,
-            ]);
-        } else {
-            sv_security_log($config, 'Internal key not persisted (insecure transport)', [
-                'action' => $action,
-                'ip'     => $clientIp,
-                'source' => $providedSource,
-            ]);
-        }
     }
 
     $GLOBALS['sv_last_internal_key_valid'] = true;
@@ -289,13 +277,13 @@ function sv_internal_access_result(array $config, string $action, array $options
         'status' => 'ok',
         'reason_code' => 'internal_key_valid',
         'bypass' => false,
-        'source' => $providedSource,
+        'source' => 'header',
     ];
 }
 
 function sv_validate_internal_access(array $config, string $action, bool $hardFail = true): bool
 {
-    $result = sv_internal_access_result($config, $action, ['allow_loopback_bypass' => false]);
+    $result = sv_internal_access_result($config, $action, ['allow_session' => true]);
     if (!empty($result['ok'])) {
         return true;
     }
@@ -305,14 +293,12 @@ function sv_validate_internal_access(array $config, string $action, bool $hardFa
         $reason = $result['reason_code'] ?? 'forbidden';
         $httpCode = $status === 'config_failed' ? 500 : 403;
         $message = 'Forbidden.';
-        if ($reason === 'non_loopback') {
-            $message = 'Forbidden: local internal access only.';
-        } elseif ($reason === 'internal_key_missing') {
+        if ($reason === 'internal_key_missing') {
             $message = 'Security misconfigured: internal_api_key missing.';
         } elseif ($reason === 'ip_not_whitelisted') {
             $message = 'Forbidden: IP not whitelisted.';
-        } elseif ($reason === 'internal_key_required') {
-            $message = 'Forbidden: internal key required.';
+        } elseif ($reason === 'internal_auth_required') {
+            $message = 'Forbidden: admin session or internal key required.';
         } elseif ($reason === 'internal_key_invalid') {
             $message = 'Forbidden: invalid internal key.';
         }

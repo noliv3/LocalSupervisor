@@ -29,11 +29,11 @@ try {
     $respond(500, ['ok' => false, 'error' => 'Config-Fehler.']);
 }
 
-$isLoopback = sv_is_loopback_remote_addr();
-$hasInternal = $isLoopback ? true : sv_validate_internal_access($config, 'jobs_prune', false);
-if (!$isLoopback && !$hasInternal) {
+$hasInternal = sv_validate_internal_access($config, 'jobs_prune', false);
+if (!$hasInternal) {
     $respond(403, ['ok' => false, 'error' => 'Forbidden', 'code' => 'forbidden']);
 }
+sv_require_csrf_token_json($respond);
 
 try {
     $pdo = sv_open_pdo_web($config);
