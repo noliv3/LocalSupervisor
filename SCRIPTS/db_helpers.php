@@ -89,32 +89,28 @@ function sv_resolve_db_path(array $config, ?string &$reason = null): ?string
 
 function sv_apply_sqlite_pragmas(PDO $pdo, array $config): void
 {
-    try {
-        $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
-        if ($driver !== 'sqlite') {
-            return;
-        }
-
-        $sqliteCfg = $config['db']['sqlite'] ?? [];
-        $busyTimeout = isset($sqliteCfg['busy_timeout_ms']) ? (int)$sqliteCfg['busy_timeout_ms'] : 10000;
-        if ($busyTimeout > 0) {
-            $pdo->exec('PRAGMA busy_timeout = ' . $busyTimeout);
-        }
-
-        $journalMode = isset($sqliteCfg['journal_mode']) && is_string($sqliteCfg['journal_mode'])
-            ? strtoupper(trim($sqliteCfg['journal_mode']))
-            : 'WAL';
-        if ($journalMode !== '') {
-            $pdo->exec('PRAGMA journal_mode = ' . $journalMode);
-            if ($journalMode === 'WAL') {
-                $pdo->exec('PRAGMA synchronous = NORMAL');
-            }
-        }
-
-        $pdo->exec('PRAGMA temp_store = MEMORY');
-    } catch (Throwable $e) {
-        // Pragmas sind optional; Fehler sollen den Verbindungsaufbau nicht blockieren.
+    $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    if ($driver !== 'sqlite') {
+        return;
     }
+
+    $sqliteCfg = $config['db']['sqlite'] ?? [];
+    $busyTimeout = isset($sqliteCfg['busy_timeout_ms']) ? (int)$sqliteCfg['busy_timeout_ms'] : 10000;
+    if ($busyTimeout > 0) {
+        $pdo->exec('PRAGMA busy_timeout = ' . $busyTimeout);
+    }
+
+    $journalMode = isset($sqliteCfg['journal_mode']) && is_string($sqliteCfg['journal_mode'])
+        ? strtoupper(trim($sqliteCfg['journal_mode']))
+        : 'WAL';
+    if ($journalMode !== '') {
+        $pdo->exec('PRAGMA journal_mode = ' . $journalMode);
+        if ($journalMode === 'WAL') {
+            $pdo->exec('PRAGMA synchronous = NORMAL');
+        }
+    }
+
+    $pdo->exec('PRAGMA temp_store = MEMORY');
 }
 
 function sv_db_ensure_runtime_indexes(PDO $pdo): void

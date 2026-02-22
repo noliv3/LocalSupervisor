@@ -274,32 +274,34 @@ function sv_write_jsonl_log(array $config, string $filename, array $payload, int
         }
     }
 
-    if (!isset($payload['ts']) || !is_string($payload['ts'])) {
-        $payload['ts'] = gmdate('Y-m-d\TH:i:s\Z');
-    }
-    if (!isset($payload['service']) || !is_string($payload['service'])) {
-        $payload['service'] = 'php.unknown';
-    }
-    if (!isset($payload['level']) || !is_string($payload['level'])) {
-        $payload['level'] = 'info';
-    }
-    if (!isset($payload['event']) || !is_string($payload['event'])) {
-        $payload['event'] = 'log';
-    }
-    if (!isset($payload['message']) || !is_string($payload['message'])) {
-        $payload['message'] = $payload['event'];
-    }
-    if (!isset($payload['context']) || !is_array($payload['context'])) {
-        $payload['context'] = [];
-    }
-    if (!array_key_exists('request_id', $payload)) {
-        $payload['request_id'] = null;
-    }
-    if (!isset($payload['version']) || !is_string($payload['version'])) {
-        $payload['version'] = SV_APP_VERSION;
-    }
+    $normalized = [
+        'ts' => (isset($payload['ts']) && is_string($payload['ts']) && $payload['ts'] !== '')
+            ? $payload['ts']
+            : gmdate('Y-m-d\TH:i:s\Z'),
+        'service' => (isset($payload['service']) && is_string($payload['service']) && $payload['service'] !== '')
+            ? $payload['service']
+            : 'php.unknown',
+        'level' => (isset($payload['level']) && is_string($payload['level']) && $payload['level'] !== '')
+            ? $payload['level']
+            : 'info',
+        'event' => (isset($payload['event']) && is_string($payload['event']) && $payload['event'] !== '')
+            ? $payload['event']
+            : 'log',
+        'message' => (isset($payload['message']) && is_string($payload['message']) && $payload['message'] !== '')
+            ? $payload['message']
+            : ((isset($payload['event']) && is_string($payload['event']) && $payload['event'] !== '') ? $payload['event'] : 'log'),
+        'context' => (isset($payload['context']) && is_array($payload['context']))
+            ? $payload['context']
+            : [],
+        'request_id' => (array_key_exists('request_id', $payload) && (is_string($payload['request_id']) || $payload['request_id'] === null))
+            ? $payload['request_id']
+            : null,
+        'version' => (isset($payload['version']) && is_string($payload['version']) && $payload['version'] !== '')
+            ? $payload['version']
+            : SV_APP_VERSION,
+    ];
 
-    $line = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $line = json_encode($normalized, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($line === false) {
         error_log('[sv_write_jsonl_log] json_encode_failed file=' . $logFile);
         return;

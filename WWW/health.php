@@ -23,13 +23,23 @@ if (is_file($statusPath)) {
 
 $logsRoot = sv_logs_root($config);
 $freshnessSeconds = 180;
-$services = ['scan_service', 'forge_service', 'media_service', 'library_rename_service', 'ollama_service', 'scan_worker'];
+$services = [
+    ['name' => 'scan_service', 'optional' => false],
+    ['name' => 'forge_service', 'optional' => false],
+    ['name' => 'media_service', 'optional' => false],
+    ['name' => 'library_rename_service', 'optional' => false],
+    ['name' => 'ollama_service', 'optional' => (bool)($config['ollama']['optional'] ?? true)],
+    ['name' => 'scan_worker', 'optional' => true],
+];
 
 $serviceStates = [];
 $allOk = true;
 $now = time();
+$tsUtc = gmdate('Y-m-d\TH:i:s\Z');
 
-foreach ($services as $service) {
+foreach ($services as $serviceCfg) {
+    $service = (string)$serviceCfg['name'];
+    $optional = (bool)$serviceCfg['optional'];
     $heartbeatPath = $logsRoot . '/' . $service . '.heartbeat.json';
     $state = 'missing';
     $status = 'stopped';
@@ -54,11 +64,12 @@ foreach ($services as $service) {
         }
     }
 
-    if (!$running) {
+    if (!$optional && !$running) {
         $allOk = false;
     }
 
     $serviceStates[$service] = [
+        'optional' => $optional,
         'running' => $running,
         'state' => $state,
         'status' => $status,
@@ -70,7 +81,7 @@ header('Content-Type: application/json; charset=utf-8');
 http_response_code(200);
 echo json_encode([
     'ok' => $allOk,
-    'ts' => date('c'),
+    'ts' => $tsUtc,
     'version' => $version,
     'freshness_seconds' => $freshnessSeconds,
     'services' => $serviceStates,

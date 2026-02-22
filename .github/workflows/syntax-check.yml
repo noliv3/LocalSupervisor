@@ -7,19 +7,31 @@ on:
 jobs:
   syntax:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
 
       - name: Node syntax check
         run: npm run lint:node-syntax
 
       - name: PHP syntax check
         run: |
+          set -euo pipefail
           php -l SCRIPTS/logging.php
           php -l SCRIPTS/log_incidents.php
-          find SCRIPTS/migrations -name '*.php' -print0 | xargs -0 -n1 php -l
+          find SCRIPTS/migrations -name '*.php' -print0 | xargs -0 -r -n1 php -l
