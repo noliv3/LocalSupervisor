@@ -100,6 +100,52 @@ class ProcessManager {
     };
   }
 
+
+
+  normalizeCommand(command, args) {
+    if (Array.isArray(command)) {
+      if (command.length === 0 || typeof command[0] !== 'string' || command[0].trim() === '') {
+        throw new Error('ComfyUI command array must contain executable as first item');
+      }
+      return { executable: command[0], cmdArgs: command.slice(1).map((item) => `${item}`) };
+    }
+
+    if (typeof command === 'string' && command.trim() !== '') {
+      const trimmed = command.trim();
+      if (trimmed.includes(' ')) {
+        throw new Error('ComfyUI command with spaces is not allowed; configure command + args explicitly');
+      }
+      const safeArgs = Array.isArray(args) ? args.map((item) => `${item}`) : [];
+      return { executable: trimmed, cmdArgs: safeArgs };
+    }
+
+    throw new Error('ComfyUI command missing in VIDAX config');
+  }
+
+  rotateLogFile(logPath, maxBytes = 10 * 1024 * 1024, maxBackups = 5) {
+    try {
+      if (!fsSync.existsSync(logPath)) {
+        return;
+      }
+      const stats = fsSync.statSync(logPath);
+      if (!stats.isFile() || stats.size < maxBytes) {
+        return;
+      }
+
+      for (let i = maxBackups - 1; i >= 1; i -= 1) {
+        const src = `${logPath}.${i}`;
+        const dst = `${logPath}.${i + 1}`;
+        if (fsSync.existsSync(src)) {
+          fsSync.renameSync(src, dst);
+        }
+      }
+
+      fsSync.renameSync(logPath, `${logPath}.1`);
+    } catch (error) {
+      // keep startup robust even if rotation fails
+    }
+  }
+
   async startComfyUI() {
     const ensured = await this.ensureAssets();
     const missing = ensured.filter((asset) => asset.status !== 'present');
@@ -113,22 +159,26 @@ class ProcessManager {
     }
 
     const comfyConfig = this.vidaxConfig.comfyui || {};
-    const command = comfyConfig.command;
     const workingDir = this.expandPath(comfyConfig.workingDir);
 
-    if (!command || !workingDir) {
-      throw new Error('ComfyUI command/workingDir missing in VIDAX config');
+    if (!workingDir) {
+      throw new Error('ComfyUI workingDir missing in VIDAX config');
     }
+
+    const { executable, cmdArgs } = this.normalizeCommand(comfyConfig.command, comfyConfig.args);
 
     const paths = await this.getComfyStatePaths();
     await fs.mkdir(paths.dir, { recursive: true });
 
+    this.rotateLogFile(paths.outLog);
+    this.rotateLogFile(paths.errLog);
+
     const outFd = fsSync.openSync(paths.outLog, 'a');
     const errFd = fsSync.openSync(paths.errLog, 'a');
 
-    const child = spawn(command, {
+    const child = spawn(executable, cmdArgs, {
       cwd: workingDir,
-      shell: true,
+      shell: false,
       detached: true,
       stdio: ['ignore', outFd, errFd],
     });
@@ -141,7 +191,7 @@ class ProcessManager {
     const payload = {
       pid: child.pid,
       started_at: new Date().toISOString(),
-      command,
+      command: [executable, ...cmdArgs],
       working_dir: workingDir,
       logs: {
         stdout: paths.outLog,

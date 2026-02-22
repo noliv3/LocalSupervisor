@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '004_add_audit_log',
+    'version' => '004_add_audit_log',
     'description' => 'Add audit_log table for security-relevant actions',
 ];
 

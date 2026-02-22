@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261105_001_add_jobs_not_before',
+    'version' => '015_add_jobs_not_before',
     'description' => 'Add not_before column to jobs table for retry backoff gating.',
 ];
 

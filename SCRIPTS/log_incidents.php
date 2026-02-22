@@ -216,7 +216,7 @@ function sv_log_incidents_parse_line(string $line, string $sourceFile, int $line
     }
 
     if ($ts === null) {
-        $ts = $day . 'T00:00:00Z';
+        return null;
     }
 
     if ($jobId === null && preg_match('/\bjob(?:_id|\s*id)?\s*[:=#]?\s*(\d{1,10})\b/i', $raw, $m) === 1) {

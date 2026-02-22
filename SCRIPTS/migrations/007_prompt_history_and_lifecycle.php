@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20260701_001_prompt_history_and_lifecycle',
+    'version' => '007_prompt_history_and_lifecycle',
     'description' => 'Add prompt_history, lifecycle/quality columns and lifecycle events',
 ];
 

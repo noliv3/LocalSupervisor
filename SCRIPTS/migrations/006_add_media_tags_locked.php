@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20260105_001_add_media_tags_locked',
+    'version' => '006_add_media_tags_locked',
     'description' => 'Add locked flag to media_tags to preserve manuelle Tags',
 ];
 

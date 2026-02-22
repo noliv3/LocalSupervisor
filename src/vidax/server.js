@@ -5,7 +5,7 @@ const { ProcessManager } = require('./processManager');
 
 function authMiddleware(expectedKey) {
   return (req, res, next) => {
-    const provided = req.header('x-api-key') || req.query.api_key;
+    const provided = req.header('x-api-key');
     if (!expectedKey || provided !== expectedKey) {
       return res.status(401).json({ error: 'unauthorized' });
     }

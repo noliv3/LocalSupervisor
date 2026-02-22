@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20260720_001_prompt_history_unique',
+    'version' => '008_prompt_history_unique',
     'description' => 'Deduplicate prompt_history versions and add unique index',
 ];
 

@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '005_media_meta_and_video_meta',
+    'version' => '005_media_meta_and_video_meta',
     'description' => 'Add media_meta table for extracted metadata and video details',
 ];
 

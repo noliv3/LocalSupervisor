@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '002_add_consistency_log',
+    'version' => '002_add_consistency_log',
     'description' => 'Add consistency_log table for consistency checks',
 ];
 

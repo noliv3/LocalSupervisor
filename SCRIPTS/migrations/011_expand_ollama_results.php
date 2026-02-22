@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261001_001_expand_ollama_results',
+    'version' => '011_expand_ollama_results',
     'description' => 'Expand ollama_results with structured fields for title/caption/score and metadata',
 ];
 

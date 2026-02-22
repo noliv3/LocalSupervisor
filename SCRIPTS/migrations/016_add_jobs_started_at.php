@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261110_001_add_jobs_started_at',
+    'version' => '016_add_jobs_started_at',
     'description' => 'Add started_at column to jobs table for worker start tracking.',
 ];
 

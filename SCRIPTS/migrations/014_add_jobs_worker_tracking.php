@@ -1,11 +1,11 @@
 <?php
-// Ergänzt jobs um OLLAMA-Control-Felder (SQLite/MySQL).
+// Ergänzt jobs um Worker/Stage-Tracking (SQLite/MySQL).
 
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261015_001_expand_jobs_for_ollama_control',
-    'description' => 'Add OLLAMA control fields to jobs table (heartbeat/progress/cancel/error code).',
+    'version' => '014_add_jobs_worker_tracking',
+    'description' => 'Add worker pid/owner and stage tracking to jobs table.',
 ];
 
 $migration['run'] = function (PDO $pdo) use (&$migration): void {
@@ -34,21 +34,17 @@ $migration['run'] = function (PDO $pdo) use (&$migration): void {
 
     if ($driver === 'mysql') {
         $columnDefs = [
-            'last_error_code' => 'VARCHAR(255)',
-            'heartbeat_at' => 'DATETIME',
-            'progress_bits' => 'INT',
-            'progress_bits_total' => 'INT',
-            'cancel_requested' => 'INT NOT NULL DEFAULT 0',
-            'cancelled_at' => 'DATETIME',
+            'worker_pid' => 'INT',
+            'worker_owner' => 'VARCHAR(255)',
+            'stage' => 'VARCHAR(255)',
+            'stage_changed_at' => 'DATETIME',
         ];
     } else {
         $columnDefs = [
-            'last_error_code' => 'TEXT',
-            'heartbeat_at' => 'TEXT',
-            'progress_bits' => 'INTEGER',
-            'progress_bits_total' => 'INTEGER',
-            'cancel_requested' => 'INTEGER NOT NULL DEFAULT 0',
-            'cancelled_at' => 'TEXT',
+            'worker_pid' => 'INTEGER',
+            'worker_owner' => 'TEXT',
+            'stage' => 'TEXT',
+            'stage_changed_at' => 'TEXT',
         ];
     }
 
