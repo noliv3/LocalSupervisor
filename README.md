@@ -48,6 +48,14 @@ Sie bündelt **Import, Katalogisierung, Analyse, Ableitungen und Betrieb** in ei
 - **Forge**: Rezeptgesteuerte Job-Erzeugung und Verarbeitung.
 - **VIDAX/Node-Komponenten**: Ergänzende Runtime-Werkzeuge (`bin/va.js`).
 
+
+## VIDAX Betriebsnotizen (Stabilisierung)
+
+- VIDAX akzeptiert den API-Key ausschließlich über den Header `x-api-key` (keine Query-Parameter).
+- ComfyUI-Starts erfolgen ohne Shell-Escaping (`spawn` mit explizitem Executable + Argument-Array).
+- Node-Logs für ComfyUI werden bei Start rotiert (`comfyui.out.log(.N)`, `comfyui.err.log(.N)`), damit Logdateien nicht unbounded wachsen.
+- PHP-JSONL-Logs nutzen ein fixes Schema: `ts`, `service`, `level`, `event`, `message`, `context`, `request_id`, `version`.
+
 ## Schnellstart (kompakt)
 
 1. Konfiguration anlegen

@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '001_initial_schema',
+    'version' => '001_initial_schema',
     'description' => 'Initial schema baseline supervisor.sqlite',
 ];
 

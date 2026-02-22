@@ -1,0 +1,25 @@
+name: Syntax Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Node syntax check
+        run: npm run lint:node-syntax
+
+      - name: PHP syntax check
+        run: |
+          php -l SCRIPTS/logging.php
+          php -l SCRIPTS/log_incidents.php
+          find SCRIPTS/migrations -name '*.php' -print0 | xargs -0 -n1 php -l

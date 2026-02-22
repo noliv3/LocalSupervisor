@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20260920_001_add_ollama_results',
+    'version' => '010_add_ollama_results',
     'description' => 'Add ollama_results table for ollama image analysis results',
 ];
 

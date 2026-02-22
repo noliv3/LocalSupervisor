@@ -1,5 +1,11 @@
 # VERSIONLOG
 
+## 2026-02-22
+- Build/Runtime-Stabilisierung: VIDAX nutzt nur noch sichere Spawn-Aufrufe ohne `shell:true`; API-Key nur via Header.
+- Logging harmonisiert: einheitliches JSONL-Schema für PHP-Logs (inkl. `service`, `level`, `event`, `message`, `context`, `request_id`, `version`) sowie Node-Log-Rotation für ComfyUI-stdout/stderr.
+- Datenbankschicht bereinigt: `DB/schema.sql` als primäre Schemaquelle dokumentiert; Migrationen auf fortlaufendes numerisches Versionsschema umgestellt.
+- CI ergänzt: minimaler Workflow für PHP-Lint und Node-Syntaxcheck.
+
 ## 2026-02-06
 - Phase 3: Dashboard für System-Errors hinzugefügt, Legacy-Payload-Checks entfernt und Selftests (Logs/WAL) erweitert.
 - Mega-Update Stabilität: Aggressives Prozess-Management (Terminierung Prozessbaum), robustes Markdown-JSON-Parsing und GD-Speicheroptimierung.

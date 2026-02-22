@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/common.php';
 
+const SV_APP_VERSION = '1.0.1';
+
 function sv_logs_root(array $config): string
 {
     $paths = $config['paths'] ?? [];
@@ -37,6 +39,21 @@ function sv_ensure_logs_root(array $config, ?string &$error = null): ?string
     return $root;
 }
 
+
+function sv_jsonl_log_entry(string $service, string $level, string $event, string $message, array $context = [], ?string $requestId = null): array
+{
+    return [
+        'ts' => gmdate('Y-m-d\TH:i:s\Z'),
+        'service' => $service,
+        'level' => $level,
+        'event' => $event,
+        'message' => $message,
+        'context' => $context,
+        'request_id' => $requestId,
+        'version' => SV_APP_VERSION,
+    ];
+}
+
 function sv_log_system_error(array $config, string $message, array $context = []): void
 {
     $root = sv_logs_root($config);
@@ -59,11 +76,7 @@ function sv_log_system_error(array $config, string $message, array $context = []
         return;
     }
 
-    $payload = [
-        'ts' => date('c'),
-        'message' => $message,
-        'context' => $context,
-    ];
+    $payload = sv_jsonl_log_entry('php.system', 'error', 'system_error', $message, $context);
     $line = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($line === false) {
         error_log('[sv_log_system_error] ' . $message . ' | json_encode_failed');
@@ -149,13 +162,7 @@ function sv_log_rate_limiter_allow(string $logsRoot, string $workerType, string 
 
 function sv_log_worker_event(array $config, string $workerType, string $event, string $state, array $context = []): void
 {
-    $payload = [
-        'ts' => date('c'),
-        'worker_type' => $workerType,
-        'event' => $event,
-        'state' => $state,
-        'context' => $context,
-    ];
+    $payload = sv_jsonl_log_entry('php.worker', 'info', $event, $event, array_merge($context, ['worker_type' => $workerType, 'state' => $state]));
     sv_write_jsonl_log($config, 'worker_events.jsonl', $payload, 30);
 }
 
@@ -265,6 +272,31 @@ function sv_write_jsonl_log(array $config, string $filename, array $payload, int
             }
             sv_rotate_channel_logs($logsRoot, $prefix, $retention);
         }
+    }
+
+    if (!isset($payload['ts']) || !is_string($payload['ts'])) {
+        $payload['ts'] = gmdate('Y-m-d\TH:i:s\Z');
+    }
+    if (!isset($payload['service']) || !is_string($payload['service'])) {
+        $payload['service'] = 'php.unknown';
+    }
+    if (!isset($payload['level']) || !is_string($payload['level'])) {
+        $payload['level'] = 'info';
+    }
+    if (!isset($payload['event']) || !is_string($payload['event'])) {
+        $payload['event'] = 'log';
+    }
+    if (!isset($payload['message']) || !is_string($payload['message'])) {
+        $payload['message'] = $payload['event'];
+    }
+    if (!isset($payload['context']) || !is_array($payload['context'])) {
+        $payload['context'] = [];
+    }
+    if (!array_key_exists('request_id', $payload)) {
+        $payload['request_id'] = null;
+    }
+    if (!isset($payload['version']) || !is_string($payload['version'])) {
+        $payload['version'] = SV_APP_VERSION;
     }
 
     $line = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);

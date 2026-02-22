@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261020_001_add_media_vote_active_deleted',
+    'version' => '013_add_media_vote_active_deleted',
     'description' => 'Add status_vote, is_active, is_deleted to media table.',
 ];
 

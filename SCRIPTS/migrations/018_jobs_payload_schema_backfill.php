@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261125_001_jobs_payload_schema_backfill',
+    'version' => '018_jobs_payload_schema_backfill',
     'description' => 'Add missing jobs payload/stage columns and backfill payload_json from payload.',
 ];
 

@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20260910_001_tags_name_type_unique',
+    'version' => '009_tags_name_type_unique',
     'description' => 'Adjust tags unique constraint to (name, type)',
 ];
 

@@ -1,6 +1,6 @@
 {
   "name": "localsupervisor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "VA setup utilities and VIDAX server",
   "main": "src/vidax/server.js",
   "type": "commonjs",
@@ -10,7 +10,8 @@
   "scripts": {
     "start:vidax": "node src/vidax/server.js",
     "va:doctor": "node bin/va.js doctor",
-    "va:install": "node bin/va.js install"
+    "va:install": "node bin/va.js install",
+    "lint:node-syntax": "node --check src/vidax/server.js && node --check src/vidax/processManager.js && node --check src/setup/assets.js"
   },
   "dependencies": {
     "commander": "^11.1.0",

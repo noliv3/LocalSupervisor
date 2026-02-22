@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '003_add_runtime_indexes',
+    'version' => '003_add_runtime_indexes',
     'description' => 'Add runtime indexes for media type filters',
 ];
 

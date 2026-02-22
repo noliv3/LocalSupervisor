@@ -1,3 +1,6 @@
+-- Single Source of Truth: Dieses Schema ist die maßgebliche Definition der Datenbankstruktur.
+-- Migrationen in SCRIPTS/migrations dürfen dieses Schema nur reproduzierbar und versioniert nachziehen.
+
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS media (

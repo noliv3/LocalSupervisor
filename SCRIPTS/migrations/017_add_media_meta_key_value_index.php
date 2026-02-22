@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 $migration = [
-    'version'     => '20261120_001_add_media_meta_key_value_index',
+    'version' => '017_add_media_meta_key_value_index',
     'description' => 'Add index for media_meta(meta_key, meta_value) to accelerate meta lookups.',
 ];
 
