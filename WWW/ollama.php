@@ -20,7 +20,7 @@ $respond = static function (int $code, array $payload): void {
 
 try {
     $config = sv_load_config();
-    $access = sv_internal_access_result($config, 'ollama_actions', ['allow_loopback_bypass' => true]);
+    $access = sv_internal_access_result($config, 'ollama_actions', ['allow_loopback_bypass' => false]);
     if (empty($access['ok'])) {
         $status = $access['status'] ?? 'forbidden';
         $httpCode = $status === 'config_failed' ? 500 : 403;
@@ -51,6 +51,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     $respond(405, ['ok' => false, 'error' => 'POST required.']);
 }
 
+sv_require_csrf_token_json($respond);
+
 $rawBody = file_get_contents('php://input');
 $jsonBody = null;
 if (is_string($rawBody) && trim($rawBody) !== '') {
@@ -63,21 +65,7 @@ if ($action === '') {
     $respond(400, ['ok' => false, 'error' => 'Missing action.']);
 }
 $logsPath = sv_logs_root($config);
-$webMigrationsEnabled = (bool)($config['migrations']['web_enabled'] ?? false);
 $webSpawnEnabled = (bool)($config['workers']['web_spawn_enabled'] ?? false);
-
-$migrateActions = ['enqueue', 'cancel', 'delete', 'job_status'];
-if ($webMigrationsEnabled && in_array($action, $migrateActions, true)) {
-    try {
-        $pdoMigrate = $openWebPdo();
-        sv_run_migrations_if_needed($pdoMigrate, $config);
-    } catch (Throwable $e) {
-        if (sv_is_sqlite_busy($e)) {
-            $respondBusy();
-        }
-        $respond(500, ['ok' => false, 'error' => 'Migration fehlgeschlagen: ' . $e->getMessage()]);
-    }
-}
 
 if ($action === 'status') {
     $detailsParam = $_POST['details'] ?? ($jsonBody['details'] ?? null);

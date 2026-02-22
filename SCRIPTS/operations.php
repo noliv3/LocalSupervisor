@@ -32,7 +32,7 @@ const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
-const SV_JOB_STATUS_CANCELED      = 'canceled';
+const SV_JOB_STATUS_CANCELLED      = 'cancelled';
 const SV_JOB_STUCK_MINUTES        = 30;
 const SV_JOB_QUEUE_STATUSES       = ['queued', 'pending', 'created'];
 const SV_LIFECYCLE_ACTIVE         = 'active';
@@ -169,7 +169,7 @@ function sv_is_sqlite_busy(Throwable $error): bool
     return false;
 }
 
-function sv_open_pdo_web(array $config, bool $queryOnly = false, int $busyTimeoutMs = 25): PDO
+function sv_open_pdo_web(array $config, bool $queryOnly = false, int $busyTimeoutMs = 10000): PDO
 {
     if (!defined('SV_WEB_CONTEXT')) {
         define('SV_WEB_CONTEXT', true);
@@ -179,7 +179,7 @@ function sv_open_pdo_web(array $config, bool $queryOnly = false, int $busyTimeou
     try {
         $driver = (string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
         if ($driver === 'sqlite') {
-            $timeout = max(0, min(25, $busyTimeoutMs));
+            $timeout = max(1000, $busyTimeoutMs);
             $pdo->exec('PRAGMA busy_timeout = ' . $timeout);
             if ($queryOnly) {
                 $pdo->exec('PRAGMA query_only = 1');
@@ -239,7 +239,7 @@ function sv_update_job_checkpoint_payload(PDO $pdo, int $jobId, array $payload):
         $stmt = $pdo->prepare('UPDATE jobs SET ' . $column . ' = :payload, updated_at = :updated_at WHERE id = :id');
         $stmt->execute([
             ':payload'    => $json,
-            ':updated_at' => date('c'),
+            ':updated_at' => gmdate('c'),
             ':id'         => $jobId,
         ]);
     });
@@ -300,7 +300,7 @@ function sv_enqueue_job_with_payload(
         'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, ' . $column . ') '
         . 'VALUES (:media_id, NULL, :type, :status, :created_at, :updated_at, :payload)'
     );
-    $now = date('c');
+    $now = gmdate('c');
     $stmt->execute([
         ':media_id'  => $mediaId,
         ':type'      => $type,
@@ -346,7 +346,7 @@ function sv_media_job_types(): array
 
 function sv_finished_job_statuses(): array
 {
-    return ['done', 'error', SV_JOB_STATUS_CANCELED];
+    return ['done', 'error', SV_JOB_STATUS_CANCELLED];
 }
 
 function sv_quality_status_values(): array
@@ -421,7 +421,7 @@ class SvForgeHttpException extends RuntimeException
 
 function sv_sanitize_url(string $url): string
 {
-    $parts = @parse_url($url);
+    $parts = parse_url($url);
     if (!is_array($parts)) {
         return $url;
     }
@@ -675,7 +675,7 @@ function sv_resolve_preview_dir(array $config): string
     }
 
     if (!is_dir($previewAbs)) {
-        if (!mkdir($previewAbs, 0777, true) && !is_dir($previewAbs)) {
+        if (!mkdir($previewAbs, 0755, true) && !is_dir($previewAbs)) {
             throw new RuntimeException('Preview-Verzeichnis kann nicht angelegt werden: ' . $previewAbs);
         }
     }
@@ -685,12 +685,12 @@ function sv_resolve_preview_dir(array $config): string
 
 function sv_is_suspicious_image(string $path): array
 {
-    $info = @getimagesize($path);
+    $info = getimagesize($path);
     if ($info === false) {
         return ['suspicious' => true, 'reason' => 'getimagesize failed'];
     }
 
-    $filesize = @filesize($path);
+    $filesize = filesize($path);
     if ($filesize !== false && $filesize < 10240) {
         return ['suspicious' => true, 'reason' => 'filesize below 10KB'];
     }
@@ -829,7 +829,7 @@ function sv_record_lifecycle_event(PDO $pdo, int $mediaId, string $eventType, ar
             ':rule'           => $payload['rule'] ?? null,
             ':reason'         => $payload['reason'] ?? null,
             ':actor'          => $payload['actor'] ?? 'internal',
-            ':created_at'     => date('c'),
+            ':created_at'     => gmdate('c'),
         ]);
     } catch (Throwable $e) {
         // Protokollierung darf Ablauf nicht blockieren (Migration optional).
@@ -853,7 +853,7 @@ function sv_set_media_lifecycle_status(
     }
     $prevLifecycle = (string)($row['lifecycle_status'] ?? SV_LIFECYCLE_ACTIVE);
 
-    $now = date('c');
+    $now = gmdate('c');
     try {
         $update = $pdo->prepare('UPDATE media SET lifecycle_status = ?, lifecycle_reason = ?, deleted_at = CASE WHEN ? = ? THEN COALESCE(deleted_at, ?) ELSE deleted_at END WHERE id = ?');
         $update->execute([
@@ -1095,7 +1095,7 @@ function sv_fetch_prompt_snapshot(PDO $pdo, int $mediaId): ?array
 
 function sv_create_forge_job(PDO $pdo, array $config, int $mediaId, array $payload, ?int $promptId, callable $logger): int
 {
-    $now = date('c');
+    $now = gmdate('c');
     $requestJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
     sv_enforce_job_queue_capacity($pdo, $config, SV_FORGE_JOB_TYPE, $mediaId);
@@ -1307,7 +1307,7 @@ function sv_forge_healthcheck(array $endpoint, callable $logger): array
         ],
     ]);
 
-    $responseBody = @file_get_contents($url, false, $context);
+    $responseBody = file_get_contents($url, false, $context);
     $httpCode     = null;
     if (isset($http_response_header) && is_array($http_response_header)) {
         foreach ($http_response_header as $headerLine) {
@@ -1390,7 +1390,7 @@ function sv_forge_fetch_model_list(array $config, callable $logger): ?array
         return false;
     });
     try {
-        $responseBody = @file_get_contents($url, false, $context);
+        $responseBody = file_get_contents($url, false, $context);
     } catch (Throwable $e) {
         restore_error_handler();
         $msg = sv_forge_limit_error($e->getMessage());
@@ -1514,7 +1514,7 @@ function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds =
 
     $cachedPayload = null;
     if (is_file($cacheFile) && is_readable($cacheFile)) {
-        $raw = @file_get_contents($cacheFile);
+        $raw = file_get_contents($cacheFile);
         if ($raw !== false) {
             $decoded = json_decode($raw, true);
             if (is_array($decoded) && isset($decoded['fetched_at'], $decoded['models'])) {
@@ -1562,9 +1562,9 @@ function sv_forge_list_models(array $config, callable $logger, int $ttlSeconds =
         if ($payload !== false) {
             $cacheDir = dirname($cacheFile);
             if (!is_dir($cacheDir)) {
-                @mkdir($cacheDir, 0775, true);
+                mkdir($cacheDir, 0775, true);
             }
-            @file_put_contents($cacheFile, $payload);
+            file_put_contents($cacheFile, $payload);
         }
         $result['source'] = 'live';
         return $result;
@@ -1731,7 +1731,7 @@ function sv_dispatch_forge_job(PDO $pdo, array $config, int $jobId, array $paylo
         ],
     ]);
 
-    $responseBody = @file_get_contents($url, false, $context);
+    $responseBody = file_get_contents($url, false, $context);
     $httpCode     = null;
     if (isset($http_response_header) && is_array($http_response_header)) {
         foreach ($http_response_header as $headerLine) {
@@ -1810,7 +1810,7 @@ function sv_prepare_forge_regen_job(PDO $pdo, array $config, int $mediaId, calla
     $regenPlan  = sv_prepare_forge_regen_prompt($mediaRow, $tags, $logger, $normalizedOverrides);
     $promptId   = isset($mediaRow['prompt_id']) ? (int)$mediaRow['prompt_id'] : null;
 
-    $imageInfo = @getimagesize($path);
+    $imageInfo = getimagesize($path);
     $origWidth = $imageInfo !== false ? (int)$imageInfo[0] : (int)($mediaRow['width'] ?? 0);
     $origHeight = $imageInfo !== false ? (int)$imageInfo[1] : (int)($mediaRow['height'] ?? 0);
 
@@ -2349,7 +2349,7 @@ function sv_spawn_forge_worker_for_media(
                 '_sv_worker_spawn_skipped'    => true,
                 '_sv_worker_spawn_reason'     => 'log_dir_unwritable',
                 '_sv_worker_spawn_error'      => $logsError,
-                '_sv_worker_spawn_attempt'    => date('c'),
+                '_sv_worker_spawn_attempt'    => gmdate('c'),
                 'worker_spawn'                => 'error',
                 'worker_spawn_cmd'            => null,
                 'worker_spawn_err_snippet'    => null,
@@ -2360,7 +2360,7 @@ function sv_spawn_forge_worker_for_media(
         }
         return [
             'pid'          => null,
-            'started'      => date('c'),
+            'started'      => gmdate('c'),
             'unknown'      => false,
             'skipped'      => true,
             'reason'       => 'log_dir_unwritable',
@@ -2406,7 +2406,7 @@ function sv_spawn_forge_worker_for_media(
         if ($state !== 'error') {
             return;
         }
-        $line = '[' . date('c') . '] ' . $state . ': ' . $reason . PHP_EOL;
+        $line = '[' . gmdate('c') . '] ' . $state . ': ' . $reason . PHP_EOL;
         $result = file_put_contents($spawnErrLog, $line, FILE_APPEND);
         if ($result === false) {
             sv_log_system_error($config, 'forge_worker_spawn_log_write_failed', ['worker_type' => 'forge_worker', 'error_code' => 'spawn_log_write_failed', 'path' => $spawnErrLog]);
@@ -2528,7 +2528,7 @@ function sv_spawn_forge_worker_for_media(
     $effectiveLimit = $limit === null ? 1 : max(1, (int)$limit);
     $baseDir        = sv_base_dir();
     $script         = $baseDir . '/SCRIPTS/forge_worker_cli.php';
-    $startedAt      = date('c');
+    $startedAt      = gmdate('c');
     $pid            = null;
     $unknown        = false;
     $spawnError     = null;
@@ -2968,12 +2968,12 @@ function sv_create_scan_backfill_job(PDO $pdo, array $config, array $options, ca
         'mode'       => $mode,
         'chunk'      => $chunk,
         'max'        => $max,
-        'created_at' => date('c'),
+        'created_at' => gmdate('c'),
     ];
 
     sv_enforce_job_queue_capacity($pdo, $config, SV_JOB_TYPE_SCAN_BACKFILL_TAGS);
 
-    $now = date('c');
+    $now = gmdate('c');
     $insert = $pdo->prepare(
         'INSERT INTO jobs (media_id, prompt_id, type, status, created_at, updated_at, forge_request_json) '
         . 'VALUES (0, NULL, :type, :status, :created_at, :updated_at, :payload)'
@@ -3019,7 +3019,7 @@ function sv_create_scan_job(PDO $pdo, array $config, string $scanPath, ?int $lim
     }
 
     $limit = $limit !== null && $limit > 0 ? $limit : null;
-    $now   = date('c');
+    $now   = gmdate('c');
     $normalizedPath = str_replace('\\', '/', $scanPath);
     if ($normalizedPath !== '/' && !preg_match('~^[A-Za-z]:/$~', $normalizedPath)) {
         $normalizedPath = rtrim($normalizedPath, '/');
@@ -3099,7 +3099,7 @@ function sv_enqueue_rescan_media_job(PDO $pdo, array $config, int $mediaId, call
         ];
     }
 
-    $now = date('c');
+    $now = gmdate('c');
     $payload = [
         'media_id'       => $mediaId,
         'path'           => str_replace('\\', '/', $path),
@@ -3150,8 +3150,8 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         ];
     }
 
-    if (sv_is_job_canceled($pdo, $jobId)) {
-        return sv_finalize_canceled_job($pdo, $jobId, ['media_id' => $mediaId], $logger, 'rescan pre-start');
+    if (sv_is_job_cancelled($pdo, $jobId)) {
+        return sv_finalize_cancelled_job($pdo, $jobId, ['media_id' => $mediaId], $logger, 'rescan pre-start');
     }
 
     $claimReason = null;
@@ -3177,7 +3177,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         'result'   => null,
     ];
 
-    $startedAt = date('c');
+    $startedAt = gmdate('c');
     $response['started_at'] = $startedAt;
 
     try {
@@ -3221,7 +3221,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
 
         $resultMeta = [];
         $cancelCheck = static function () use ($pdo, $jobId): bool {
-            return sv_is_job_canceled($pdo, $jobId);
+            return sv_is_job_cancelled($pdo, $jobId);
         };
         $ok = sv_rescan_media(
             $pdo,
@@ -3234,17 +3234,17 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             $cancelCheck
         );
 
-        if (!empty($resultMeta['canceled'])) {
+        if (!empty($resultMeta['cancelled'])) {
             $response = array_merge($response, [
                 'media_id' => $mediaId,
                 'path'     => $path,
-                'result'   => 'canceled',
+                'result'   => 'cancelled',
                 'started_at' => $startedAt,
             ]);
-            return sv_finalize_canceled_job($pdo, $jobId, $response, $logger, 'rescan in-progress');
+            return sv_finalize_cancelled_job($pdo, $jobId, $response, $logger, 'rescan in-progress');
         }
 
-        $finishedAt = date('c');
+        $finishedAt = gmdate('c');
         $response = array_merge($response, [
             'media_id'     => $mediaId,
             'path'         => $path,
@@ -3283,7 +3283,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
 
         $error = $resultMeta['error'] ?? ((isset($response['error']) && is_string($response['error'])) ? $response['error'] : 'Rescan fehlgeschlagen');
         $jobLogger('Rescan failed: ' . (string)$error);
-        $finishedAt = date('c');
+        $finishedAt = gmdate('c');
         $response['error'] = $error;
         $response['finished_at'] = $finishedAt;
         if (!empty($resultMeta['short_error'])) {
@@ -3317,7 +3317,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
         if (!empty($resultMeta['short_error'])) {
             $response['short_error'] = $resultMeta['short_error'];
         }
-        $response['finished_at'] = date('c');
+        $response['finished_at'] = gmdate('c');
         sv_update_job_status(
             $pdo,
             $jobId,
@@ -3335,7 +3335,7 @@ function sv_process_rescan_media_job(PDO $pdo, array $config, array $jobRow, cal
             'error'  => $message,
         ];
     } finally {
-        $now = date('c');
+        $now = gmdate('c');
         $response['updated_at'] = $now;
         sv_db_exec_retry(static function () use ($pdo, $jobId, $now): void {
             $update = $pdo->prepare('UPDATE jobs SET updated_at = :updated_at WHERE id = :id');
@@ -3359,8 +3359,8 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
         ];
     }
 
-    if (sv_is_job_canceled($pdo, $jobId)) {
-        return sv_finalize_canceled_job($pdo, $jobId, [], $logger, 'backfill pre-start');
+    if (sv_is_job_cancelled($pdo, $jobId)) {
+        return sv_finalize_cancelled_job($pdo, $jobId, [], $logger, 'backfill pre-start');
     }
 
     $payload = json_decode((string)($jobRow['forge_request_json'] ?? ''), true) ?: [];
@@ -3430,7 +3430,7 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
     $jobLogger('Starte Backfill (' . $mode . '), chunk=' . $chunk . ($max !== null ? ', max=' . $max : '') . ', cap=' . $maxEnqueuePerRun);
 
     $cancelCheck = static function () use ($pdo, $jobId): bool {
-        return sv_is_job_canceled($pdo, $jobId);
+        return sv_is_job_cancelled($pdo, $jobId);
     };
 
     sv_update_job_checkpoint_payload($pdo, $jobId, array_filter([
@@ -3447,7 +3447,7 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
     $stopEarly = false;
     while (true) {
         if ($cancelCheck()) {
-            return sv_finalize_canceled_job(
+            return sv_finalize_cancelled_job(
                 $pdo,
                 $jobId,
                 [
@@ -3485,7 +3485,7 @@ function sv_process_scan_backfill_job(PDO $pdo, array $config, array $jobRow, ca
 
         foreach ($ids as $mediaId) {
             if ($cancelCheck()) {
-                return sv_finalize_canceled_job(
+                return sv_finalize_cancelled_job(
                     $pdo,
                     $jobId,
                     [
@@ -3769,7 +3769,7 @@ function sv_spawn_scan_worker(array $config, ?string $pathFilter, ?int $limit, c
         $cmd = implode(' ', $args);
     }
 
-    $startedAt = date('c');
+    $startedAt = gmdate('c');
     $pid       = null;
     $unknown   = false;
     $spawnCmd  = null;
@@ -3990,7 +3990,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
         sv_log_system_error($config, 'update_center_log_root_unavailable', ['error' => $logsError]);
         return [
             'spawned'     => false,
-            'started'     => date('c'),
+            'started'     => gmdate('c'),
             'error'       => 'Log-Root nicht verfügbar.',
             'reason_code' => 'log_root_unavailable',
             'message'     => 'Log-Root nicht verfügbar.',
@@ -4016,7 +4016,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
         sv_log_system_error($config, 'update_center_lock_open_failed', ['path' => $lockPath]);
         return [
             'spawned'     => false,
-            'started'     => date('c'),
+            'started'     => gmdate('c'),
             'error'       => 'Update-Lock konnte nicht geöffnet werden.',
             'reason_code' => 'spawn_lock_open_failed',
             'message'     => 'Update-Lock konnte nicht geöffnet werden.',
@@ -4034,7 +4034,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
         fclose($lockHandle);
         return [
             'spawned'     => false,
-            'started'     => date('c'),
+            'started'     => gmdate('c'),
             'error'       => 'Update-Lock belegt.',
             'reason_code' => 'spawn_lock_busy',
             'message'     => 'Update-Lock belegt.',
@@ -4115,7 +4115,7 @@ function sv_spawn_update_center_run(array $config, string $action = 'update_ff_r
         $action = 'update_ff_restart';
     }
 
-    $startedAt = date('c');
+    $startedAt = gmdate('c');
     $spawned   = false;
     $error     = null;
     $pid       = null;
@@ -4235,7 +4235,7 @@ function sv_build_scanner_config_job_error(array $scannerCfg, string $path, stri
             'missing_keys' => $missingKeys,
             'config_path' => $configPath,
             'response_type_detected' => 'config_error',
-            'finished_at' => date('c'),
+            'finished_at' => gmdate('c'),
         ],
     ];
 }
@@ -4260,8 +4260,8 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
         $logger('[Job ' . $jobId . '] ' . $msg);
     };
 
-    if (sv_is_job_canceled($pdo, $jobId)) {
-        return sv_finalize_canceled_job($pdo, $jobId, ['path' => $path], $logger, 'scan pre-start');
+    if (sv_is_job_cancelled($pdo, $jobId)) {
+        return sv_finalize_cancelled_job($pdo, $jobId, ['path' => $path], $logger, 'scan pre-start');
     }
 
     $claimReason = null;
@@ -4276,7 +4276,7 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
     $jobLogger('Beginne Scan für ' . sv_safe_path_label($path) . ($limit !== null ? ' (limit=' . $limit . ')' : ''));
 
     $cancelCheck = static function () use ($pdo, $jobId): bool {
-        return sv_is_job_canceled($pdo, $jobId);
+        return sv_is_job_cancelled($pdo, $jobId);
     };
 
     $scannerCfg = $config['scanner'] ?? [];
@@ -4304,8 +4304,8 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
 
     $result = sv_run_scan_operation($pdo, $config, $path, $limit, $jobLogger, $cancelCheck);
 
-    if (!empty($result['canceled'])) {
-        return sv_finalize_canceled_job($pdo, $jobId, [
+    if (!empty($result['cancelled'])) {
+        return sv_finalize_cancelled_job($pdo, $jobId, [
             'path'  => sv_safe_path_label($path),
             'limit' => $limit,
         ], $logger, 'scan in-progress');
@@ -4315,7 +4315,7 @@ function sv_process_single_scan_job(PDO $pdo, array $config, array $jobRow, call
         'path'         => sv_safe_path_label($path),
         'limit'        => $limit,
         'result'       => $result,
-        'completed_at' => date('c'),
+        'completed_at' => gmdate('c'),
     ];
 
     sv_update_job_status(
@@ -4410,7 +4410,7 @@ function sv_process_scan_job_batch(
                 $done++;
             } elseif (($result['status'] ?? '') === 'skipped') {
                 $skipped++;
-            } elseif (($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
+            } elseif (($result['status'] ?? '') === SV_JOB_STATUS_CANCELLED) {
                 $done++;
             } else {
                 $errors++;
@@ -4473,7 +4473,7 @@ function sv_process_scan_job_batch(
             }
             $logger('Verarbeite Rescan-Job #' . $jobId . ' (Media ' . (int)($jobRow['media_id'] ?? 0) . ')');
             $result = sv_process_rescan_media_job($pdo, $config, $jobRow, $logger);
-            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
+            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === SV_JOB_STATUS_CANCELLED) {
                 $done++;
             } elseif (($result['status'] ?? '') === 'skipped') {
                 $skipped++;
@@ -4540,7 +4540,7 @@ function sv_process_scan_job_batch(
             }
             $logger('Verarbeite Scan-Job #' . $jobId . ' (' . $jobPath . ')');
             $result = sv_process_single_scan_job($pdo, $config, $jobRow, $logger);
-            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === SV_JOB_STATUS_CANCELED) {
+            if (($result['status'] ?? '') === 'done' || ($result['status'] ?? '') === SV_JOB_STATUS_CANCELLED) {
                 $done++;
             } elseif (($result['status'] ?? '') === 'skipped') {
                 $skipped++;
@@ -4855,7 +4855,7 @@ function sv_enqueue_library_rename_jobs(PDO $pdo, array $config, int $limit, int
             ':media_id'   => (int)$row['id'],
             ':type'       => SV_JOB_TYPE_LIBRARY_RENAME,
             ':status'     => 'queued',
-            ':created_at' => date('c'),
+            ':created_at' => gmdate('c'),
             ':payload'    => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         ]);
         $enqueued++;
@@ -4924,7 +4924,7 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
 
             $targetExists = is_file($to);
             if ($targetExists) {
-                $targetHash = @hash_file('md5', $to);
+                $targetHash = hash_file('md5', $to);
                 if ($targetHash !== $hash) {
                     throw new RuntimeException('Zielpfad belegt mit anderem Inhalt.');
                 }
@@ -4952,10 +4952,10 @@ function sv_process_library_rename_jobs(PDO $pdo, array $config, int $limit, cal
             foreach ([['import', 'original_path', $from], ['import', 'original_name', basename($from)]] as $metaDef) {
                 $metaCheck->execute([$mediaId, $metaDef[0], $metaDef[1]]);
                 if ($metaCheck->fetchColumn() === false) {
-                    $metaIns->execute([$mediaId, $metaDef[0], $metaDef[1], $metaDef[2], date('c')]);
+                    $metaIns->execute([$mediaId, $metaDef[0], $metaDef[1], $metaDef[2], gmdate('c')]);
                 }
             }
-            $metaIns->execute([$mediaId, 'library_rename', 'rename_at', date('c'), date('c')]);
+            $metaIns->execute([$mediaId, 'library_rename', 'rename_at', gmdate('c'), gmdate('c')]);
 
             $pdo->commit();
 
@@ -5008,13 +5008,13 @@ function sv_compute_sha256_for_media(PDO $pdo, int $mediaId): array
         throw new RuntimeException('Datei nicht lesbar.');
     }
 
-    $hash = @hash_file('sha256', $path);
+    $hash = hash_file('sha256', $path);
     if (!is_string($hash) || $hash === '') {
         throw new RuntimeException('SHA256 konnte nicht berechnet werden.');
     }
 
     sv_set_media_meta_value($pdo, $mediaId, 'hash.sha256', $hash, 'hash_compute');
-    sv_set_media_meta_value($pdo, $mediaId, 'hash.checked_at', date('c'), 'hash_compute');
+    sv_set_media_meta_value($pdo, $mediaId, 'hash.checked_at', gmdate('c'), 'hash_compute');
 
     return [
         'sha256' => $hash,
@@ -5045,13 +5045,13 @@ function sv_check_media_integrity(PDO $pdo, int $mediaId): array
         $errorCode = 'not_readable';
         $errorMessage = 'Datei nicht lesbar.';
     } else {
-        $size = @filesize($path);
+        $size = filesize($path);
         if ($size === false || $size <= 0) {
             $ok = 0;
             $errorCode = 'empty_file';
             $errorMessage = 'Datei ist leer.';
         } elseif ($type === 'image') {
-            $info = @getimagesize($path);
+            $info = getimagesize($path);
             if ($info === false) {
                 $ok = 0;
                 $errorCode = 'invalid_header';
@@ -5061,13 +5061,13 @@ function sv_check_media_integrity(PDO $pdo, int $mediaId): array
                 $errorCode = 'decode_unavailable';
                 $errorMessage = 'Bilddecoder nicht verfügbar.';
             } else {
-                $raw = @file_get_contents($path);
+                $raw = file_get_contents($path);
                 if ($raw === false || $raw === '') {
                     $ok = 0;
                     $errorCode = 'read_failed';
                     $errorMessage = 'Datei konnte nicht gelesen werden.';
                 } else {
-                    $image = @imagecreatefromstring($raw);
+                    $image = imagecreatefromstring($raw);
                     if ($image === false) {
                         $ok = 0;
                         $errorCode = 'decode_failed';
@@ -5083,7 +5083,7 @@ function sv_check_media_integrity(PDO $pdo, int $mediaId): array
     sv_set_media_meta_value($pdo, $mediaId, 'integrity.ok', $ok, 'integrity_check');
     sv_set_media_meta_value($pdo, $mediaId, 'integrity.error_code', $errorCode ?? '', 'integrity_check');
     sv_set_media_meta_value($pdo, $mediaId, 'integrity.error_message', $errorMessage ?? '', 'integrity_check');
-    sv_set_media_meta_value($pdo, $mediaId, 'integrity.checked_at', date('c'), 'integrity_check');
+    sv_set_media_meta_value($pdo, $mediaId, 'integrity.checked_at', gmdate('c'), 'integrity_check');
 
     return [
         'ok'            => $ok,
@@ -5098,12 +5098,12 @@ function sv_write_upscaled_image(string $sourcePath, string $targetPath, float $
         throw new RuntimeException('GD-Image-Decoder fehlt.');
     }
 
-    $raw = @file_get_contents($sourcePath);
+    $raw = file_get_contents($sourcePath);
     if ($raw === false || $raw === '') {
         throw new RuntimeException('Quelldatei konnte nicht gelesen werden.');
     }
 
-    $image = @imagecreatefromstring($raw);
+    $image = imagecreatefromstring($raw);
     if ($image === false) {
         throw new RuntimeException('Quelldatei ist kein decodierbares Bild.');
     }
@@ -5114,7 +5114,7 @@ function sv_write_upscaled_image(string $sourcePath, string $targetPath, float $
     $targetHeight = max(1, (int)round($height * $scale));
 
     $resized = function_exists('imagescale')
-        ? @imagescale($image, $targetWidth, $targetHeight)
+        ? imagescale($image, $targetWidth, $targetHeight)
         : null;
     if ($resized === false || $resized === null) {
         $resized = imagecreatetruecolor($targetWidth, $targetHeight);
@@ -5125,14 +5125,14 @@ function sv_write_upscaled_image(string $sourcePath, string $targetPath, float $
     $targetExt = strtolower(pathinfo($targetPath, PATHINFO_EXTENSION));
     $writeOk = false;
     if (in_array($targetExt, ['jpg', 'jpeg'], true)) {
-        $writeOk = @imagejpeg($resized, $targetPath, 94);
+        $writeOk = imagejpeg($resized, $targetPath, 94);
     } elseif ($targetExt === 'png') {
-        $writeOk = @imagepng($resized, $targetPath, 6);
+        $writeOk = imagepng($resized, $targetPath, 6);
     } elseif ($targetExt === 'webp' && function_exists('imagewebp')) {
-        $writeOk = @imagewebp($resized, $targetPath, 90);
+        $writeOk = imagewebp($resized, $targetPath, 90);
     } else {
         $targetPath = preg_replace('~\\.[^.]+$~', '', $targetPath) . '.png';
-        $writeOk = @imagepng($resized, $targetPath, 6);
+        $writeOk = imagepng($resized, $targetPath, 6);
     }
 
     imagedestroy($resized);
@@ -5142,8 +5142,8 @@ function sv_write_upscaled_image(string $sourcePath, string $targetPath, float $
     }
 
     $finalPath = $targetPath;
-    $hash = @hash_file('md5', $finalPath) ?: null;
-    $filesize = @filesize($finalPath);
+    $hash = hash_file('md5', $finalPath) ?: null;
+    $filesize = filesize($finalPath);
 
     return [
         'path'     => $finalPath,
@@ -5184,7 +5184,7 @@ function sv_create_upscale_derivative(PDO $pdo, array $config, int $mediaId, arr
 
     $derivativesRoot = sv_resolve_derivatives_root($config);
     if (!is_dir($derivativesRoot)) {
-        if (!mkdir($derivativesRoot, 0777, true) && !is_dir($derivativesRoot)) {
+        if (!mkdir($derivativesRoot, 0755, true) && !is_dir($derivativesRoot)) {
             throw new RuntimeException('Derivatives-Verzeichnis konnte nicht angelegt werden.');
         }
     }
@@ -5204,7 +5204,7 @@ function sv_create_upscale_derivative(PDO $pdo, array $config, int $mediaId, arr
 
     $upscaled = sv_write_upscaled_image($sourcePath, $targetPath, $scale);
 
-    $now = date('c');
+    $now = gmdate('c');
     $insert = $pdo->prepare(
         'INSERT INTO media (path, type, source, width, height, duration, fps, filesize, hash, created_at, imported_at, rating, has_nsfw, parent_media_id, status) '
         . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -5376,7 +5376,7 @@ function sv_requeue_job(PDO $pdo, int $jobId, callable $logger): array
     if ($type !== SV_FORGE_JOB_TYPE) {
         throw new InvalidArgumentException('Requeue wird für diesen Job-Typ nicht unterstützt.');
     }
-    if (!in_array($status, ['error', 'done', SV_JOB_STATUS_CANCELED], true)) {
+    if (!in_array($status, ['error', 'done', SV_JOB_STATUS_CANCELLED], true)) {
         throw new InvalidArgumentException('Requeue nur für abgeschlossene oder fehlerhafte Jobs möglich.');
     }
 
@@ -5385,7 +5385,7 @@ function sv_requeue_job(PDO $pdo, int $jobId, callable $logger): array
     );
     $stmt->execute([
         ':status'     => 'queued',
-        ':updated_at' => date('c'),
+        ':updated_at' => gmdate('c'),
         ':id'         => $jobId,
     ]);
 
@@ -5412,7 +5412,7 @@ function sv_log_scan_worker_event(string $message): void
         return;
     }
     $path = $logsRoot . '/scan_worker.err.log';
-    $line = '[' . date('c') . '] ' . $message . PHP_EOL;
+    $line = '[' . gmdate('c') . '] ' . $message . PHP_EOL;
     $result = file_put_contents($path, $line, FILE_APPEND);
     if ($result === false) {
         sv_log_system_error($config, 'scan_worker_log_write_failed', ['path' => $path]);
@@ -5426,22 +5426,22 @@ function sv_fetch_job_status(PDO $pdo, int $jobId): string
     return (string)$stmt->fetchColumn();
 }
 
-function sv_is_job_canceled(PDO $pdo, int $jobId): bool
+function sv_is_job_cancelled(PDO $pdo, int $jobId): bool
 {
-    return sv_fetch_job_status($pdo, $jobId) === SV_JOB_STATUS_CANCELED;
+    return sv_fetch_job_status($pdo, $jobId) === SV_JOB_STATUS_CANCELLED;
 }
 
-function sv_finalize_canceled_job(PDO $pdo, int $jobId, array $responseMeta, callable $logger, string $note): array
+function sv_finalize_cancelled_job(PDO $pdo, int $jobId, array $responseMeta, callable $logger, string $note): array
 {
     $payload = array_merge([
-        'result'      => 'canceled',
-        'canceled_at' => date('c'),
+        'result'      => 'cancelled',
+        'cancelled_at' => gmdate('c'),
     ], $responseMeta);
 
     sv_update_job_status(
         $pdo,
         $jobId,
-        SV_JOB_STATUS_CANCELED,
+        SV_JOB_STATUS_CANCELLED,
         json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         'Canceled by operator'
     );
@@ -5451,7 +5451,7 @@ function sv_finalize_canceled_job(PDO $pdo, int $jobId, array $responseMeta, cal
 
     return [
         'job_id' => $jobId,
-        'status' => SV_JOB_STATUS_CANCELED,
+        'status' => SV_JOB_STATUS_CANCELLED,
         'result' => $payload,
     ];
 }
@@ -5471,13 +5471,13 @@ function sv_cancel_job(PDO $pdo, int $jobId, callable $logger): array
     }
 
     $payload = [
-        'result'      => 'canceled',
-        'canceled_at' => date('c'),
+        'result'      => 'cancelled',
+        'cancelled_at' => gmdate('c'),
     ];
     sv_update_job_status(
         $pdo,
         $jobId,
-        SV_JOB_STATUS_CANCELED,
+        SV_JOB_STATUS_CANCELLED,
         json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         'Canceled by operator'
     );
@@ -5490,7 +5490,7 @@ function sv_cancel_job(PDO $pdo, int $jobId, callable $logger): array
 
     return [
         'job_id'  => $jobId,
-        'status'  => SV_JOB_STATUS_CANCELED,
+        'status'  => SV_JOB_STATUS_CANCELLED,
         'message' => 'Job wurde abgebrochen.',
     ];
 }
@@ -6227,12 +6227,12 @@ function sv_is_i2i_unsuitable(string $path, array $forgePayload = []): array
         return ['unsuitable' => true, 'reason' => 'source image missing'];
     }
 
-    $info = @getimagesize($path);
+    $info = getimagesize($path);
     if ($info === false) {
         return ['unsuitable' => true, 'reason' => 'getimagesize failed'];
     }
 
-    $filesize = @filesize($path);
+    $filesize = filesize($path);
     if ($filesize !== false && $filesize < 8192) {
         return ['unsuitable' => true, 'reason' => 'source image too small/blank'];
     }
@@ -6471,7 +6471,7 @@ function sv_ensure_media_seed(PDO $pdo, int $mediaId, ?string $existingSeed, cal
     }
 
     $seed = (string)random_int(1_000_000, 9_999_999_999);
-    $now  = date('c');
+    $now  = gmdate('c');
     $insert = $pdo->prepare(
         'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
     );
@@ -6508,7 +6508,7 @@ function sv_set_media_meta_value(PDO $pdo, int $mediaId, string $key, $value, st
 {
     $valueStr = is_bool($value) ? ($value ? '1' : '0') : (string)$value;
     $valueStr = trim($valueStr);
-    $now      = date('c');
+    $now      = gmdate('c');
 
     $startedTransaction = false;
     if (!$pdo->inTransaction()) {
@@ -6579,7 +6579,7 @@ function sv_inc_media_meta_int(PDO $pdo, int $mediaId, string $key, int $delta =
             $source,
             $key,
             (string)$next,
-            date('c'),
+            gmdate('c'),
         ]);
         $pdo->commit();
         return $next;
@@ -6728,7 +6728,7 @@ function sv_resolve_negative_prompt(array $mediaRow, array $overrides, array $re
 
 function sv_encode_init_image(string $path): string
 {
-    $binary = @file_get_contents($path);
+    $binary = file_get_contents($path);
     if ($binary === false || $binary === '') {
         throw new RuntimeException('Init-Bild konnte nicht gelesen werden.');
     }
@@ -6741,7 +6741,7 @@ function sv_store_forge_regen_meta(PDO $pdo, int $mediaId, array $info): void
     $insert = $pdo->prepare(
         'INSERT INTO media_meta (media_id, source, meta_key, meta_value, created_at) VALUES (?, ?, ?, ?, ?)'
     );
-    $now = date('c');
+    $now = gmdate('c');
     foreach ($info as $key => $value) {
         $insert->execute([
             $mediaId,
@@ -6783,7 +6783,7 @@ function sv_backup_media_file(array $config, string $path, callable $logger, ?st
     sv_assert_backup_outside_media_roots($config, $backupDir);
     sv_assert_stream_path_allowed($backupDir, $config, 'forge_backup_dir', false, true);
     if (!is_dir($backupDir)) {
-        if (!mkdir($backupDir, 0777, true) && !is_dir($backupDir)) {
+        if (!mkdir($backupDir, 0755, true) && !is_dir($backupDir)) {
             throw new RuntimeException('Backup-Verzeichnis kann nicht angelegt werden.');
         }
     }
@@ -6824,7 +6824,7 @@ function sv_write_forge_image(array $config, string $targetPath, string $binary,
         : (sv_base_dir() . '/TMP');
     sv_assert_stream_path_allowed($tmpDir, $config, 'forge_tmp_dir', false, false, true);
     if (!is_dir($tmpDir)) {
-        mkdir($tmpDir, 0777, true);
+        mkdir($tmpDir, 0755, true);
     }
 
     $targetDir = rtrim(str_replace('\\', '/', dirname($targetPath)), '/');
@@ -6832,7 +6832,7 @@ function sv_write_forge_image(array $config, string $targetPath, string $binary,
         throw new RuntimeException('Ungültiger Zielpfad.');
     }
     if (!is_dir($targetDir)) {
-        if (!mkdir($targetDir, 0777, true) && !is_dir($targetDir)) {
+        if (!mkdir($targetDir, 0755, true) && !is_dir($targetDir)) {
             throw new RuntimeException('Zielverzeichnis kann nicht angelegt werden.');
         }
     }
@@ -6840,7 +6840,7 @@ function sv_write_forge_image(array $config, string $targetPath, string $binary,
     $tmpFile = $tempOutputPath !== null ? $tempOutputPath : sv_build_temp_output_path($tmpDir, $targetPath);
     sv_assert_stream_path_allowed($tmpFile, $config, 'forge_tmp_file', false, false, true);
 
-    $image = @imagecreatefromstring($binary);
+    $image = imagecreatefromstring($binary);
     if ($image === false) {
         throw new RuntimeException('Forge lieferte keine decodierbare Bildantwort.');
     }
@@ -6855,7 +6855,7 @@ function sv_write_forge_image(array $config, string $targetPath, string $binary,
         && $targetWidth > 0 && $targetHeight > 0
         && ($currentWidth !== $targetWidth || $currentHeight !== $targetHeight)
     ) {
-        $resized = @imagescale($image, $targetWidth, $targetHeight);
+        $resized = imagescale($image, $targetWidth, $targetHeight);
         if ($resized !== false) {
             imagedestroy($image);
             $image         = $resized;
@@ -6876,32 +6876,32 @@ function sv_write_forge_image(array $config, string $targetPath, string $binary,
 
     $writeOk = false;
     if ($targetFormat === 'jpeg') {
-        $writeOk = @imagejpeg($image, $tmpFile, 95);
+        $writeOk = imagejpeg($image, $tmpFile, 95);
     } elseif ($targetFormat === 'png') {
-        $writeOk = @imagepng($image, $tmpFile, 6);
+        $writeOk = imagepng($image, $tmpFile, 6);
     } elseif ($targetFormat === 'webp' && function_exists('imagewebp')) {
-        $writeOk = @imagewebp($image, $tmpFile, 88);
+        $writeOk = imagewebp($image, $tmpFile, 88);
     } else {
         $formatPreserved = false;
         $targetFormat    = 'png';
         $outExt          = 'png';
-        $writeOk         = @imagepng($image, $tmpFile, 6);
+        $writeOk         = imagepng($image, $tmpFile, 6);
     }
 
     imagedestroy($image);
 
     if (!$writeOk) {
-        @unlink($tmpFile);
+        unlink($tmpFile);
         throw new RuntimeException('Neue Bilddatei konnte nicht geschrieben werden.');
     }
 
     if (!rename($tmpFile, $targetPath)) {
-        @unlink($tmpFile);
+        unlink($tmpFile);
         throw new RuntimeException('Ersetzen der Zieldatei fehlgeschlagen.');
     }
 
-    $hash     = @hash_file('md5', $targetPath) ?: null;
-    $filesize = @filesize($targetPath) ?: null;
+    $hash     = hash_file('md5', $targetPath) ?: null;
+    $filesize = filesize($targetPath) ?: null;
 
     return [
         'width'             => $currentWidth,
@@ -6939,7 +6939,7 @@ function sv_forge_fetch_options(array $endpoint, callable $logger): ?array
         ],
     ]);
 
-    $responseBody = @file_get_contents($url, false, $context);
+    $responseBody = file_get_contents($url, false, $context);
     if ($responseBody === false) {
         $logger('Forge-Options konnten nicht gelesen werden.');
         return null;
@@ -6967,7 +6967,7 @@ function sv_forge_set_options(array $endpoint, array $options, callable $logger)
         ],
     ]);
 
-    $responseBody = @file_get_contents($url, false, $context);
+    $responseBody = file_get_contents($url, false, $context);
     if ($responseBody === false) {
         $logger('Forge-Options konnten nicht gesetzt werden.');
         return false;
@@ -7032,7 +7032,7 @@ function sv_execute_forge_payload(array $endpoint, array $payload, callable $log
         ],
     ]);
 
-    $responseBody = @file_get_contents($url, false, $context);
+    $responseBody = file_get_contents($url, false, $context);
     $httpCode     = null;
     if (isset($http_response_header) && is_array($http_response_header)) {
         foreach ($http_response_header as $headerLine) {
@@ -7145,7 +7145,7 @@ function sv_call_forge_sync(array $config, array $payload, callable $logger): ar
 
         try {
             $tryResult = sv_execute_forge_payload($endpoint, $attemptPayload, $logger);
-            $imageInfo = @getimagesizefromstring($tryResult['binary']);
+            $imageInfo = getimagesizefromstring($tryResult['binary']);
             $sizeOk    = $imageInfo !== false && (int)$imageInfo[0] > 16 && (int)$imageInfo[1] > 16 && strlen($tryResult['binary']) > 1024;
             if (!$sizeOk) {
                 throw new SvForgeHttpException('Forge lieferte eine fehlerhafte Bildantwort.', $tryResult['log_payload']);
@@ -7231,7 +7231,7 @@ function sv_refresh_media_after_regen(
         $delTags = $pdo->prepare('DELETE FROM media_tags WHERE media_id = ? AND locked = 0');
         $delTags->execute([$mediaId]);
         $writtenTags = sv_store_tags($pdo, $mediaId, $scanTags);
-        $runAt = date('c');
+        $runAt = gmdate('c');
         sv_store_scan_result(
             $pdo,
             $mediaId,
@@ -7268,7 +7268,7 @@ function sv_refresh_media_after_regen(
     } else {
         $logger('Scanner lieferte keine verwertbaren Daten, Tags unverändert.');
         $errorMeta = is_array($scanData['error_meta'] ?? null) ? $scanData['error_meta'] : ['notice' => 'scanner_failed'];
-        $runAt = date('c');
+        $runAt = gmdate('c');
         sv_store_scan_result(
             $pdo,
             $mediaId,
@@ -7295,7 +7295,7 @@ function sv_refresh_media_after_regen(
             SV_FORGE_SCAN_SOURCE_LABEL,
             'scan_stale',
             '1',
-            date('c'),
+            gmdate('c'),
         ]);
         sv_audit_log($pdo, 'scan_stale', 'media', $mediaId, [
             'reason' => 'forge_regen_no_scanner',
@@ -7376,7 +7376,7 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
         $error = sv_forge_limit_error($error);
     }
 
-    $now = date('c');
+    $now = gmdate('c');
     $existingJson = sv_db_exec_retry(static function () use ($pdo, $jobId) {
         $existingStmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
         $existingStmt->execute([':id' => $jobId]);
@@ -7398,14 +7398,14 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
         $responseData = array_merge($responseData, $incomingData);
     }
 
-    $needsTiming = $status === 'running' || in_array($status, ['done', 'error', SV_JOB_STATUS_CANCELED], true);
+    $needsTiming = $status === 'running' || in_array($status, ['done', 'error', SV_JOB_STATUS_CANCELLED], true);
     $shouldWriteResponse = $responseData !== [] || $needsTiming;
 
     if ($shouldWriteResponse) {
         if ($status === 'running' && empty($responseData['started_at'])) {
             $responseData['started_at'] = $now;
         }
-        if (in_array($status, ['done', 'error', SV_JOB_STATUS_CANCELED], true) && empty($responseData['finished_at'])) {
+        if (in_array($status, ['done', 'error', SV_JOB_STATUS_CANCELLED], true) && empty($responseData['finished_at'])) {
             $responseData['finished_at'] = $now;
         }
         $responseJson = json_encode($responseData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -7430,7 +7430,7 @@ function sv_update_job_status(PDO $pdo, int $jobId, string $status, ?string $res
 
 function sv_touch_job_heartbeat(PDO $pdo, int $jobId, ?string $heartbeatAt = null): void
 {
-    $heartbeatAt = $heartbeatAt ?? date('c');
+    $heartbeatAt = $heartbeatAt ?? gmdate('c');
     sv_db_exec_retry(static function () use ($pdo, $jobId, $heartbeatAt): void {
         $stmt = $pdo->prepare('UPDATE jobs SET heartbeat_at = :heartbeat_at, updated_at = :updated_at WHERE id = :id AND status = "running"');
         $stmt->execute([
@@ -7449,7 +7449,7 @@ function sv_claim_job_running(PDO $pdo, int $jobId, array $allowedStatuses, ?arr
         return false;
     }
 
-    $now = date('c');
+    $now = gmdate('c');
     $existingJson = sv_db_exec_retry(static function () use ($pdo, $jobId) {
         $stmt = $pdo->prepare('SELECT forge_response_json FROM jobs WHERE id = :id');
         $stmt->execute([':id' => $jobId]);
@@ -7641,7 +7641,7 @@ function sv_recover_stuck_jobs(PDO $pdo, array $types, int $maxAgeMinutes, ?call
     $stmt->execute($types);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $now   = date('c');
+    $now   = gmdate('c');
     $count = 0;
 
     foreach ($rows as $row) {
@@ -7703,7 +7703,7 @@ function sv_log_forge_paths(array $config, array $paths): void
 
     $result = file_put_contents(
         $runtimeLog,
-        sprintf('[%s] forge_paths %s', date('c'), json_encode($shortened, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
+        sprintf('[%s] forge_paths %s', gmdate('c'), json_encode($shortened, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
         FILE_APPEND
     );
     if ($result === false) {
@@ -7747,7 +7747,7 @@ function sv_log_forge_job_runtime(array $config, int $jobId, int $mediaId, strin
 
     $result = file_put_contents(
         $runtimeLog,
-        sprintf('[%s] forge_job %s', date('c'), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
+        sprintf('[%s] forge_job %s', gmdate('c'), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) . PHP_EOL,
         FILE_APPEND
     );
     if ($result === false) {
@@ -7874,7 +7874,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
 
     $requestedModel = $payload['_sv_requested_model'] ?? ($payload['model'] ?? null);
     $origExt = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-    $origImageInfo = @getimagesize($path);
+    $origImageInfo = getimagesize($path);
     $origWidth = $origImageInfo !== false ? (int)$origImageInfo[0] : (int)($mediaRow['width'] ?? 0);
     $origHeight = $origImageInfo !== false ? (int)$origImageInfo[1] : (int)($mediaRow['height'] ?? 0);
 
@@ -7900,7 +7900,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         ? rtrim(str_replace('\\', '/', (string)$tmpDirRaw), '/')
         : (sv_base_dir() . '/TMP');
     if (!is_dir($tmpDir)) {
-        mkdir($tmpDir, 0777, true);
+        mkdir($tmpDir, 0755, true);
     }
 
     $plannedBackupPath     = sv_build_backup_path($backupDir, $path);
@@ -7972,15 +7972,15 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             $previewPath = $previewDir . '/' . $previewName;
 
             if (!rename($plannedTempOutputPath, $previewPath)) {
-                if (!@copy($plannedTempOutputPath, $previewPath)) {
-                    @unlink($plannedTempOutputPath);
+                if (!copy($plannedTempOutputPath, $previewPath)) {
+                    unlink($plannedTempOutputPath);
                     throw new RuntimeException('Preview-Datei konnte nicht geschrieben werden.');
                 }
-                @unlink($plannedTempOutputPath);
+                unlink($plannedTempOutputPath);
             }
 
-            $previewHash     = @hash_file('md5', $previewPath) ?: null;
-            $previewFilesize = @filesize($previewPath);
+            $previewHash     = hash_file('md5', $previewPath) ?: null;
+            $previewFilesize = filesize($previewPath);
             $previewWidth    = $imageMeta['width'] ?? null;
             $previewHeight   = $imageMeta['height'] ?? null;
             $logger('Preview geschrieben: ' . ($previewPath !== null ? 'yes' : 'no'));
@@ -8046,15 +8046,15 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         $backupPath = sv_backup_media_file($config, $path, $logger, $backupDir, $plannedBackupPath);
 
         if (!rename($plannedTempOutputPath, $path)) {
-            @unlink($plannedTempOutputPath);
+            unlink($plannedTempOutputPath);
             throw new RuntimeException('Ersetzen der Zieldatei fehlgeschlagen.');
         }
         $logger('Replace erfolgreich geschrieben.');
         $replaceApplied = true;
 
         $newFileInfo = $imageMeta;
-        $newFileInfo['hash'] = @hash_file('md5', $path) ?: ($imageMeta['hash'] ?? null);
-        $newFileInfo['filesize'] = @filesize($path) ?: ($imageMeta['filesize'] ?? null);
+        $newFileInfo['hash'] = hash_file('md5', $path) ?: ($imageMeta['hash'] ?? null);
+        $newFileInfo['filesize'] = filesize($path) ?: ($imageMeta['filesize'] ?? null);
 
         $update = $pdo->prepare(
             'UPDATE media SET hash = ?, width = ?, height = ?, filesize = ?, status = "active" WHERE id = ?'
@@ -8078,7 +8078,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
             'backup_path'     => $backupPath,
         ]);
 
-        $outputMtime   = @filemtime($path) ?: time();
+        $outputMtime   = filemtime($path) ?: time();
         $responsePayload = [
             '_sv_worker_pid'        => $workerPid,
             '_sv_worker_started_at' => $workerStart,
@@ -8197,7 +8197,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         sv_update_job_status($pdo, $jobId, 'error', $responseJson, $e->getMessage());
 
         if (is_string($plannedTempOutputPath) && is_file($plannedTempOutputPath)) {
-            @unlink($plannedTempOutputPath);
+            unlink($plannedTempOutputPath);
         }
 
         $restoreOk = false;
@@ -8210,7 +8210,7 @@ function sv_process_single_forge_job(PDO $pdo, array $config, array $jobRow, cal
         }
 
         if ($backupPath !== null && is_file($backupPath) && (!$replaceApplied || $restoreOk)) {
-            @unlink($backupPath);
+            unlink($backupPath);
         }
 
         sv_log_forge_job_runtime($config, $jobId, $mediaId, $regenMode, [
@@ -9145,7 +9145,7 @@ function sv_delete_media_hard(PDO $pdo, array $config, int $mediaId, callable $l
             } else {
                 sv_assert_media_path_allowed($path, $config['paths'] ?? [], $context);
             }
-            if (@unlink($path)) {
+            if (unlink($path)) {
                 $deletedFiles[] = $path;
                 return;
             }
@@ -9173,7 +9173,7 @@ function sv_delete_media_hard(PDO $pdo, array $config, int $mediaId, callable $l
 
     $cacheThumb = sv_base_dir() . '/CACHE/thumbs/video/' . $mediaId . '.jpg';
     if (is_file($cacheThumb)) {
-        if (@unlink($cacheThumb)) {
+        if (unlink($cacheThumb)) {
             $deletedFiles[] = $cacheThumb;
         } else {
             $errors[] = 'Cache-Thumb konnte nicht gelöscht werden: ' . $cacheThumb;
@@ -9426,7 +9426,7 @@ function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, cal
 {
     $repairMode = $mode === 'simple' ? 'simple' : 'report';
     $logFile = sv_prepare_log_file($config, 'consistency', true, 30);
-    $logHandle = @fopen($logFile, 'ab');
+    $logHandle = fopen($logFile, 'ab');
 
     $consistencyLogAvailable = sv_has_consistency_log_table($pdo);
     if (!$consistencyLogAvailable) {
@@ -9440,7 +9440,7 @@ function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, cal
     $logWriter = function (string $message) use ($logHandle, $logLine): void {
         $logLine($message);
         if (is_resource($logHandle)) {
-            fwrite($logHandle, '[' . date('c') . '] ' . $message . PHP_EOL);
+            fwrite($logHandle, '[' . gmdate('c') . '] ' . $message . PHP_EOL);
         }
     };
 
@@ -9467,7 +9467,7 @@ function sv_run_consistency_operation(PDO $pdo, array $config, string $mode, cal
                 $checkName,
                 $severity,
                 $message,
-                date('c'),
+                gmdate('c'),
             ]);
         }
     };
@@ -9650,7 +9650,7 @@ function sv_check_scan_missing_links(PDO $pdo, callable $logFinding): void
 
 function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
 {
-    $allowedStatuses = ['queued', 'pending', 'created', 'running', 'done', 'error', 'canceled'];
+    $allowedStatuses = SV_JOB_STATUSES_ALL;
     $stmt = $pdo->query(
         'SELECT id, type, status, created_at, updated_at, error_message, forge_response_json FROM jobs ORDER BY id DESC LIMIT 500'
     );
@@ -9677,7 +9677,7 @@ function sv_check_job_state_gaps(PDO $pdo, callable $logFinding): void
             $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') ohne created_at');
         }
 
-        if (in_array($status, ['done', 'error', 'canceled'], true) && $updatedAt === '') {
+        if (in_array($status, ['done', 'error', 'cancelled'], true) && $updatedAt === '') {
             $logFinding('job_state_gap', 'warn', 'Job #' . $id . ' (' . $type . ') ohne updated_at');
         }
 
@@ -10053,7 +10053,7 @@ function sv_dashboard_read_runtime_json(string $path, int $maxLen = 160): ?array
         return null;
     }
 
-    $raw = @file_get_contents($path);
+    $raw = file_get_contents($path);
     if ($raw === false || trim($raw) === '') {
         return null;
     }

@@ -41,7 +41,7 @@ Sie bündelt **Import, Katalogisierung, Analyse, Ableitungen und Betrieb** in ei
 ### 3) Daten & Konfiguration
 - `DB/schema.sql` + Migrationen als führende Datenbasis.
 - `CONFIG/config.example.php` als Startpunkt der Instanzkonfiguration.
-- Ergänzende Vorlagen unter `config/*.example.json`.
+- Ergänzende Vorlagen unter `CONFIG/*.example.json`.
 
 ### 4) Integrationen
 - **Ollama**: Lokale LLM-gestützte Metadatenanreicherung.
@@ -153,6 +153,8 @@ kommt es zu sofortigen Fehlern oder zu einem nicht funktionsfähigen Teilsystem.
 2. **Beispielkonfiguration reicht nicht für den Betrieb**
    - Nach der Installation muss mindestens `CONFIG/config.example.php` in `CONFIG/config.php` übernommen und angepasst werden.
    - Ohne produktive Konfigurationsdateien bleibt das System nicht betriebsfähig.
+   - Laufzeit-Fallback auf `config.example.php` ist deaktiviert; ohne `CONFIG/config.php` startet das System nicht.
+   - Ein Override über `/mnt/data/config.php` ist nur mit explizitem Opt-in `SV_ALLOW_MOUNTED_CONFIG=1` aktiv.
 
 3. **Systemabhängigkeiten für Medienverarbeitung müssen installiert sein**
    - Das Doctor-Setup (`src/setup/doctor.js`) meldet fehlende Tools wie `ffmpeg`, `ffprobe` oder `magick` als kritisch.
@@ -164,7 +166,7 @@ kommt es zu sofortigen Fehlern oder zu einem nicht funktionsfähigen Teilsystem.
    - Ist die GD-Erweiterung nicht geladen, bricht `selftest_cli.php` sofort mit `GD nicht verfügbar` ab.
 
 5. **Vidax-Konfiguration und Asset-Manifests müssen vorhanden sein**
-   - Fehlende Vidax-Config (`config/vidax*.json`) oder fehlende Asset-Manifests werden vom Doctor als kritischer Fehler gewertet.
+   - Fehlende Vidax-Config (`CONFIG/vidax*.json`) oder fehlende Asset-Manifests werden vom Doctor als kritischer Fehler gewertet.
    - Auch in diesem Fall endet der Doctor-Lauf mit Exit-Code `20`.
 
 6. **Pfadkonfiguration muss auf existierende, beschreibbare Verzeichnisse zeigen**

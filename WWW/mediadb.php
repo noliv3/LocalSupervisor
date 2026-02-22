@@ -18,6 +18,7 @@ try {
 }
 
 $configWarning = $config['_config_warning'] ?? null;
+$csrfToken = sv_csrf_token();
 $hasInternalAccess = sv_validate_internal_access($config, 'mediadb', false);
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
@@ -25,10 +26,7 @@ if (!in_array($method, ['GET', 'HEAD', 'POST'], true)) {
     sv_security_error(405, 'Method not allowed.');
 }
 if ($method === 'POST' && !$hasInternalAccess) {
-    $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
-    if ($action !== 'vote_set') {
-        sv_security_error(403, 'Forbidden.');
-    }
+    sv_security_error(403, 'Forbidden.');
 }
 
 try {
@@ -46,6 +44,7 @@ $actionMessage = null;
 $actionError = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    sv_require_csrf_token();
     try {
         $action = is_string($_POST['action'] ?? null) ? trim($_POST['action']) : '';
         $mediaId = isset($_POST['media_id']) ? (int)$_POST['media_id'] : 0;
@@ -1000,6 +999,7 @@ function sv_render_media_card(array $row, array $context): void
             <div class="card-actions">
                 <a class="btn btn--primary btn--sm" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
                 <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                     <input type="hidden" name="action" value="vote_set">
                     <input type="hidden" name="media_id" value="<?= $id ?>">
                     <input type="hidden" name="vote_status" value="approved">
@@ -1007,17 +1007,20 @@ function sv_render_media_card(array $row, array $context): void
                 </form>
                 <?php if ($hasInternalAccess): ?>
                     <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="rescan_job">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
                     </form>
                     <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="vote_set">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <input type="hidden" name="vote_status" value="rejected">
                         <button class="btn btn--icon <?= $voteState === 'rejected' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Reject" title="Reject"><?= $iconDown ?></button>
                     </form>
                     <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="checked_toggle">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
@@ -1566,6 +1569,7 @@ $adultToggleHtml = '<div class="header-toggle">'
                                     <div class="table-actions">
                                         <a class="btn btn--secondary btn--sm" href="media_view.php?<?= http_build_query($detailParams) ?>">Details</a>
                                         <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                             <input type="hidden" name="action" value="vote_set">
                                             <input type="hidden" name="media_id" value="<?= $id ?>">
                                             <input type="hidden" name="vote_status" value="approved">
@@ -1573,17 +1577,20 @@ $adultToggleHtml = '<div class="header-toggle">'
                                         </form>
                                         <?php if ($hasInternalAccess): ?>
                                             <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <input type="hidden" name="action" value="rescan_job">
                                                 <input type="hidden" name="media_id" value="<?= $id ?>">
                                                 <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
                                             </form>
                                             <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <input type="hidden" name="action" value="vote_set">
                                                 <input type="hidden" name="media_id" value="<?= $id ?>">
                                                 <input type="hidden" name="vote_status" value="rejected">
                                                 <button class="btn btn--icon <?= $voteState === 'rejected' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Reject" title="Reject"><?= $iconDown ?></button>
                                             </form>
                                             <form method="post" class="inline-form">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                                                 <input type="hidden" name="action" value="checked_toggle">
                                                 <input type="hidden" name="media_id" value="<?= $id ?>">
                                                 <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">

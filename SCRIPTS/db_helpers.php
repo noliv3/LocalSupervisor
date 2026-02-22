@@ -30,7 +30,7 @@ function sv_db_connect(array $config): array
         if ($sqlitePath !== '' && $sqlitePath !== ':memory:' && !str_starts_with($sqlitePath, 'file:')) {
             $dir = dirname($sqlitePath);
             if (!is_dir($dir)) {
-                if (!mkdir($dir, 0777, true) && !is_dir($dir)) {
+                if (!mkdir($dir, 0755, true) && !is_dir($dir)) {
                     throw new RuntimeException('SQLite-Verzeichnis fehlt und konnte nicht angelegt werden: ' . $dir);
                 }
             }
@@ -397,7 +397,7 @@ function sv_db_record_version(PDO $pdo, string $version, string $description): v
     );
     $insert->execute([
         $version,
-        date('c'),
+        gmdate('c'),
         $description,
     ]);
 }

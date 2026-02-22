@@ -195,8 +195,8 @@ if ($type === 'video') {
     }
     $ffmpeg = sv_resolve_ffmpeg_path($config['tools'] ?? []);
     $cacheOk = is_file($cachePath);
-    $srcMTime = (int)@filemtime($path);
-    $cacheMTime = $cacheOk ? (int)@filemtime($cachePath) : 0;
+    $srcMTime = is_file($path) ? (int)filemtime($path) : 0;
+    $cacheMTime = ($cacheOk && is_file($cachePath)) ? (int)filemtime($cachePath) : 0;
     if (!$cacheOk || $srcMTime > $cacheMTime) {
         $logFn = static function (string $msg): void {
             error_log('[thumb.php] ' . $msg);
@@ -222,14 +222,14 @@ if ($finfo !== false) {
     finfo_close($finfo);
 }
 
-$raw = @file_get_contents($path);
+$raw = file_get_contents($path);
 if ($raw === false) {
     http_response_code(500);
     exit;
 }
 
 if (function_exists('imagecreatefromstring')) {
-    $img = @imagecreatefromstring($raw);
+    $img = imagecreatefromstring($raw);
     if ($img !== false) {
         $w = imagesx($img);
         $h = imagesy($img);
