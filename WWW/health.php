@@ -21,51 +21,61 @@ if (is_file($statusPath)) {
     }
 }
 
-$scanWorkerRunning = false;
-$scanWorkerState = 'stopped';
-$scanWorkerStatus = 'stopped';
 $logsRoot = sv_logs_root($config);
-$heartbeatPath = $logsRoot . '/scan_worker_heartbeat.json';
-$lockPath = $logsRoot . '/scan_worker.lock.json';
 $freshnessSeconds = 180;
-$lockFreshnessSeconds = 300;
+$services = ['scan_service', 'forge_service', 'media_service', 'library_rename_service', 'ollama_service', 'scan_worker'];
 
-if (is_file($heartbeatPath)) {
-    $hbRaw = file_get_contents($heartbeatPath);
-    $hb = $hbRaw !== false ? json_decode($hbRaw, true) : null;
-    if (is_array($hb)) {
-        $ts = isset($hb['ts_utc']) ? strtotime((string)$hb['ts_utc']) : false;
-        if ($ts !== false && (time() - $ts) <= $freshnessSeconds) {
-            $scanWorkerRunning = true;
-            $scanWorkerState = (string)($hb['state'] ?? 'running');
-            $scanWorkerStatus = $scanWorkerState === 'running' ? 'busy' : 'alive';
-        } elseif ($ts !== false) {
-            $scanWorkerState = (string)($hb['state'] ?? 'stale');
-            $scanWorkerStatus = 'stale';
+$serviceStates = [];
+$allOk = true;
+$now = time();
+
+foreach ($services as $service) {
+    $heartbeatPath = $logsRoot . '/' . $service . '.heartbeat.json';
+    if ($service === 'scan_worker') {
+        $heartbeatPath = $logsRoot . '/scan_worker_heartbeat.json';
+    }
+
+    $state = 'missing';
+    $status = 'stopped';
+    $running = false;
+    $lastHeartbeatUtc = null;
+
+    if (is_file($heartbeatPath)) {
+        $raw = file_get_contents($heartbeatPath);
+        $hb = $raw !== false ? json_decode($raw, true) : null;
+        if (is_array($hb)) {
+            $lastHeartbeatUtc = is_string($hb['last_heartbeat_utc'] ?? null)
+                ? (string)$hb['last_heartbeat_utc']
+                : (is_string($hb['ts_utc'] ?? null) ? (string)$hb['ts_utc'] : (is_string($hb['ts'] ?? null) ? (string)$hb['ts'] : null));
+            $state = is_string($hb['state'] ?? null) ? (string)$hb['state'] : 'unknown';
+            $ts = is_string($lastHeartbeatUtc) ? strtotime($lastHeartbeatUtc) : false;
+            if ($ts !== false && ($now - (int)$ts) <= $freshnessSeconds) {
+                $running = in_array($state, ['starting', 'running', 'idle', 'error', 'stopped'], true);
+                $status = in_array($state, ['running', 'starting'], true) ? 'busy' : 'alive';
+            } else {
+                $status = 'stale';
+            }
         }
     }
-}
-if (!$scanWorkerRunning && is_file($lockPath)) {
-    $lockRaw = file_get_contents($lockPath);
-    $lock = $lockRaw !== false ? json_decode($lockRaw, true) : null;
-    if (is_array($lock)) {
-        $ts = isset($lock['heartbeat_at']) ? strtotime((string)$lock['heartbeat_at']) : false;
-        if ($ts !== false && (time() - $ts) <= $lockFreshnessSeconds) {
-            $scanWorkerRunning = true;
-            $scanWorkerState = 'lock_fallback';
-            $scanWorkerStatus = 'busy';
-        }
+
+    if (!$running) {
+        $allOk = false;
     }
+
+    $serviceStates[$service] = [
+        'running' => $running,
+        'state' => $state,
+        'status' => $status,
+        'last_heartbeat_utc' => $lastHeartbeatUtc,
+    ];
 }
 
 header('Content-Type: application/json; charset=utf-8');
 http_response_code(200);
 echo json_encode([
-    'ok' => true,
+    'ok' => $allOk,
     'ts' => date('c'),
     'version' => $version,
-    'scan_worker_running' => $scanWorkerRunning,
-    'scan_worker_state' => $scanWorkerState,
-    'scan_worker_status' => $scanWorkerStatus,
-    'scan_worker_freshness_seconds' => $freshnessSeconds,
+    'freshness_seconds' => $freshnessSeconds,
+    'services' => $serviceStates,
 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

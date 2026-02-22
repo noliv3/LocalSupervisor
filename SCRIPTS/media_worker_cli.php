@@ -41,70 +41,33 @@ $writeErrLog = static function (string $message) use ($errLogPath): void {
     }
 };
 
-$lockQuarantine = static function (string $reason) use ($lockPath, $writeErrLog, $config): void {
-    $timestamp = date('Ymd_His');
-    $brokenPath = $lockPath . '.broken.' . $timestamp;
-    if (rename($lockPath, $brokenPath)) {
-        $writeErrLog($reason . ': ' . $lockPath . ' -> ' . $brokenPath);
-        sv_log_system_error($config, 'media_worker_lock_quarantined', ['path' => $lockPath, 'reason' => $reason]);
-        return;
+$pid = (int)getmypid();
+$startedAtUtc = gmdate('c');
+$commandHash = sv_command_hash($argv);
+$lockPayload = sv_lock_payload($pid, $startedAtUtc, $startedAtUtc, $commandHash);
+$lockReason = null;
+$lockHandle = sv_try_acquire_worker_lock($lockPath, $lockPayload, $lockReason);
+if (!is_resource($lockHandle)) {
+    if ($lockReason === 'already_running') {
+        $writeErrLog('Media-Worker bereits aktiv, neuer Start abgebrochen.');
+        exit(0);
     }
-    if (!unlink($lockPath)) {
-        $writeErrLog('Media-Worker Lock konnte nicht entfernt werden (' . $reason . ').');
-        sv_log_system_error($config, 'media_worker_lock_remove_failed', ['path' => $lockPath, 'reason' => $reason]);
-        exit(1);
-    }
-    $writeErrLog($reason . ': ' . $lockPath);
-    sv_log_system_error($config, 'media_worker_lock_removed', ['path' => $lockPath, 'reason' => $reason]);
-};
-
-if (is_file($lockPath)) {
-    $raw = file_get_contents($lockPath);
-    if ($raw === false) {
-        $writeErrLog('Media-Worker Lock konnte nicht gelesen werden.');
-        sv_log_system_error($config, 'media_worker_lock_read_failed', ['path' => $lockPath]);
-        $lockQuarantine('broken_lock_quarantined');
-    } else {
-        $data = json_decode($raw, true);
-        if (!is_array($data)) {
-            $lockQuarantine('broken_lock_quarantined');
-        } else {
-            $heartbeat = isset($data['heartbeat_at']) ? strtotime((string)$data['heartbeat_at']) : false;
-            if ($heartbeat !== false && (time() - $heartbeat) <= 300) {
-                $writeErrLog('Media-Worker bereits aktiv (Lock Heartbeat), neuer Start abgebrochen.');
-                exit(0);
-            }
-            $lockQuarantine('stale_lock_removed');
-        }
-    }
-}
-
-$lockPayload = [
-    'pid' => (int)getmypid(),
-    'started_at' => date('c'),
-    'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
-    'cmdline' => implode(' ', $argv),
-    'heartbeat_at' => date('c'),
-];
-$lockJson = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
-    $writeErrLog('Media-Worker Lock konnte nicht geschrieben werden.');
-    sv_log_system_error($config, 'media_worker_lock_write_failed', ['path' => $lockPath]);
+    $writeErrLog('Media-Worker Lock konnte nicht gesetzt werden: ' . ($lockReason ?? 'unknown'));
+    sv_log_system_error($config, 'media_worker_lock_acquire_failed', ['path' => $lockPath, 'reason' => $lockReason]);
     exit(1);
 }
 
 $lastHeartbeat = 0;
-$updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $lockPath, $config, $writeErrLog): void {
+$updateHeartbeat = static function (bool $force = false) use (&$lockPayload, &$lastHeartbeat, $config, $writeErrLog, $lockHandle): void {
     $now = time();
     if (!$force && ($now - $lastHeartbeat) < 5) {
         return;
     }
     $lastHeartbeat = $now;
-    $lockPayload['heartbeat_at'] = date('c', $now);
-    $lockJson = json_encode($lockPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    if ($lockJson === false || file_put_contents($lockPath, $lockJson, LOCK_EX) === false) {
+    $lockPayload['last_heartbeat_utc'] = gmdate('c', $now);
+    if (!sv_write_worker_lock($lockHandle, $lockPayload)) {
         $writeErrLog('Media-Worker Heartbeat konnte nicht geschrieben werden.');
-        sv_log_system_error($config, 'media_worker_heartbeat_write_failed', ['path' => $lockPath]);
+        sv_log_system_error($config, 'media_worker_heartbeat_write_failed', ['path' => 'media_worker.lock.json']);
         throw new RuntimeException('media_worker_heartbeat_write_failed');
     }
 };
@@ -131,8 +94,5 @@ try {
     fwrite(STDERR, "Worker-Fehler: " . $e->getMessage() . "\n");
     exit(1);
 } finally {
-    if (is_file($lockPath) && !unlink($lockPath)) {
-        $writeErrLog('Media-Worker Lock konnte nicht entfernt werden (finally).');
-        sv_log_system_error($config, 'media_worker_lock_remove_failed_finally', ['path' => $lockPath]);
-    }
+    sv_release_worker_lock($lockHandle);
 }
