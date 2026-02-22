@@ -137,6 +137,22 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1 -Action restart
 - Im Request-Path werden **keine LLM-Aufrufe** ausgeführt.
 - Jobs ohne valides Ergebnis werden in der V1-Heuristik als `completed_no_result` gewertet und nicht als success gezählt.
 
+
+### Interne Admin-UI: Sicherheitsmodell (Browser + Service)
+
+- Interne Browser-UI nutzt eine Session-basierte Admin-Freigabe (`sv_internal_admin`) plus verpflichtendes CSRF-Token.
+- Service-zu-Service-Aufrufe bleiben über `X_INTERNAL_KEY` möglich (kein GET-/Query-Key).
+- Loopback-IP allein gewährt **keinen** Schreibzugriff mehr.
+- `sv_get_client_ip()` vertraut `X-Forwarded-For` nur dann, wenn `REMOTE_ADDR` in `security.trusted_proxies` konfiguriert ist.
+- `_layout.php` stellt den CSRF-Token global in `window.SuperVisor.csrfToken` bereit; `WWW/app.js` sendet diesen bei allen POST-Fetches als `X_CSRF_TOKEN`.
+
+Aktive POST-CSRF-Prüfpunkte:
+- `WWW/index.php` (Dashboard-Aktionen + AJAX-POST)
+- `WWW/mediadb.php` (Media-POST-Aktionen)
+- `WWW/ollama.php` (Ollama-Aktionen)
+- `WWW/internal_ollama.php` (interne Ollama-Aktionen)
+- `WWW/jobs_prune.php` (Job-Prune)
+
 ## Betriebsprinzip in einem Satz
 
 Supervisor trennt **UI**, **Queue**, **Worker** und **Datenhaltung**, damit große Bestände stabil verarbeitet werden können, ohne dass ein einzelnes Modul (z. B. Ollama) das Gesamtsystem dominiert.

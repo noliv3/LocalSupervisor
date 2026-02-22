@@ -20,16 +20,8 @@ $respond = static function (int $code, array $payload): void {
 
 try {
     $config = sv_load_config();
-    $access = sv_internal_access_result($config, 'ollama_internal', ['allow_loopback_bypass' => false]);
-    if (empty($access['ok'])) {
-        $status = $access['status'] ?? 'forbidden';
-        $httpCode = $status === 'config_failed' ? 500 : 403;
-        $respond($httpCode, [
-            'ok' => false,
-            'status' => $status,
-            'reason_code' => $access['reason_code'] ?? 'forbidden',
-        ]);
-    }
+    sv_bootstrap_internal_ui_session($config, 'ollama_internal_ui');
+    sv_require_internal_access($config, 'ollama_internal');
     $pdo = sv_open_pdo_web($config);
 } catch (Throwable $e) {
     $respond(500, ['ok' => false, 'error' => $e->getMessage()]);
