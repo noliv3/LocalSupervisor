@@ -2565,7 +2565,7 @@ function sv_run_scan_path(
             'processed' => $processed,
             'skipped'   => $skipped,
             'errors'    => $errors,
-            'canceled'  => $cancelCheck ? (bool)$cancelCheck() : false,
+            'cancelled'  => $cancelCheck ? (bool)$cancelCheck() : false,
         ];
     }
 
@@ -2593,7 +2593,7 @@ function sv_run_scan_path(
     $skipLog = [];
 
     $stack = [$inputReal];
-    $canceled = false;
+    $cancelled = false;
     while ($stack) {
         $dir = array_pop($stack);
 
@@ -2608,7 +2608,7 @@ function sv_run_scan_path(
 
         foreach ($entries as $entry) {
             if ($cancelCheck && $cancelCheck()) {
-                $canceled = true;
+                $cancelled = true;
                 if ($logger) {
                     $logger('Scan abgebrochen (Cancel-Signal).');
                 }
@@ -2682,7 +2682,7 @@ function sv_run_scan_path(
         'processed' => $processed,
         'skipped'   => $skipped,
         'errors'    => $errors,
-        'canceled'  => $canceled,
+        'cancelled'  => $cancelled,
     ];
 }
 
@@ -2716,12 +2716,12 @@ function sv_rescan_media(
         'path_before'  => $path,
         'path_after'   => $path,
         'error'        => null,
-        'canceled'     => false,
+        'cancelled'     => false,
     ];
 
     if ($cancelCheck && $cancelCheck()) {
-        $resultMeta['error'] = 'canceled';
-        $resultMeta['canceled'] = true;
+        $resultMeta['error'] = 'cancelled';
+        $resultMeta['cancelled'] = true;
         if ($logger) {
             $logger("Media ID {$id}: Rescan abgebrochen (Cancel-Signal).");
         }
@@ -2787,8 +2787,8 @@ function sv_rescan_media(
 
     $scanData  = sv_scan_with_local_scanner($fullPath, $scannerCfg, $logger, $logContext, $pathsCfg);
     if ($cancelCheck && $cancelCheck()) {
-        $resultMeta['error'] = 'canceled';
-        $resultMeta['canceled'] = true;
+        $resultMeta['error'] = 'cancelled';
+        $resultMeta['cancelled'] = true;
         if ($logger) {
             $logger("Media ID {$id}: Rescan abgebrochen (Cancel-Signal nach Scanner-Call).");
         }
@@ -2924,8 +2924,8 @@ function sv_rescan_media(
     $resultMeta['path_after'] = $newPath;
 
     if ($cancelCheck && $cancelCheck()) {
-        $resultMeta['error'] = 'canceled';
-        $resultMeta['canceled'] = true;
+        $resultMeta['error'] = 'cancelled';
+        $resultMeta['cancelled'] = true;
         if ($logger) {
             $logger("Media ID {$id}: Rescan vor Persistenz abgebrochen (Cancel-Signal).");
         }

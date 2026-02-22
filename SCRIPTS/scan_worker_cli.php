@@ -26,7 +26,7 @@ if ($logsRoot === null) {
 
 $lockPath = $logsRoot . '/scan_worker.lock.json';
 $errLogPath = $logsRoot . '/scan_worker.err.log';
-$heartbeatPath = $logsRoot . '/scan_worker_heartbeat.json';
+$heartbeatPath = $logsRoot . '/scan_worker.heartbeat.json';
 
 $writeErrLog = static function (string $message) use ($errLogPath): void {
     $line = '[' . date('c') . '] ' . $message . PHP_EOL;
@@ -39,7 +39,7 @@ $writeErrLog = static function (string $message) use ($errLogPath): void {
 $pid = (int)getmypid();
 $startedAtUtc = gmdate('c');
 $commandHash = sv_command_hash($argv);
-$lockPayload = sv_lock_payload($pid, $startedAtUtc, $startedAtUtc, $commandHash);
+$lockPayload = sv_lock_payload($pid, $startedAtUtc, $startedAtUtc, $commandHash, 'scan_worker');
 $lockReason = null;
 $lockHandle = sv_try_acquire_worker_lock($lockPath, $lockPayload, $lockReason);
 if (!is_resource($lockHandle)) {

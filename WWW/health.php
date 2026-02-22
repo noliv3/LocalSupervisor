@@ -31,10 +31,6 @@ $now = time();
 
 foreach ($services as $service) {
     $heartbeatPath = $logsRoot . '/' . $service . '.heartbeat.json';
-    if ($service === 'scan_worker') {
-        $heartbeatPath = $logsRoot . '/scan_worker_heartbeat.json';
-    }
-
     $state = 'missing';
     $status = 'stopped';
     $running = false;

@@ -824,7 +824,7 @@
             if (['done', 'ok'].includes(normalized)) return 'badge badge--ok';
             if (['error', 'failed'].includes(normalized)) return 'badge badge--error';
             if (['queued', 'running', 'pending'].includes(normalized)) return 'badge badge--info';
-            if (['canceled'].includes(normalized)) return 'badge badge--warn';
+            if (['cancelled'].includes(normalized)) return 'badge badge--warn';
             return 'badge';
         }
 
@@ -862,7 +862,7 @@
                 if (canManage && activeStatuses.includes(status.toLowerCase())) {
                     actionButtons.push(`<button type="button" class="btn btn--xs btn--ghost" data-job-action="cancel" data-job-id="${job.id}">Cancel</button>`);
                 }
-                if (canManage && ['done', 'error', 'canceled'].includes(status.toLowerCase())) {
+                if (canManage && ['done', 'error', 'cancelled'].includes(status.toLowerCase())) {
                     actionButtons.push(`<button type="button" class="btn btn--xs btn--secondary" data-job-action="delete" data-job-id="${job.id}">Delete</button>`);
                 }
 

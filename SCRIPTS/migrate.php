@@ -21,6 +21,7 @@ if (!is_dir($migrationDir)) {
 
 require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/db_helpers.php';
+require_once __DIR__ . '/status.php';
 
 try {
     $config = sv_load_config($baseDir);
@@ -53,7 +54,7 @@ foreach ($migrations as $migration) {
     $version     = $migration['version'];
     $description = $migration['description'] ?? '';
 
-    if (isset($appliedVersions[$version])) {
+    if (sv_db_is_migration_applied($appliedVersions, $migration)) {
         fwrite(STDOUT, "- Übersprungen {$version} (bereits eingetragen)\n");
         continue;
     }
@@ -62,7 +63,7 @@ foreach ($migrations as $migration) {
 
     try {
         $migration['run']($pdo);
-        sv_db_record_version($pdo, $version, $description);
+        sv_db_record_version($pdo, $version, $description, $migration['version_hash'] ?? null);
         sv_audit_log($pdo, 'migration_run', 'db', null, ['version' => $version]);
         fwrite(STDOUT, "OK\n");
     } catch (Throwable $e) {
