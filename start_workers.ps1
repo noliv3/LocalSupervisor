@@ -140,6 +140,100 @@ function Test-WorkerProcessMatches {
     return ($normalizedCmd -like "*$expectedFull*") -or ($normalizedCmd -like "*$expectedLeaf*")
 }
 
+
+function Find-WorkerPidByScript {
+    param([string]$ExpectedScript)
+
+    $expectedFull = (Join-Path $base $ExpectedScript).ToLowerInvariant().Replace('/', '\')
+    $expectedLeaf = [System.IO.Path]::GetFileName($ExpectedScript).ToLowerInvariant()
+
+    try {
+        $candidates = Get-CimInstance Win32_Process -Filter "Name='php.exe' OR Name='php'" -ErrorAction SilentlyContinue
+        if ($null -eq $candidates) {
+            return $null
+        }
+
+        foreach ($procInfo in $candidates) {
+            $cmdLine = [string]($procInfo.CommandLine ?? '')
+            if ([string]::IsNullOrWhiteSpace($cmdLine)) {
+                continue
+            }
+            $normalizedCmd = $cmdLine.ToLowerInvariant()
+            if ($normalizedCmd -notmatch '(^|\s|")php(\.exe)?(\s|$)') {
+                continue
+            }
+            if (($normalizedCmd -like "*$expectedFull*") -or ($normalizedCmd -like "*$expectedLeaf*")) {
+                return [int]$procInfo.ProcessId
+            }
+        }
+    } catch {
+    }
+
+    return $null
+}
+
+function Write-ServiceState {
+    param(
+        [hashtable]$Service,
+        [string]$StatePath,
+        [int]$Pid,
+        [string]$StdoutLog,
+        [string]$StderrLog,
+        [array]$Args
+    )
+
+    $state = [ordered]@{
+        service = $Service.name
+        pid = $Pid
+        started_at = (Get-Date).ToUniversalTime().ToString('o')
+        log_paths = [ordered]@{
+            stdout = $StdoutLog
+            stderr = $StderrLog
+        }
+        script = $Service.script
+        args = $Args
+    }
+    $state | ConvertTo-Json -Depth 6 | Set-Content -Path $StatePath -Encoding UTF8
+}
+
+function Reconcile-ServiceState {
+    param(
+        [hashtable]$Service,
+        [string]$LogsDir
+    )
+
+    $statePath = Join-Path $LogsDir ($Service.name + '.state.json')
+    $stdoutLog = Join-Path $LogsDir ($Service.name + '.out.log')
+    $stderrLog = Join-Path $LogsDir ($Service.name + '.err.log')
+
+    $args = @()
+    if ($phpArgs.Count -gt 0) {
+        $args += $phpArgs
+    }
+    $args += @($Service.script)
+    if ($Service.ContainsKey('args') -and $Service.args -is [System.Array]) {
+        $args += $Service.args
+    }
+
+    $stateData = Get-ServiceState -StatePath $statePath
+    if ($null -ne $stateData -and $null -ne $stateData.pid) {
+        $statePid = [int]$stateData.pid
+        if ($statePid -le 0 -or -not (Test-WorkerProcessMatches -Pid $statePid -ExpectedScript $Service.script)) {
+            Remove-ServiceState -StatePath $statePath
+            Write-Host "Service-State bereinigt: $($Service.name)"
+            $stateData = $null
+        }
+    }
+
+    if ($null -eq $stateData) {
+        $runningPid = Find-WorkerPidByScript -ExpectedScript $Service.script
+        if ($null -ne $runningPid -and $runningPid -gt 0) {
+            Write-ServiceState -Service $Service -StatePath $statePath -Pid $runningPid -StdoutLog $stdoutLog -StderrLog $stderrLog -Args $args
+            Write-Host "Service-State rekonstruiert: $($Service.name) (PID $runningPid)"
+        }
+    }
+}
+
 function Stop-WorkerService {
     param(
         [hashtable]$Service,
@@ -246,18 +340,7 @@ function Start-WorkerService {
 
     $proc = Start-Process -FilePath $phpExe -ArgumentList $args -WorkingDirectory $base -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -WindowStyle Hidden -PassThru
 
-    $state = [ordered]@{
-        service = $Service.name
-        pid = $proc.Id
-        started_at = (Get-Date).ToString('o')
-        log_paths = [ordered]@{
-            stdout = $stdoutLog
-            stderr = $stderrLog
-        }
-        script = $Service.script
-        args = $args
-    }
-    $state | ConvertTo-Json -Depth 6 | Set-Content -Path $statePath -Encoding UTF8
+    Write-ServiceState -Service $Service -StatePath $statePath -Pid $proc.Id -StdoutLog $stdoutLog -StderrLog $stderrLog -Args $args
 
     Write-Host "Service gestartet: $($Service.name) (PID $($proc.Id))"
 }
@@ -274,6 +357,7 @@ $services = @(
 switch ($Action) {
     'start' {
         foreach ($svc in $services) {
+            Reconcile-ServiceState -Service $svc -LogsDir $logsDir
             Start-WorkerService -Service $svc -LogsDir $logsDir
         }
     }
@@ -287,6 +371,7 @@ switch ($Action) {
             Stop-WorkerService -Service $svc -LogsDir $logsDir
         }
         foreach ($svc in $services) {
+            Reconcile-ServiceState -Service $svc -LogsDir $logsDir
             Start-WorkerService -Service $svc -LogsDir $logsDir
         }
     }

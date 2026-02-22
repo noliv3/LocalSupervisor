@@ -99,6 +99,7 @@ powershell -ExecutionPolicy Bypass -File .\start_workers.ps1 -Action restart
 ```
 
 - `start_workers.ps1` startet alle Worker-Services detached via `Start-Process` (inkl. `ollama_service`) und stoppt nur Prozesse mit bestätigtem Commandline-Match.
+- Reconcile vor dem Start: laufender Prozess ohne `*.state.json` wird rekonstruiert, verwaiste `*.state.json` mit toter PID werden bereinigt.
 - `start_workers.ps1` unterstützt `-Action start|stop|restart` und räumt inkonsistente `*.state.json`/PID-Zuordnungen vor einem Neustart auf.
 - `start.ps1` startet nach erfolgreichem Web-Server-Start ebenfalls die Worker-Services über `start_workers.ps1`.
 - `start.ps1` führt beim Start zunächst ein Worker-Reconcile (`stop`) aus und stoppt Worker auch beim Exit/CTRL+C.
@@ -166,6 +167,7 @@ Supervisor trennt **UI**, **Queue**, **Worker** und **Datenhaltung**, damit gro�
 - Statuswerte nutzen zentral `SCRIPTS/status.php` (inkl. einheitlich `cancelled`).
 - Migrationen werden über Versionsname **und** `version_hash` getrackt, damit Renames keine Re-Execution auslösen.
 - Heartbeat-Dateien folgen einheitlich dem Muster `<service>.heartbeat.json`; Health liest nur dieses Format.
+- `WWW/health.php` bewertet optional konfigurierte Services separat; `ok=false` gilt nur bei ungesunden Pflichtdiensten und der Response-Zeitstempel ist UTC (`...Z`).
 
 ## Harte Voraussetzungen & bekannte Stopper
 
