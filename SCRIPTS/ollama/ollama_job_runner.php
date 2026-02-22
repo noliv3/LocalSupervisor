@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../common.php';
 require_once __DIR__ . '/../db_helpers.php';
+require_once __DIR__ . '/../status.php';
 require_once __DIR__ . '/../operations.php';
 require_once __DIR__ . '/../ollama_jobs.php';
 require_once __DIR__ . '/ollama_analyze_image.php';
@@ -116,11 +117,12 @@ function sv_ollama_acquire_analyze_lock(array $config): array
         ];
     }
 
+    $nowUtc = gmdate('c');
     $payload = [
         'pid' => function_exists('getmypid') ? (int)getmypid() : null,
-        'started_at' => date('c'),
-        'host' => function_exists('gethostname') ? (string)gethostname() : 'unknown',
-        'owner' => 'ollama_job_runner',
+        'started_at_utc' => $nowUtc,
+        'last_heartbeat_utc' => $nowUtc,
+        'service' => 'ollama_job_runner',
     ];
     $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($json !== false) {
@@ -137,7 +139,7 @@ function sv_ollama_acquire_analyze_lock(array $config): array
     ];
 }
 
-function sv_ollama_release_analyze_lock(?$handle): void
+function sv_ollama_release_analyze_lock($handle): void
 {
     if (!is_resource($handle)) {
         return;
@@ -211,14 +213,14 @@ function sv_ollama_analyze_cancel_requested(PDO $pdo, int $jobId): bool
     return (int)$value === 1;
 }
 
-function sv_ollama_analyze_mark_canceled(PDO $pdo, int $jobId, array $payload, string $reason): void
+function sv_ollama_analyze_mark_cancelled(PDO $pdo, int $jobId, array $payload, string $reason): void
 {
-    $payload['canceled_at'] = date('c');
+    $payload['cancelled_at'] = date('c');
     $payload['cancel_reason'] = $reason;
     sv_update_job_status(
         $pdo,
         $jobId,
-        SV_JOB_STATUS_CANCELED,
+        SV_JOB_STATUS_CANCELLED,
         json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         $reason
     );
@@ -346,12 +348,12 @@ function sv_process_ollama_analyze_job(PDO $pdo, array $config): array
         }
 
         if (sv_ollama_analyze_cancel_requested($pdo, $jobId)) {
-            sv_ollama_analyze_mark_canceled($pdo, $jobId, [
+            sv_ollama_analyze_mark_cancelled($pdo, $jobId, [
                 'media_id' => $mediaId,
                 'job_type' => SV_JOB_TYPE_OLLAMA_ANALYZE,
             ], 'cancel_requested');
             return [
-                'status' => 'canceled',
+                'status' => 'cancelled',
                 'message' => 'Ollama-Analyze Job abgebrochen.',
                 'job_id' => $jobId,
                 'media_id' => $mediaId,

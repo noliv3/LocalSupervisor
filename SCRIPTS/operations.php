@@ -6,6 +6,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/db_helpers.php';
 require_once __DIR__ . '/logging.php';
+require_once __DIR__ . '/status.php';
 require_once __DIR__ . '/scan_core.php';
 require_once __DIR__ . '/security.php';
 require_once __DIR__ . '/forge_recipes.php';
@@ -32,7 +33,6 @@ const SV_FORGE_MAX_TAGS_PROMPT    = 8;
 const SV_FORGE_SCAN_SOURCE_LABEL  = 'forge_regen_replace';
 const SV_FORGE_WORKER_META_SOURCE = 'forge_worker';
 
-const SV_JOB_STATUS_CANCELLED      = 'cancelled';
 const SV_JOB_STUCK_MINUTES        = 30;
 const SV_JOB_QUEUE_STATUSES       = ['queued', 'pending', 'created'];
 const SV_LIFECYCLE_ACTIVE         = 'active';
@@ -59,7 +59,7 @@ function sv_run_migrations_if_needed(PDO $pdo, array $config, ?callable $logger 
     $appliedNow = [];
     foreach ($migrations as $migration) {
         $version = $migration['version'];
-        if (isset($applied[$version])) {
+        if (sv_db_is_migration_applied($applied, $migration)) {
             continue;
         }
 
@@ -68,7 +68,7 @@ function sv_run_migrations_if_needed(PDO $pdo, array $config, ?callable $logger 
         }
 
         $migration['run']($pdo);
-        sv_db_record_version($pdo, $version, $migration['description'] ?? '');
+        sv_db_record_version($pdo, $version, $migration['description'] ?? '', $migration['version_hash'] ?? null);
         sv_audit_log($pdo, 'migration_run', 'db', null, ['version' => $version]);
         $appliedNow[] = $version;
 
@@ -577,12 +577,19 @@ function sv_command_hash(array $argv): string
     return hash('sha256', implode("\0", $parts));
 }
 
-function sv_lock_payload(int $pid, string $startedAtUtc, string $lastHeartbeatUtc, string $commandHash): array
+function sv_lock_payload(
+    int $pid,
+    string $startedAtUtc,
+    string $lastHeartbeatUtc,
+    string $commandHash,
+    string $service = 'unknown'
+): array
 {
     return [
         'pid' => $pid,
         'started_at_utc' => $startedAtUtc,
         'last_heartbeat_utc' => $lastHeartbeatUtc,
+        'service' => $service,
         'command_hash' => $commandHash,
     ];
 }
@@ -662,7 +669,7 @@ function sv_write_worker_heartbeat(string $heartbeatPath, string $service, int $
         'service' => $service,
         'pid' => $pid,
         'state' => $state,
-        'ts_utc' => $ts,
+        'started_at_utc' => $ts,
         'last_heartbeat_utc' => $ts,
     ], $extra);
     $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

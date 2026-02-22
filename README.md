@@ -163,6 +163,9 @@ Supervisor trennt **UI**, **Queue**, **Worker** und **Datenhaltung**, damit gro�
 - Keine Secrets oder Medieninhalte in Logs/DB protokollieren.
 - Schemaänderungen nur über Migrationen.
 - Worker arbeiten mit Locking, Heartbeat und Recovery für hängende Jobs.
+- Statuswerte nutzen zentral `SCRIPTS/status.php` (inkl. einheitlich `cancelled`).
+- Migrationen werden über Versionsname **und** `version_hash` getrackt, damit Renames keine Re-Execution auslösen.
+- Heartbeat-Dateien folgen einheitlich dem Muster `<service>.heartbeat.json`; Health liest nur dieses Format.
 
 ## Harte Voraussetzungen & bekannte Stopper
 

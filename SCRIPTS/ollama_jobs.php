@@ -1168,7 +1168,7 @@ function sv_ollama_runtime_dir(array $config): string
 
 function sv_ollama_worker_heartbeat_path(array $config): string
 {
-    return sv_ollama_runtime_dir($config) . DIRECTORY_SEPARATOR . 'ollama_worker_heartbeat.json';
+    return sv_ollama_runtime_dir($config) . DIRECTORY_SEPARATOR . 'ollama_worker.heartbeat.json';
 }
 
 function sv_ollama_global_runtime_status_path(array $config): string
@@ -2412,7 +2412,7 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, boo
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $blocked = [];
-    $canceledSet = 0;
+    $cancelledSet = 0;
     $deleted = 0;
     $force = (bool)$force;
     $now = date('c');
@@ -2430,7 +2430,7 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, boo
                     'last_error_code' => 'forced_delete',
                     'error_message' => 'forced_delete',
                 ], true);
-                $canceledSet++;
+                $cancelledSet++;
             }
             continue;
         }
@@ -2439,7 +2439,7 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, boo
                 $blocked[] = $jobId;
             } else {
                 sv_ollama_request_cancel($pdo, $jobId);
-                $canceledSet++;
+                $cancelledSet++;
                 $blocked[] = $jobId;
             }
             continue;
@@ -2454,7 +2454,7 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, boo
         return [
             'deleted' => 0,
             'blocked' => $blocked,
-            'cancel_requested_set' => $canceledSet,
+            'cancel_requested_set' => $cancelledSet,
         ];
     }
 
@@ -2483,7 +2483,7 @@ function sv_ollama_delete_jobs(PDO $pdo, int $mediaId, ?string $mode = null, boo
     return [
         'deleted' => $deleted,
         'blocked' => [],
-        'cancel_requested_set' => $canceledSet,
+        'cancel_requested_set' => $cancelledSet,
     ];
 }
 

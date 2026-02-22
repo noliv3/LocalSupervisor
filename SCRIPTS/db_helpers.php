@@ -240,7 +240,7 @@ function sv_db_expected_schema(): array
         'collections' => ['id', 'name', 'description', 'created_at'],
         'collection_media' => ['collection_id', 'media_id'],
         'import_log' => ['id', 'path', 'status', 'message', 'created_at'],
-        'schema_migrations' => ['id', 'version', 'applied_at', 'description'],
+        'schema_migrations' => ['id', 'version', 'applied_at', 'description', 'version_hash'],
         'consistency_log' => ['id', 'check_name', 'severity', 'message', 'created_at'],
         'audit_log' => ['id', 'action', 'entity_type', 'entity_id', 'details_json', 'actor_ip', 'actor_key', 'created_at'],
         'media_meta' => ['id', 'media_id', 'source', 'meta_key', 'meta_value', 'created_at'],
@@ -323,6 +323,20 @@ function sv_db_list_columns(PDO $pdo, string $driver, string $table): array
     }, $rows);
 }
 
+
+
+function sv_db_migration_hash(string $filePath, array $migration): string
+{
+    $version = (string)($migration['version'] ?? '');
+    $description = (string)($migration['description'] ?? '');
+    $contents = @file_get_contents($filePath);
+    if (!is_string($contents)) {
+        $contents = $version . "\n" . $description;
+    }
+
+    return hash('sha256', $version . "\n" . $description . "\n" . $contents);
+}
+
 function sv_db_ensure_schema_migrations(PDO $pdo): void
 {
     $pdo->exec(
@@ -331,18 +345,32 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     version TEXT NOT NULL UNIQUE,
     applied_at TEXT NOT NULL,
-    description TEXT
+    description TEXT,
+    version_hash TEXT
 );
 SQL
     );
+
+    try {
+        $pdo->exec('ALTER TABLE schema_migrations ADD COLUMN version_hash TEXT');
+    } catch (Throwable $e) {
+        // Column may already exist.
+    }
 }
 
 function sv_db_load_applied_versions(PDO $pdo): array
 {
-    $stmt = $pdo->query('SELECT version FROM schema_migrations');
+    $stmt = $pdo->query('SELECT version, version_hash FROM schema_migrations');
     $versions = [];
-    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN, 0) as $version) {
-        $versions[(string)$version] = true;
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $version = (string)($row['version'] ?? '');
+        if ($version === '') {
+            continue;
+        }
+        $versions[$version] = [
+            'version' => $version,
+            'version_hash' => is_string($row['version_hash'] ?? null) ? (string)$row['version_hash'] : null,
+        ];
     }
     return $versions;
 }
@@ -378,26 +406,68 @@ function sv_db_load_migrations(string $migrationDir): array
             exit(1);
         }
 
+        $migration['file_path'] = $file;
+        $migration['version_hash'] = sv_db_migration_hash($file, $migration);
         $migrations[] = $migration;
     }
 
     return $migrations;
 }
 
-function sv_db_record_version(PDO $pdo, string $version, string $description): void
+function sv_db_record_version(PDO $pdo, string $version, string $description, ?string $versionHash = null): void
 {
-    $stmt = $pdo->prepare('SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1');
+    $stmt = $pdo->prepare('SELECT version_hash FROM schema_migrations WHERE version = ? LIMIT 1');
     $stmt->execute([$version]);
-    if ($stmt->fetchColumn() !== false) {
+    $existingHash = $stmt->fetchColumn();
+    if ($existingHash !== false) {
+        if (($versionHash ?? '') !== '' && (!is_string($existingHash) || trim((string)$existingHash) === '')) {
+            $update = $pdo->prepare('UPDATE schema_migrations SET version_hash = ? WHERE version = ?');
+            $update->execute([$versionHash, $version]);
+        }
         return;
     }
 
     $insert = $pdo->prepare(
-        'INSERT INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)'
+        'INSERT INTO schema_migrations (version, applied_at, description, version_hash) VALUES (?, ?, ?, ?)'
     );
     $insert->execute([
         $version,
         gmdate('c'),
         $description,
+        $versionHash,
     ]);
+}
+
+
+function sv_db_is_migration_applied(array $applied, array $migration): bool
+{
+    $version = (string)($migration['version'] ?? '');
+    $currentHash = is_string($migration['version_hash'] ?? null) ? trim((string)$migration['version_hash']) : '';
+
+    if ($version !== '' && isset($applied[$version])) {
+        $existing = is_array($applied[$version]) ? $applied[$version] : ['version_hash' => null];
+        $existingHash = is_string($existing['version_hash'] ?? null) ? trim((string)$existing['version_hash']) : '';
+
+        if ($existingHash !== '' && $currentHash !== '') {
+            return hash_equals($existingHash, $currentHash);
+        }
+
+        return true;
+    }
+
+    if ($currentHash === '') {
+        return false;
+    }
+
+    foreach ($applied as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $existingHash = is_string($row['version_hash'] ?? null) ? trim((string)$row['version_hash']) : '';
+        if ($existingHash !== '' && hash_equals($existingHash, $currentHash)) {
+            return true;
+        }
+    }
+
+    return false;
 }
