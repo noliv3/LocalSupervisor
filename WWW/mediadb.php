@@ -749,6 +749,10 @@ function sv_tab_active(array $current, array $overrides): bool
 
 function sv_render_media_card(array $row, array $context): void
 {
+    $csrfToken = (string)($context['csrfToken'] ?? '');
+    $isDeleted = (bool)($isDeleted ?? false);
+    $isActive = (bool)($isActive ?? true);
+
     $id      = (int)$row['id'];
     $path    = (string)$row['path'];
     $pathLabel = sv_safe_path_label($path);
@@ -1000,7 +1004,7 @@ function sv_render_media_card(array $row, array $context): void
             <div class="card-actions">
                 <a class="btn btn--primary btn--sm" href="<?= htmlspecialchars($streamUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" target="_blank" rel="noopener">Original</a>
                 <form method="post" class="inline-form">
-    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars((string)$csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                     <input type="hidden" name="action" value="vote_set">
                     <input type="hidden" name="media_id" value="<?= $id ?>">
                     <input type="hidden" name="vote_status" value="approved">
@@ -1008,20 +1012,20 @@ function sv_render_media_card(array $row, array $context): void
                 </form>
                 <?php if ($hasInternalAccess): ?>
                     <form method="post" class="inline-form">
-    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars((string)$csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="rescan_job">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <button class="btn btn--icon btn--secondary" type="submit" aria-label="Tag-Rescan" title="Tag-Rescan"><?= $iconRescan ?></button>
                     </form>
                     <form method="post" class="inline-form">
-    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars((string)$csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="vote_set">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <input type="hidden" name="vote_status" value="rejected">
                         <button class="btn btn--icon <?= $voteState === 'rejected' ? 'btn--primary' : 'btn--secondary' ?>" type="submit" aria-label="Reject" title="Reject"><?= $iconDown ?></button>
                     </form>
                     <form method="post" class="inline-form">
-    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars((string)$csrfToken, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="checked_toggle">
                         <input type="hidden" name="media_id" value="<?= $id ?>">
                         <input type="hidden" name="checked_value" value="<?= $checkedFlag ? '0' : '1' ?>">
@@ -1422,6 +1426,7 @@ $adultToggleHtml = '<div class="header-toggle">'
         'pdo' => $pdo,
         'config' => $config,
         'hasInternalAccess' => $hasInternalAccess,
+        'csrfToken' => $csrfToken,
     ];
     ?>
     <?php if ($featureRows !== []): ?>
