@@ -211,7 +211,11 @@ class ProcessManager {
     }
 
     if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', `${pid}`, '/T', '/F']);
+      spawnSync('taskkill', ['/PID', `${pid}`, '/T']);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (this.isProcessAlive(pid)) {
+        spawnSync('taskkill', ['/PID', `${pid}`, '/T', '/F']);
+      }
     } else {
       try {
         process.kill(pid, 'SIGTERM');
