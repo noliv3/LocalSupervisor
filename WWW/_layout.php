@@ -36,7 +36,7 @@ function sv_ui_header(string $title, string $activeNav, ?string $headerActionsHt
             </nav>
             <?php if ($headerActionsHtml): ?>
                 <div class="app-header__actions">
-                    <?= htmlspecialchars($headerActionsHtml, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>
+                    <?= $headerActionsHtml ?>
                 </div>
             <?php endif; ?>
         </div>
