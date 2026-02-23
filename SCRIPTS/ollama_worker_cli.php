@@ -156,15 +156,25 @@ $updateLockHeartbeat = static function (bool $force = false) use (&$lockPayload,
         sv_log_system_error($config, 'ollama_worker_lock_handle_invalid', []);
         throw new RuntimeException('ollama_worker_lock_handle_invalid');
     }
-    ftruncate($lockHandle, 0);
-    rewind($lockHandle);
-    $written = fwrite($lockHandle, $encoded);
-    if ($written === false) {
-        $writeErrLog('Ollama-Worker Heartbeat konnte nicht geschrieben werden.');
-        sv_log_system_error($config, 'ollama_worker_heartbeat_write_failed', []);
-        throw new RuntimeException('ollama_worker_heartbeat_write_failed');
+    if (!flock($lockHandle, LOCK_EX)) {
+        $writeErrLog('Ollama-Worker Lock konnte für Heartbeat nicht exklusiv gesetzt werden.');
+        sv_log_system_error($config, 'ollama_worker_heartbeat_lock_failed', []);
+        throw new RuntimeException('ollama_worker_heartbeat_lock_failed');
     }
-    fflush($lockHandle);
+    try {
+        ftruncate($lockHandle, 0);
+        rewind($lockHandle);
+        $written = fwrite($lockHandle, $encoded);
+        if ($written === false) {
+            $writeErrLog('Ollama-Worker Heartbeat konnte nicht geschrieben werden.');
+            sv_log_system_error($config, 'ollama_worker_heartbeat_write_failed', []);
+            throw new RuntimeException('ollama_worker_heartbeat_write_failed');
+        }
+        fflush($lockHandle);
+    } finally {
+        flock($lockHandle, LOCK_UN);
+        flock($lockHandle, LOCK_EX);
+    }
 };
 
 
