@@ -108,11 +108,40 @@ if ($action === 'status') {
     $currentPid = function_exists('getmypid') ? (int)getmypid() : null;
     $workerState = sv_ollama_worker_running_state($config, $currentPid, 180);
 
+    $jobsStmt = $pdo->prepare(
+        'SELECT id, media_id, type, status, progress_bits, progress_bits_total, heartbeat_at, last_error_code, payload_json FROM jobs WHERE type IN (' . $placeholders . ') ORDER BY id DESC LIMIT 100'
+    );
+    $jobsStmt->execute($jobTypes);
+    $jobs = [];
+    foreach ($jobsStmt->fetchAll(PDO::FETCH_ASSOC) as $jobRow) {
+        $payload = [];
+        $payloadRaw = $jobRow['payload_json'] ?? null;
+        if (is_string($payloadRaw) && trim($payloadRaw) !== '') {
+            $decoded = json_decode($payloadRaw, true);
+            if (is_array($decoded)) {
+                $payload = $decoded;
+            }
+        }
+        $jobs[] = [
+            'id' => isset($jobRow['id']) ? (int)$jobRow['id'] : 0,
+            'media_id' => isset($jobRow['media_id']) ? (int)$jobRow['media_id'] : null,
+            'type' => $jobRow['type'] ?? null,
+            'status' => $jobRow['status'] ?? null,
+            'progress_bits' => isset($jobRow['progress_bits']) ? (int)$jobRow['progress_bits'] : 0,
+            'progress_bits_total' => isset($jobRow['progress_bits_total']) ? (int)$jobRow['progress_bits_total'] : 0,
+            'heartbeat_at' => $jobRow['heartbeat_at'] ?? null,
+            'last_error_code' => $jobRow['last_error_code'] ?? null,
+            'model' => is_string($payload['model'] ?? null) ? $payload['model'] : null,
+            'stage_version' => is_string($payload['stage_version'] ?? null) ? $payload['stage_version'] : null,
+        ];
+    }
+
     $respond(200, [
         'ok' => true,
         'counts' => $counts,
         'mode_counts' => $modeCounts,
         'last_errors' => $errors,
+        'jobs' => $jobs,
         'worker_running' => !empty($workerState['running']),
         'worker_reason_code' => $workerState['reason_code'] ?? null,
         'worker_source' => $workerState['source'] ?? null,

@@ -1456,19 +1456,88 @@
         }
 
         function pollJobs() {
-            const rows = Array.from(root.querySelectorAll('tr[data-job-id]'));
-            if (rows.length === 0) return Promise.resolve();
-            return rows.reduce((chain, row) => chain.then(() => {
-                const jobId = row.dataset.jobId;
-                if (!jobId) return null;
-                return postAction({ action: 'job_status', job_id: jobId })
-                    .then((data) => {
-                        if (data && data.ok && data.job) {
-                            updateJobRow(row, data.job);
+            return postAction({ action: 'status', details: 1 })
+                .then((data) => {
+                    if (!data || !data.ok) {
+                        throw new Error(formatApiError(data, 'Ollama-Jobs konnten nicht geladen werden.'));
+                    }
+                    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+                    const table = root.querySelector('[data-ollama-jobs]');
+                    const tbody = table ? table.querySelector('tbody') : null;
+                    if (!tbody) return;
+                    tbody.innerHTML = '';
+
+                    jobs.forEach((job) => {
+                        const tr = document.createElement('tr');
+                        tr.dataset.jobId = String(job.id || '');
+
+                        const status = String(job.status || '');
+                        const progressBits = Number(job.progress_bits || 0);
+                        const progressTotal = Number(job.progress_bits_total || 0);
+                        const heartbeatAt = String(job.heartbeat_at || '');
+                        const lastError = String(job.last_error_code || '');
+                        const model = String(job.model || '');
+                        const stage = String(job.stage_version || '');
+
+                        const statusTd = document.createElement('td');
+                        statusTd.setAttribute('data-field', 'status');
+                        statusTd.className = `status-badge ${statusClass(status)}`;
+                        statusTd.textContent = status || '–';
+
+                        const progressTd = document.createElement('td');
+                        progressTd.setAttribute('data-field', 'progress');
+                        const percent = progressTotal > 0 ? Math.round((progressBits / progressTotal) * 100) : 0;
+                        progressTd.textContent = `${progressBits}/${progressTotal}${progressTotal > 0 ? ` (${percent}%)` : ''}`;
+
+                        const heartbeatTd = document.createElement('td');
+                        heartbeatTd.setAttribute('data-field', 'heartbeat');
+                        heartbeatTd.textContent = heartbeatAt || '–';
+
+                        const errorTd = document.createElement('td');
+                        errorTd.setAttribute('data-field', 'error');
+                        errorTd.textContent = lastError || '–';
+
+                        const modelTd = document.createElement('td');
+                        modelTd.setAttribute('data-field', 'model');
+                        modelTd.textContent = model || '–';
+
+                        const stageTd = document.createElement('td');
+                        stageTd.setAttribute('data-field', 'stage');
+                        stageTd.textContent = stage || '–';
+
+                        const actionsTd = document.createElement('td');
+                        if (status === 'queued' || status === 'pending' || status === 'running') {
+                            const btn = document.createElement('button');
+                            btn.type = 'button';
+                            btn.className = 'btn btn--xs btn--ghost';
+                            btn.dataset.action = 'cancel';
+                            btn.dataset.jobId = String(job.id || '');
+                            btn.textContent = 'Cancel';
+                            actionsTd.appendChild(btn);
                         }
-                    })
-                    .catch(() => {});
-            }), Promise.resolve()).finally(() => applySort());
+
+
+                        const idTd = document.createElement('td');
+                        idTd.textContent = String(job.id || '');
+
+                        tr.appendChild(idTd);
+                        tr.appendChild(statusTd);
+                        tr.appendChild(progressTd);
+                        tr.appendChild(heartbeatTd);
+                        tr.appendChild(errorTd);
+                        tr.appendChild(modelTd);
+                        tr.appendChild(stageTd);
+                        tr.appendChild(actionsTd);
+
+                        tbody.appendChild(tr);
+                        updateJobRow(tr, job);
+                    });
+
+                    applySort();
+                })
+                .catch(() => {
+                    applySort();
+                });
         }
 
         function handleActionClick(event) {
