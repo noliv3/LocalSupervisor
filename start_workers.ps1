@@ -154,7 +154,10 @@ function Find-WorkerPidByScript {
         }
 
         foreach ($procInfo in $candidates) {
-            $cmdLine = [string]($procInfo.CommandLine ?? '')
+            $cmdLine = ''
+            if ($null -ne $procInfo -and $null -ne $procInfo.CommandLine) {
+                $cmdLine = [string]$procInfo.CommandLine
+            }
             if ([string]::IsNullOrWhiteSpace($cmdLine)) {
                 continue
             }
